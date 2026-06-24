@@ -26,6 +26,8 @@ subtle = "2"
 # Sérialisation des enveloppes chiffrées.
 serde = { version = "1", features = ["derive"] }
 base64 = "0.22"
+# Encodage base32 lisible de la Secret Key (Emergency Kit).
+data-encoding = "2"
 thiserror = "2"
 
 [dev-dependencies]
