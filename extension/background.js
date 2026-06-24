@@ -140,6 +140,10 @@ function requireSession() {
 async function fillActiveTab(item) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) throw new Error("No active tab to fill.");
+  // Browser-internal pages (chrome://, the Web Store, etc.) can't be scripted.
+  if (!/^https?:\/\//i.test(tab.url || "")) {
+    throw new Error("Open a website to fill credentials — this page can't be filled.");
+  }
   const results = await chrome.scripting.executeScript({
     target: { tabId: tab.id, allFrames: true },
     args: [{ username: item.username || "", password: item.password || "" }],
