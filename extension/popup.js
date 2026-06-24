@@ -4,6 +4,9 @@
 
 import { domainOf, matchesSite } from "./lib/match.js";
 import { generatePassword } from "./lib/generator.js";
+import { initTheme } from "./lib/theme.js";
+
+initTheme(); // apply dark/light before first paint
 
 const app = document.getElementById("app");
 
@@ -40,6 +43,23 @@ async function copyText(text, label) {
   } catch {
     toast("Copy failed");
   }
+}
+
+const IC_CHECK =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m5 13 4 4L19 7"/></svg>';
+
+// Momentarily swap an action button's icon to a green check (copy feedback).
+function flashCheck(btn) {
+  if (!btn || btn.dataset.flashing) return;
+  const orig = btn.innerHTML;
+  btn.dataset.flashing = "1";
+  btn.innerHTML = IC_CHECK;
+  btn.classList.add("ok");
+  setTimeout(() => {
+    btn.innerHTML = orig;
+    btn.classList.remove("ok");
+    delete btn.dataset.flashing;
+  }, 900);
 }
 
 const ICON = {
@@ -186,16 +206,21 @@ function wireRows() {
         }
         return false;
       };
-      if (act === "user") return copyText(item.username, "Username");
+      if (act === "user") {
+        copyText(item.username, "Username");
+        return flashCheck(btn);
+      }
       if (act === "pass") {
         const r = await send({ type: "REVEAL", id, field: "password" });
         if (relocked(r)) return;
-        return r.ok ? copyText(r.value, "Password") : toast(r.error || "Error");
+        if (r.ok) { copyText(r.value, "Password"); flashCheck(btn); } else toast(r.error || "Error");
+        return;
       }
       if (act === "card") {
         const r = await send({ type: "REVEAL", id, field: "cardNumber" });
         if (relocked(r)) return;
-        return r.ok ? copyText(r.value, "Card number") : toast(r.error || "Error");
+        if (r.ok) { copyText(r.value, "Card number"); flashCheck(btn); } else toast(r.error || "Error");
+        return;
       }
       if (act === "fill") {
         const r = await send({ type: "FILL", id });
@@ -352,9 +377,11 @@ async function showDetail(id) {
   app.querySelectorAll(".dfield").forEach((f) => {
     const text = f.querySelector(".dtext");
     const value = text?.dataset.value || "";
-    f.querySelector("[data-copy]")?.addEventListener("click", () =>
-      copyText(value, f.querySelector(".dlabel").textContent)
-    );
+    const copyBtn = f.querySelector("[data-copy]");
+    copyBtn?.addEventListener("click", () => {
+      copyText(value, f.querySelector(".dlabel").textContent);
+      flashCheck(copyBtn);
+    });
     f.querySelector("[data-open]")?.addEventListener("click", () => {
       const url = /^https?:\/\//i.test(value) ? value : `https://${value}`;
       chrome.tabs.create({ url });
