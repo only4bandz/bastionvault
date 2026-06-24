@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>🔐 Coffre zero-knowledge — démo WASM</title>
+  <style>
+    :root { --bg:#070b12; --panel:#0e151f; --line:#1d2a3a; --txt:#cfe0f0; --dim:#6c8199;
+            --accent:#37e0a0; --warn:#ffb454; --err:#ff5c6c; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--bg); color:var(--txt);
+           font-family:ui-monospace,"Share Tech Mono",Menlo,Consolas,monospace; line-height:1.5; }
+    header { padding:18px 24px; border-bottom:1px solid var(--line); }
+    h1 { font-size:18px; margin:0; letter-spacing:1px; }
+    .sub { color:var(--dim); font-size:12px; }
+    main { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:20px; max-width:1100px; margin:0 auto; }
+    .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
+    .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:1px; color:var(--accent); margin:0 0 12px; }
+    .server h2 { color:var(--warn); }
+    label { display:block; font-size:11px; color:var(--dim); margin:10px 0 4px; }
+    input { width:100%; background:#060a10; border:1px solid var(--line); color:var(--txt);
+            padding:8px 10px; border-radius:6px; font:inherit; }
+    button { background:transparent; border:1px solid var(--accent); color:var(--accent);
+             padding:8px 14px; border-radius:6px; font:inherit; cursor:pointer; margin-top:10px; }
+    button:hover { background:rgba(55,224,160,.1); }
+    button:disabled { opacity:.4; cursor:not-allowed; }
+    pre { background:#060a10; border:1px solid var(--line); border-radius:6px; padding:10px;
+          font-size:11px; white-space:pre-wrap; word-break:break-all; max-height:230px; overflow:auto; color:var(--dim); }
+    .ok { color:var(--accent); } .err { color:var(--err); } .warn { color:var(--warn); }
+    .row { display:flex; gap:8px; } .row > * { flex:1; }
+    .pill { display:inline-block; font-size:10px; padding:2px 8px; border:1px solid var(--line); border-radius:20px; color:var(--dim); }
+    .hint { font-size:11px; color:var(--dim); margin-top:6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🔐 COFFRE ZERO-KNOWLEDGE <span class="pill">démo · Rust → WASM</span></h1>
+    <div class="sub">Tout le chiffrement tourne dans CE navigateur (crypto-core compilé en WebAssembly). Le « serveur » à droite ne voit que des blobs chiffrés.</div>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>1 · Compte</h2>
+      <label>Mot de passe maître</label>
+      <input id="reg-pw" type="password" value="correct horse battery staple" />
+      <button id="btn-register">Créer le coffre</button>
+      <div class="hint">Argon2id 64 Mio — la création prend ~1 s dans le navigateur.</div>
+      <div id="secret-out"></div>
+
+      <h2 style="margin-top:20px">2 · Déverrouiller (autre appareil)</h2>
+      <label>Mot de passe maître</label>
+      <input id="unlock-pw" type="password" />
+      <label>Secret Key</label>
+      <input id="unlock-sk" placeholder="A1-XXXXX-XXXXX-…" />
+      <button id="btn-unlock" disabled>Déverrouiller depuis le « serveur »</button>
+      <div id="unlock-out"></div>
+    </section>
+
+    <section class="panel">
+      <h2>3 · Items</h2>
+      <div class="row">
+        <div><label>Nom (id)</label><input id="item-id" value="github.com" /></div>
+        <div><label>Secret</label><input id="item-val" value="hunter2" /></div>
+      </div>
+      <button id="btn-add" disabled>Chiffrer & enregistrer</button>
+      <div id="item-out"></div>
+      <h2 style="margin-top:20px">Items déchiffrés (en mémoire)</h2>
+      <pre id="plain-list">—</pre>
+    </section>
+
+    <section class="panel server">
+      <h2>🗄 Serveur — ce qu'il stocke (opaque)</h2>
+      <div class="hint">Registration + blobs chiffrés. Aucun mot de passe, aucun secret en clair.</div>
+      <pre id="server-view">(vide)</pre>
+    </section>
+
+    <section class="panel">
+      <h2>État</h2>
+      <pre id="log">Chargement du module WASM…</pre>
+    </section>
+  </main>
+
+  <script type="module">
+    import init, { register, unlock } from './pkg/crypto_wasm.js';
+
+    const $ = (id) => document.getElementById(id);
+    const log = (msg, cls='') => { $('log').innerHTML = `<span class="${cls}">${msg}</span>`; };
+
+    // Le « serveur » = simple stockage local de données opaques.
+    const server = { registration: null, items: {} /* id -> blobJSON */ };
+    const renderServer = () => {
+      $('server-view').textContent = JSON.stringify({
+        registration: server.registration ? JSON.parse(server.registration) : null,
+        items: server.items,
+      }, null, 2);
+    };
+
+    let account = null; // coffre déverrouillé, en mémoire uniquement
+    const renderPlain = () => {
+      if (!account) { $('plain-list').textContent = '— (verrouillé)'; return; }
+      const lines = Object.keys(server.items).map((id) => {
+        try { return `${id} = ${account.decrypt_item(server.items[id], id)}`; }
+        catch { return `${id} = <illisible>`; }
+      });
+      $('plain-list').textContent = lines.length ? lines.join('\n') : '—';
+    };
+
+    await init();
+    log('Module WASM prêt. Crée un coffre pour commencer.', 'ok');
+
+    $('btn-register').onclick = () => {
+      try {
+        log('Dérivation Argon2id…');
+        account = register($('reg-pw').value);
+        server.registration = account.registration_json;
+        server.items = {};
+        const sk = account.secret_key;
+        $('secret-out').innerHTML =
+          `<label>Secret Key (à conserver — montrée une seule fois)</label>` +
+          `<pre class="warn">${sk}</pre>` +
+          `<details><summary class="hint">Voir l'Emergency Kit</summary><pre>${account.emergency_kit('alice@example.com')}</pre></details>`;
+        $('unlock-sk').value = sk;       // pré-rempli pour la démo
+        $('unlock-pw').value = $('reg-pw').value;
+        $('btn-add').disabled = false;
+        $('btn-unlock').disabled = false;
+        renderServer(); renderPlain();
+        log('Coffre créé. Le serveur ne reçoit que des données opaques.', 'ok');
+      } catch (e) { log('Erreur: ' + e, 'err'); }
+    };
+
+    $('btn-add').onclick = () => {
+      try {
+        const id = $('item-id').value, val = $('item-val').value;
+        server.items[id] = account.encrypt_item(val, id);
+        renderServer(); renderPlain();
+        log(`Item « ${id} » chiffré côté client puis envoyé au serveur.`, 'ok');
+      } catch (e) { log('Erreur: ' + e, 'err'); }
+    };
+
+    $('btn-unlock').onclick = () => {
+      try {
+        if (!server.registration) { log('Crée d\'abord un coffre.', 'warn'); return; }
+        log('Déverrouillage…');
+        account = unlock($('unlock-pw').value, $('unlock-sk').value, server.registration);
+        renderPlain();
+        log('Déverrouillé. Items déchiffrés en mémoire.', 'ok');
+      } catch (e) {
+        account = null; renderPlain();
+        log('Échec: mot de passe ou Secret Key invalide.', 'err');
+      }
+    };
+  </script>
+</body>
+</html>

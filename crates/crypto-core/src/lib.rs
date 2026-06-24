@@ -13,12 +13,11 @@
 //! - **HKDF-SHA256** : séparation en sous-clés indépendantes.
 //! - **XChaCha20-Poly1305** : chiffrement authentifié (nonce 192 bits).
 //!
-//! ## ⚠️ Cible WASM — non encore validée
-//! Le crate vise natif **et** WebAssembly, mais le support navigateur n'est PAS
-//! prouvé à ce stade. L'aléa ([`rand_core`]/`getrandom`) doit être câblé sur
-//! l'entropie du navigateur (feature `getrandom/js`) et **vérifié par un test
-//! `wasm32` réel** dans le futur crate `crypto-wasm` avant toute revendication
-//! de support. Tant que ce n'est pas fait, considérer WASM comme non garanti.
+//! ## Cible WASM — validée
+//! Le crate vise natif **et** WebAssembly. Le crate `crypto-wasm` câble l'aléa
+//! sur l'entropie du navigateur (`getrandom/js`) et le valide par un test
+//! `wasm32` réel (`wasm-pack test --node`) : génération de sel/clés/nonces et
+//! cycle complet inscription → chiffrement → déverrouillage passent en WASM.
 //!
 //! ## Démarrage rapide
 //! ```

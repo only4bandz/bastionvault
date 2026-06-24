@@ -39,27 +39,32 @@ mot de passe maître ──Argon2id(sel, 64Mio)──► clé maître
 ## Structure
 
 ```
-crates/crypto-core/   ✅ Cœur crypto, Rust pur, 8 tests. Compile natif + WASM.
-crates/crypto-wasm/   ⬜ Liaisons wasm-bindgen (étape 2)
-crates/server/        ⬜ API Axum, stockage de blobs chiffrés (étape 3)
-web/                  ⬜ Interface navigateur (étape 4)
+crates/crypto-core/   ✅ Cœur crypto, Rust pur, 32 tests. Compile natif + WASM.
+crates/crypto-wasm/   ✅ Liaisons wasm-bindgen + test wasm32 (entropie validée).
+web/                  ✅ Démo navigateur (chiffre/déchiffre en WASM). Voir web/README.md
+crates/server/        ⬜ API Axum, stockage de blobs chiffrés (à venir)
 ```
 
 ## Feuille de route
 
 | # | Étape | État |
 |---|-------|------|
-| 1 | Cœur crypto (Argon2id + AEAD + key wrapping), testé | ✅ Fait |
-| 2 | Liaisons WASM + démo navigateur | ⬜ |
-| 3 | API serveur Axum (comptes, stockage chiffré) | ⬜ |
-| 4 | Interface web (coffre, ajout/lecture d'items) | ⬜ |
-| 5 | 2FA TOTP (authenticator) | ⬜ |
-| 6 | Clés FIDO2 / WebAuthn (YubiKey, Trustkey) | ⬜ |
-| 7 | Vérification SMS | ⬜ |
-| 8 | Extension Chrome (réutilise crypto-core via WASM) | ⬜ |
+| 1 | Cœur crypto (Argon2id, politique KDF, AEAD, key wrapping) | ✅ Fait |
+| 2 | Secret Key (deux-secrets) + Emergency Kit | ✅ Fait |
+| 3 | Manifest d'intégrité du coffre | ✅ Fait |
+| 4 | Liaisons WASM + démo navigateur (entropie validée) | ✅ Fait |
+| 5 | API serveur Axum (comptes, stockage chiffré) | ⬜ |
+| 6 | Interface web complète | ⬜ |
+| 7 | 2FA TOTP (authenticator) | ⬜ |
+| 8 | Clés FIDO2 / WebAuthn (YubiKey, Trustkey) | ⬜ |
+| 9 | Vérification SMS | ⬜ |
+| 10 | Extension Chrome (réutilise crypto-core via WASM) | ⬜ |
 
 ## Développement
 
 ```bash
-cargo test -p crypto-core      # lance les tests du cœur crypto
+cargo test --workspace                       # tests natifs (cœur crypto)
+wasm-pack test --node crates/crypto-wasm     # tests WASM (entropie navigateur)
+./web/build.sh                               # build le module WASM de la démo
+cd web && python3 -m http.server 8080        # servir la démo → http://localhost:8080
 ```
