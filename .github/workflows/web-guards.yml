@@ -1,0 +1,18 @@
+name: web-guards
+
+# Lightweight invariants for the web app that don't need a toolchain.
+# (Rust fmt/clippy/test live in their own pipeline; this job stays fast so the
+# browser secret-storage invariant is always enforced on every PR.)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  no-browser-secret-storage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbid browser-side secret storage in web/
+        run: bash scripts/check-no-browser-secret-storage.sh
