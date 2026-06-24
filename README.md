@@ -54,7 +54,8 @@ secret d'auth (jamais le secret nu). Réutilise les types de `crypto-core`.
 |---|---|---|
 | `POST` | `/accounts` | Crée un compte (stocke `salt`, `kdf`, clé enveloppée, hash du secret) |
 | `GET` | `/accounts/:email/prelogin` | Renvoie `salt`+`kdf`+clé enveloppée (pour dériver côté client) |
-| `POST` | `/sessions` | Vérifie le secret d'auth (Argon2id) → jeton bearer |
+| `POST` | `/sessions` | Vérifie le secret d'auth (Argon2id, `spawn_blocking`) → jeton bearer (TTL 30 min) |
+| `DELETE` | `/sessions` | Révoque le jeton courant (déconnexion) |
 | `GET` | `/vault` | Items chiffrés + manifest (auth) |
 | `PUT`/`DELETE` | `/vault/items/:id` | Upsert / suppression d'un item chiffré (auth) |
 | `PUT` | `/vault/manifest` | Stocke le manifest d'intégrité (auth) |
