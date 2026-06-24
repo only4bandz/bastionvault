@@ -29,7 +29,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 use x25519_dalek::{EphemeralSecret, PublicKey as XPublicKey, StaticSecret};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::aead::{self, EncryptedBlob};
 use crate::error::{CryptoError, Result};
@@ -50,17 +50,45 @@ const MSG_ID_LEN: usize = 16;
 const SAFETY_ITERS: usize = 5200; // Signal-style: taxes short-compare grinding
 /// Size buckets for body padding (hide content length / signed-vs-anon).
 const BUCKETS: [usize; 6] = [256, 1024, 4096, 16384, 65536, 262144];
+/// A "note" is capped well below the AEAD's ~8 MiB ceiling.
+const MAX_PLAINTEXT: usize = 1024 * 1024;
 
 fn b64(bytes: &[u8]) -> String {
     use base64::{engine::general_purpose::STANDARD as B, Engine};
     B.encode(bytes)
 }
+/// Decode base64 with NO size bound — only for already-authenticated data
+/// (e.g. the note plaintext inside the AEAD'd body).
 fn unb64(s: &str) -> Result<Vec<u8>> {
     use base64::{engine::general_purpose::STANDARD as B, Engine};
     B.decode(s).map_err(|_| CryptoError::Malformed)
 }
+/// Decode an attacker-supplied base64 field, rejecting oversized input *before*
+/// allocating (anti-DoS; mirrors aead.rs's MAX_ENCODED_* caps). `max` is the
+/// max decoded byte length.
+fn unb64_cap(s: &str, max: usize) -> Result<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD as B, Engine};
+    if s.len() > max.saturating_mul(4).saturating_div(3).saturating_add(8) {
+        return Err(CryptoError::Malformed);
+    }
+    let v = B.decode(s).map_err(|_| CryptoError::Malformed)?;
+    if v.len() > max {
+        return Err(CryptoError::Malformed);
+    }
+    Ok(v)
+}
+/// Decode a field that must be exactly `n` bytes (e.g. keys, nonces, ids).
+fn unb64_exact(s: &str, n: usize) -> Result<Vec<u8>> {
+    let v = unb64_cap(s, n)?;
+    if v.len() != n {
+        return Err(CryptoError::Malformed);
+    }
+    Ok(v)
+}
 fn unb64_32(s: &str) -> Result<[u8; 32]> {
-    unb64(s)?.try_into().map_err(|_| CryptoError::Malformed)
+    unb64_exact(s, 32)?
+        .try_into()
+        .map_err(|_| CryptoError::Malformed)
 }
 
 fn hkdf32(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
@@ -77,7 +105,29 @@ fn put(buf: &mut Vec<u8>, field: &[u8]) {
     buf.extend_from_slice(field);
 }
 
+/// Canonical encoding of the passphrase mode + KDF params, bound into the AAD
+/// so a server can't strip/alter the passphrase factor (it's also implicitly
+/// bound via the wrap KDF, but the spec mandates explicit header binding).
+fn pw_aad(pw: Option<&PwParams>) -> Vec<u8> {
+    let mut b = Vec::new();
+    match pw {
+        None => b.push(0),
+        Some(p) => {
+            b.push(1);
+            put(&mut b, p.salt.as_bytes());
+            b.extend_from_slice(&p.mem_kib.to_be_bytes());
+            b.extend_from_slice(&p.iterations.to_be_bytes());
+            b.extend_from_slice(&p.parallelism.to_be_bytes());
+        }
+    }
+    b
+}
+
 /// Canonical protected header bound into every AEAD AAD (domain-separated).
+/// Note: the AEAD nonce is authenticated by the AEAD itself, and the padding
+/// length lives inside the authenticated body, so neither needs separate AAD
+/// binding here.
+#[allow(clippy::too_many_arguments)]
 fn header_aad(
     domain: &[u8],
     message_id: &[u8],
@@ -85,6 +135,7 @@ fn header_aad(
     recipient_enc_pub: &[u8; 32],
     key_version: u32,
     eph_pub: &[u8; 32],
+    pw: &[u8],
 ) -> Vec<u8> {
     let mut b = Vec::new();
     put(&mut b, domain);
@@ -95,6 +146,7 @@ fn header_aad(
     put(&mut b, recipient_enc_pub);
     b.extend_from_slice(&key_version.to_be_bytes());
     put(&mut b, eph_pub);
+    put(&mut b, pw);
     b
 }
 
@@ -203,32 +255,43 @@ struct Inner {
     sig: Option<String>, // base64 Ed25519 signature
 }
 
+/// Who sent the message. The type makes it impossible to read a sender name
+/// without also seeing its trust state — a consumer (P1 WASM/UI) cannot render
+/// an attacker-chosen, unverified `sender_id` as if it were authentic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sender {
+    /// No sender identity was claimed (anonymous sealed box).
+    Anonymous,
+    /// A sender id was claimed but NOT cryptographically verified (either no
+    /// verification key was supplied, or the contact isn't trusted yet).
+    Unverified(String),
+    /// Signature verified (`verify_strict`) against the supplied sender identity.
+    Verified(String),
+}
+
 /// Result of opening a Send blob.
 pub struct OpenedMessage {
     pub plaintext: Zeroizing<Vec<u8>>,
-    /// Sender id claimed inside the body (only meaningful if `verified`).
-    pub sender_id: Option<String>,
-    /// True iff a signature was present AND verified against the supplied sender.
-    pub verified: bool,
+    pub sender: Sender,
 }
 
 // ── padding ──
 
-fn pad(inner: &[u8]) -> Vec<u8> {
+fn pad(inner: &[u8]) -> Zeroizing<Vec<u8>> {
     let need = inner.len() + 4;
     let target = BUCKETS
         .iter()
         .copied()
         .find(|&b| b >= need)
         .unwrap_or_else(|| need.div_ceil(BUCKETS[BUCKETS.len() - 1]) * BUCKETS[BUCKETS.len() - 1]);
-    let mut out = Vec::with_capacity(target);
+    let mut out = Zeroizing::new(Vec::with_capacity(target));
     out.extend_from_slice(&(inner.len() as u32).to_be_bytes());
     out.extend_from_slice(inner);
     out.resize(target, 0);
     out
 }
 
-fn unpad(p: &[u8]) -> Result<Vec<u8>> {
+fn unpad(p: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     if p.len() < 4 {
         return Err(CryptoError::Malformed);
     }
@@ -236,7 +299,7 @@ fn unpad(p: &[u8]) -> Result<Vec<u8>> {
     if 4usize.checked_add(len).map(|n| n > p.len()).unwrap_or(true) {
         return Err(CryptoError::Malformed);
     }
-    Ok(p[4..4 + len].to_vec())
+    Ok(Zeroizing::new(p[4..4 + len].to_vec()))
 }
 
 // ── signature transcript ──
@@ -274,15 +337,31 @@ pub fn seal(
     passphrase: Option<&[u8]>,
     signer: Option<(&IdentityKeys, &str)>,
 ) -> Result<SendBlob> {
+    if plaintext.len() > MAX_PLAINTEXT {
+        return Err(CryptoError::Malformed);
+    }
+
     let mut message_id = [0u8; MSG_ID_LEN];
     OsRng.fill_bytes(&mut message_id);
 
     let cek = SecretKey::generate();
-
-    // ── inner payload (sender id + signature live inside the ciphertext) ──
     let eph_secret = EphemeralSecret::random_from_rng(OsRng);
     let eph_pub = XPublicKey::from(&eph_secret).to_bytes();
 
+    // Decide passphrase params up front so they can be bound into BOTH AADs.
+    let pw_params = passphrase.map(|_| {
+        let salt = kdf::generate_salt();
+        let params = KdfParams::default();
+        PwParams {
+            salt: b64(&salt),
+            mem_kib: params.mem_kib,
+            iterations: params.iterations,
+            parallelism: params.parallelism,
+        }
+    });
+    let pw_bytes = pw_aad(pw_params.as_ref());
+
+    // ── inner payload (sender id + signature live inside the ciphertext) ──
     let mut inner = Inner {
         plaintext: b64(plaintext),
         sender_id: None,
@@ -303,7 +382,8 @@ pub fn seal(
         inner.sender_id = Some(sender_id.to_string());
         inner.sig = Some(b64(&sig.to_bytes()));
     }
-    let inner_bytes = serde_json::to_vec(&inner).map_err(|_| CryptoError::Malformed)?;
+    let inner_bytes =
+        Zeroizing::new(serde_json::to_vec(&inner).map_err(|_| CryptoError::Malformed)?);
     let body_aad = header_aad(
         D_BODY,
         &message_id,
@@ -311,6 +391,7 @@ pub fn seal(
         &recipient.enc_pub,
         recipient.key_version,
         &eph_pub,
+        &pw_bytes,
     );
     let body = aead::encrypt(&cek, &pad(&inner_bytes), &body_aad)?;
 
@@ -320,28 +401,22 @@ pub fn seal(
         return Err(CryptoError::Malformed); // low-order recipient key → server-known zero shared
     }
 
-    let mut ikm = Vec::with_capacity(64);
+    let mut ikm = Zeroizing::new(Vec::with_capacity(64));
     ikm.extend_from_slice(shared.as_bytes());
-    let pw_params = match passphrase {
-        Some(pw) => {
-            let salt = kdf::generate_salt();
-            let params = KdfParams::default();
-            let pw_key = kdf::derive_master_key(pw, &salt, params)?;
-            ikm.extend_from_slice(pw_key.as_bytes());
-            Some(PwParams {
-                salt: b64(&salt),
-                mem_kib: params.mem_kib,
-                iterations: params.iterations,
-                parallelism: params.parallelism,
-            })
-        }
-        None => None,
-    };
+    if let (Some(pw), Some(p)) = (passphrase, pw_params.as_ref()) {
+        let salt: [u8; SALT_LEN] = unb64_exact(&p.salt, SALT_LEN)?
+            .try_into()
+            .map_err(|_| CryptoError::Malformed)?;
+        let pw_key = kdf::derive_master_key(pw, &salt, KdfParams::default())?;
+        ikm.extend_from_slice(pw_key.as_bytes());
+    }
 
     let mut salt = Vec::with_capacity(64);
     salt.extend_from_slice(&eph_pub);
     salt.extend_from_slice(&recipient.enc_pub);
-    let wrap_key = SecretKey::from_bytes(hkdf32(&ikm, &salt, D_RECIP));
+    let mut wk = hkdf32(&ikm, &salt, D_RECIP);
+    let wrap_key = SecretKey::from_bytes(wk);
+    wk.zeroize();
     let cek_commit = hkdf32(wrap_key.as_bytes(), &[], D_COMMIT);
 
     let wrap_aad = header_aad(
@@ -351,6 +426,7 @@ pub fn seal(
         &recipient.enc_pub,
         recipient.key_version,
         &eph_pub,
+        &pw_bytes,
     );
     let wrapped_cek = aead::encrypt(&wrap_key, cek.as_bytes(), &wrap_aad)?;
 
@@ -384,7 +460,7 @@ pub fn open(
     if blob.recipient_key_version != recipient_keys.key_version {
         return Err(CryptoError::Malformed);
     }
-    let message_id = unb64(&blob.message_id)?;
+    let message_id = unb64_exact(&blob.message_id, MSG_ID_LEN)?;
     let recipient_enc_pub = unb64_32(&blob.recipient_enc_pub)?;
     let eph_pub = unb64_32(&blob.eph_pub)?;
     let my_enc_pub = recipient_keys.public().enc_pub;
@@ -399,7 +475,7 @@ pub fn open(
     if !shared.was_contributory() {
         return Err(CryptoError::Malformed); // low-order ephemeral
     }
-    let mut ikm = Vec::with_capacity(64);
+    let mut ikm = Zeroizing::new(Vec::with_capacity(64));
     ikm.extend_from_slice(shared.as_bytes());
     if let Some(pw) = passphrase {
         let p = blob.pw.as_ref().ok_or(CryptoError::Malformed)?;
@@ -409,7 +485,7 @@ pub fn open(
             parallelism: p.parallelism,
         };
         params.validate_for_unlock()?; // ceiling check on attacker-supplied params (anti-DoS)
-        let salt: [u8; SALT_LEN] = unb64(&p.salt)?
+        let salt: [u8; SALT_LEN] = unb64_exact(&p.salt, SALT_LEN)?
             .try_into()
             .map_err(|_| CryptoError::Malformed)?;
         let pw_key = kdf::derive_master_key(pw, &salt, params)?;
@@ -421,7 +497,9 @@ pub fn open(
     let mut salt = Vec::with_capacity(64);
     salt.extend_from_slice(&eph_pub);
     salt.extend_from_slice(&recipient_enc_pub);
-    let wrap_key = SecretKey::from_bytes(hkdf32(&ikm, &salt, D_RECIP));
+    let mut wk = hkdf32(&ikm, &salt, D_RECIP);
+    let wrap_key = SecretKey::from_bytes(wk);
+    wk.zeroize();
 
     // key-commitment check before trusting the wrap
     let expect_commit = hkdf32(wrap_key.as_bytes(), &[], D_COMMIT);
@@ -430,6 +508,7 @@ pub fn open(
         return Err(CryptoError::Aead);
     }
 
+    let pw_bytes = pw_aad(blob.pw.as_ref());
     let wrap_aad = header_aad(
         D_WRAP,
         &message_id,
@@ -437,6 +516,7 @@ pub fn open(
         &recipient_enc_pub,
         blob.recipient_key_version,
         &eph_pub,
+        &pw_bytes,
     );
     let cek_bytes = Zeroizing::new(aead::decrypt(&wrap_key, &blob.wrapped_cek, &wrap_aad)?);
     let cek = SecretKey::from_bytes(
@@ -453,43 +533,46 @@ pub fn open(
         &recipient_enc_pub,
         blob.recipient_key_version,
         &eph_pub,
+        &pw_bytes,
     );
     let padded = Zeroizing::new(aead::decrypt(&cek, &blob.body, &body_aad)?);
     let inner_bytes = unpad(&padded)?;
     let inner: Inner = serde_json::from_slice(&inner_bytes).map_err(|_| CryptoError::Malformed)?;
     let plaintext = Zeroizing::new(unb64(&inner.plaintext)?);
 
-    // ── verify signature if present ──
-    let mut verified = false;
-    if let (Some(sid), Some(sig_b64)) = (&inner.sender_id, &inner.sig) {
-        if let Some(sender) = verify_sender {
-            let sig_bytes: [u8; 64] = unb64(sig_b64)?
-                .try_into()
-                .map_err(|_| CryptoError::Malformed)?;
-            let sig = Signature::from_bytes(&sig_bytes);
-            let vk =
-                VerifyingKey::from_bytes(&sender.sig_pub).map_err(|_| CryptoError::Malformed)?;
-            let t = transcript(
-                &message_id,
-                &blob.recipient_id,
-                &recipient_enc_pub,
-                &eph_pub,
-                sid,
-                &sender.sig_pub,
-                &plaintext,
-            );
-            verified = vk.verify_strict(&t, &sig).is_ok();
-            if !verified {
-                return Err(CryptoError::Aead); // signed but verification failed → reject
+    // ── determine sender trust state ──
+    let sender = match (&inner.sender_id, &inner.sig) {
+        (Some(sid), Some(sig_b64)) => match verify_sender {
+            Some(s) => {
+                let sig_bytes: [u8; 64] = unb64_exact(sig_b64, 64)?
+                    .try_into()
+                    .map_err(|_| CryptoError::Malformed)?;
+                let sig = Signature::from_bytes(&sig_bytes);
+                let vk =
+                    VerifyingKey::from_bytes(&s.sig_pub).map_err(|_| CryptoError::Malformed)?;
+                let t = transcript(
+                    &message_id,
+                    &blob.recipient_id,
+                    &recipient_enc_pub,
+                    &eph_pub,
+                    sid,
+                    &s.sig_pub,
+                    &plaintext,
+                );
+                if vk.verify_strict(&t, &sig).is_err() {
+                    return Err(CryptoError::Aead); // signed but verification failed → reject
+                }
+                Sender::Verified(sid.clone())
             }
-        }
-    }
+            // A signature is present but the caller gave no key to check it.
+            None => Sender::Unverified(sid.clone()),
+        },
+        // A claimed sender id with no signature is never trustworthy.
+        (Some(sid), None) => Sender::Unverified(sid.clone()),
+        _ => Sender::Anonymous,
+    };
 
-    Ok(OpenedMessage {
-        plaintext,
-        sender_id: inner.sender_id,
-        verified,
-    })
+    Ok(OpenedMessage { plaintext, sender })
 }
 
 /// Signal-style safety number binding both users' ids + enc + sig keys +
