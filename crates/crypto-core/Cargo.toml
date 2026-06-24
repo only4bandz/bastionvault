@@ -23,12 +23,10 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = { version = "1", features = ["derive"] }
 # Comparaisons en temps constant.
 subtle = "2"
-# Sérialisation des enveloppes chiffrées.
+# Sérialisation des enveloppes chiffrées + du manifest.
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 base64 = "0.22"
 # Encodage base32 lisible de la Secret Key (Emergency Kit).
 data-encoding = "2"
 thiserror = "2"
-
-[dev-dependencies]
-serde_json = "1"

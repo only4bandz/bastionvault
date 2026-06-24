@@ -32,10 +32,14 @@ use crate::account_secret::AccountSecret;
 use crate::aead::{self, EncryptedBlob};
 use crate::error::{CryptoError, Result};
 use crate::kdf::{self, KdfParams};
+use crate::manifest::Manifest;
 use crate::secret::{SecretKey, KEY_LEN};
 
 /// AAD liant la clé de coffre enveloppée à son rôle.
 const AAD_VAULT_KEY: &[u8] = b"pm:v1:wrapped-vault-key";
+
+/// AAD liant le manifest d'intégrité à son rôle.
+const AAD_MANIFEST: &[u8] = b"pm:v1:manifest";
 
 /// Borne sur le sel encodé reçu (non fiable), vérifiée avant décodage.
 /// Le sel fait 16 octets → ~24 caractères base64 ; 64 laisse de la marge.
@@ -223,6 +227,20 @@ impl Vault {
             blob,
             item_id.as_bytes(),
         )?))
+    }
+
+    /// Scelle un [`Manifest`] d'intégrité sous la clé de coffre. Le blob produit
+    /// est opaque pour le serveur et n'est lisible que par ce coffre.
+    pub fn seal_manifest(&self, manifest: &Manifest) -> Result<EncryptedBlob> {
+        let bytes = serde_json::to_vec(manifest).map_err(|_| CryptoError::Malformed)?;
+        aead::encrypt(&self.vault_key, &bytes, AAD_MANIFEST)
+    }
+
+    /// Ouvre un manifest scellé. Échoue si le blob est altéré ou ne provient pas
+    /// de ce coffre ([`CryptoError::Aead`]).
+    pub fn open_manifest(&self, blob: &EncryptedBlob) -> Result<Manifest> {
+        let bytes = aead::decrypt(&self.vault_key, blob, AAD_MANIFEST)?;
+        serde_json::from_slice(&bytes).map_err(|_| CryptoError::Malformed)
     }
 
     /// Ré-enveloppe la clé de coffre sous un nouveau mot de passe maître, sans

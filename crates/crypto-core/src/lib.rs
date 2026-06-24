@@ -47,6 +47,7 @@ pub mod account_secret;
 pub mod aead;
 pub mod error;
 pub mod kdf;
+pub mod manifest;
 pub mod secret;
 pub mod vault;
 
@@ -57,4 +58,5 @@ pub use account_secret::AccountSecret;
 pub use aead::EncryptedBlob;
 pub use error::{CryptoError, Result};
 pub use kdf::KdfParams;
+pub use manifest::{IntegrityReport, Manifest, ManifestEntry};
 pub use vault::{AuthSecret, Registration, Vault};

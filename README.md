@@ -29,6 +29,10 @@ mot de passe maître ──Argon2id(sel, 64Mio)──► clé maître
 - **XChaCha20-Poly1305** chiffre chaque item (AEAD, nonce 192 bits aléatoire).
 - La **clé de coffre** est aléatoire et *enveloppée* : changer de mot de passe
   maître ne re-chiffre pas tous les items.
+- **Manifest d'intégrité** : un index chiffré sous la clé de coffre liste le
+  digest de chaque item. À la synchro, on détecte si un serveur malveillant a
+  supprimé, injecté, ou rollbacké un item (ce que l'AEAD par-item seul ne voit
+  pas). Un compteur `seq` monotone bloque le rollback du manifest lui-même.
 - Le serveur ne stocke que des **blobs opaques** + un hash lent du secret d'auth.
   Une fuite serveur ne révèle aucun mot de passe.
 
