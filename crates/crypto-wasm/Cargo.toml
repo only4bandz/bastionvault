@@ -1,0 +1,27 @@
+[package]
+name = "crypto-wasm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WebAssembly bindings around crypto-core for the web app and Chrome extension."
+
+# NB : pas de `[lints] workspace = true` ici — le workspace interdit `unsafe`,
+# or wasm-bindgen génère du code unsafe. Le cœur (crypto-core) reste, lui, en
+# `forbid(unsafe)`.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crypto-core = { path = "../crypto-core" }
+wasm-bindgen = "0.2"
+serde_json = "1"
+
+# Entropie navigateur pour getrandom — UNIQUEMENT sur la cible wasm32.
+# Sur l'hôte (tests/build natifs), getrandom utilise le backend OS habituel.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
