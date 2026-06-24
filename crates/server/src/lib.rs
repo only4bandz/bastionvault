@@ -22,7 +22,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crypto_core::{EncryptedBlob, KdfParams, Registration};
@@ -67,6 +67,7 @@ fn build(token_ttl: Duration, db_path: &str) -> Router {
         .route("/vault", get(get_vault))
         .route("/vault/items/:id", put(put_item).delete(delete_item))
         .route("/vault/manifest", put(put_manifest))
+        .route("/bin/:bin", get(get_bin))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
 }
@@ -147,7 +148,9 @@ impl Db {
                email TEXT NOT NULL, id TEXT NOT NULL, blob TEXT NOT NULL,
                PRIMARY KEY(email, id));
              CREATE TABLE IF NOT EXISTS manifests(
-               email TEXT PRIMARY KEY, blob TEXT NOT NULL);",
+               email TEXT PRIMARY KEY, blob TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS bins(
+               bin TEXT PRIMARY KEY, scheme TEXT, bank_name TEXT);",
         )
         .expect("init schema");
         Self {
@@ -195,6 +198,31 @@ impl Db {
         self.lock().execute(
             "INSERT OR REPLACE INTO manifests(email,blob) VALUES(?1,?2)",
             params![email, blob_json],
+        )?;
+        Ok(())
+    }
+
+    fn get_bin(&self, bin: &str) -> Option<BinInfo> {
+        self.lock()
+            .query_row(
+                "SELECT scheme,bank_name FROM bins WHERE bin=?1",
+                params![bin],
+                |r| {
+                    Ok(BinInfo {
+                        scheme: r.get::<_, Option<String>>(0)?,
+                        bank_name: r.get::<_, Option<String>>(1)?,
+                    })
+                },
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    fn put_bin(&self, bin: &str, info: &BinInfo) -> rusqlite::Result<()> {
+        self.lock().execute(
+            "INSERT OR REPLACE INTO bins(bin,scheme,bank_name) VALUES(?1,?2,?3)",
+            params![bin, info.scheme, info.bank_name],
         )?;
         Ok(())
     }
@@ -325,6 +353,13 @@ struct VaultResponse {
 #[derive(Deserialize)]
 struct BlobBody {
     blob: EncryptedBlob,
+}
+
+/// Issuing-bank info for a card BIN (network + bank name). Never the full card.
+#[derive(Serialize, Clone, Default)]
+struct BinInfo {
+    scheme: Option<String>,
+    bank_name: Option<String>,
 }
 
 // ─── Handlers ───
@@ -492,6 +527,50 @@ async fn put_manifest(
         acc.manifest = Some(body.blob);
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Resolves a card BIN to its network + issuing bank, cached in SQLite so any
+/// given BIN hits the upstream service at most once. Unauthenticated — BIN data
+/// is not secret, and only the BIN (never the full card) is involved.
+async fn get_bin(State(st): State<AppState>, Path(bin): Path<String>) -> Json<BinInfo> {
+    let bin: String = bin.chars().filter(|c| c.is_ascii_digit()).take(8).collect();
+    if bin.len() < 6 {
+        return Json(BinInfo::default());
+    }
+    if let Some(info) = st.db.get_bin(&bin) {
+        return Json(info);
+    }
+    match fetch_binlist(&bin).await {
+        Some(info) => {
+            let _ = st.db.put_bin(&bin, &info);
+            Json(info)
+        }
+        // Don't cache failures (e.g. upstream rate limit) — retry next time.
+        None => Json(BinInfo::default()),
+    }
+}
+
+/// Best-effort upstream BIN lookup (binlist). Returns `None` on any non-success.
+async fn fetch_binlist(bin: &str) -> Option<BinInfo> {
+    let url = format!("https://lookup.binlist.net/{bin}");
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let j: serde_json::Value = resp.json().await.ok()?;
+    Some(BinInfo {
+        scheme: j.get("scheme").and_then(|v| v.as_str()).map(String::from),
+        bank_name: j
+            .get("bank")
+            .and_then(|b| b.get("name"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+    })
 }
 
 // ─── Helpers ───

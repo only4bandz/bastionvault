@@ -21,6 +21,8 @@ argon2 = "0.5"
 data-encoding = "2"
 # Durable storage of opaque encrypted blobs (bundled = no system SQLite needed).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Server-side BIN -> issuing bank lookup (cached), so clients aren't rate-limited.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

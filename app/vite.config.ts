@@ -13,12 +13,6 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api/, ''),
       },
-      // BIN -> issuing bank lookup (binlist sends no CORS header; proxy it in dev).
-      '/binlist': {
-        target: 'https://lookup.binlist.net',
-        changeOrigin: true,
-        rewrite: (p) => p.replace(/^\/binlist/, ''),
-      },
     },
   },
 })
