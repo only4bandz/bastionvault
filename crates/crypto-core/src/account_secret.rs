@@ -14,7 +14,8 @@
 
 use data_encoding::BASE32_NOPAD;
 use rand_core::{OsRng, RngCore};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::error::{CryptoError, Result};
 
@@ -22,10 +23,24 @@ use crate::error::{CryptoError, Result};
 /// sur 1Password ; combinée au mot de passe, 128 bits suffisent largement).
 pub const ACCOUNT_SECRET_LEN: usize = 16;
 
+/// Longueur du checksum encodé avec la clé (16 bits → ~1/65536 de laisser
+/// passer une faute de frappe).
+const CHECKSUM_LEN: usize = 2;
+
 /// Préfixe de version du format encodé, pour faire évoluer le schéma plus tard.
 /// Le « 1 » n'appartient pas à l'alphabet base32 (A-Z2-7) : aucune collision
 /// possible avec le corps encodé.
 const VERSION_TAG: &str = "A1";
+
+/// Checksum tronqué (16 bits) de la clé, pour détecter une saisie erronée
+/// **localement**, avant toute dérivation Argon2id coûteuse.
+fn checksum(secret: &[u8; ACCOUNT_SECRET_LEN]) -> [u8; CHECKSUM_LEN] {
+    let mut h = Sha256::new();
+    h.update(b"pm:v1:secret-key-checksum");
+    h.update(secret);
+    let digest = h.finalize();
+    [digest[0], digest[1]]
+}
 
 /// Secret de compte de 128 bits, effacé de la mémoire au drop.
 ///
@@ -50,9 +65,14 @@ impl AccountSecret {
     }
 
     /// Représentation lisible pour l'humain : `A1-XXXXX-XXXXX-…` (base32
-    /// majuscule, groupée par 5). À conserver dans l'Emergency Kit / QR.
+    /// majuscule, groupée par 5, checksum 16 bits inclus). À conserver dans
+    /// l'Emergency Kit / QR.
     pub fn to_formatted(&self) -> String {
-        let body = BASE32_NOPAD.encode(&self.0);
+        // Charge utile = secret ‖ checksum, dans un tampon effacé au drop.
+        let mut payload = Zeroizing::new(Vec::with_capacity(ACCOUNT_SECRET_LEN + CHECKSUM_LEN));
+        payload.extend_from_slice(&self.0);
+        payload.extend_from_slice(&checksum(&self.0));
+        let body = BASE32_NOPAD.encode(&payload);
         let mut out = String::with_capacity(body.len() + body.len() / 5 + 3);
         out.push_str(VERSION_TAG);
         for (i, ch) in body.chars().enumerate() {
@@ -65,7 +85,8 @@ impl AccountSecret {
     }
 
     /// Parse une Secret Key saisie ou scannée. Tolérant : ignore tirets, espaces
-    /// et casse, accepte avec ou sans le préfixe de version.
+    /// et casse, accepte avec ou sans le préfixe de version. Le checksum permet
+    /// de **rejeter une faute de frappe immédiatement** (sans Argon2id).
     pub fn parse(input: &str) -> Result<Self> {
         let cleaned: String = input
             .chars()
@@ -73,11 +94,23 @@ impl AccountSecret {
             .collect::<String>()
             .to_ascii_uppercase();
         let body = cleaned.strip_prefix(VERSION_TAG).unwrap_or(&cleaned);
-        let bytes = BASE32_NOPAD
-            .decode(body.as_bytes())
-            .map_err(|_| CryptoError::Malformed)?;
-        let arr: [u8; ACCOUNT_SECRET_LEN] = bytes.try_into().map_err(|_| CryptoError::Malformed)?;
-        Ok(Self(arr))
+        let bytes = Zeroizing::new(
+            BASE32_NOPAD
+                .decode(body.as_bytes())
+                .map_err(|_| CryptoError::Malformed)?,
+        );
+        if bytes.len() != ACCOUNT_SECRET_LEN + CHECKSUM_LEN {
+            return Err(CryptoError::Malformed);
+        }
+        let mut secret = [0u8; ACCOUNT_SECRET_LEN];
+        secret.copy_from_slice(&bytes[..ACCOUNT_SECRET_LEN]);
+        if bytes[ACCOUNT_SECRET_LEN..] != checksum(&secret) {
+            secret.zeroize();
+            return Err(CryptoError::Malformed);
+        }
+        let out = Self(secret);
+        secret.zeroize();
+        Ok(out)
     }
 
     /// Texte « Emergency Kit » à imprimer et conserver hors-ligne.

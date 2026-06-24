@@ -43,20 +43,32 @@ pub struct EncryptedBlob {
     pub ct: String,
 }
 
+/// Construit l'AAD effectif en y préfixant la version de format. Ainsi la
+/// version `v` (métadonnée hors chiffré) est **authentifiée** : la flipper
+/// invalide le tag, au lieu de n'être qu'un champ libre côté serveur.
+fn versioned_aad(version: u8, aad: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + aad.len());
+    out.push(version);
+    out.extend_from_slice(aad);
+    out
+}
+
 /// Chiffre `plaintext` avec `key`.
 ///
 /// `aad` (additional authenticated data) est authentifié mais pas chiffré :
 /// utile pour lier le chiffré à un contexte (ex. l'id de l'item) et empêcher
-/// qu'un blob soit déplacé ailleurs. Passer `&[]` si inutile.
+/// qu'un blob soit déplacé ailleurs. La version de format y est aussi liée.
+/// Passer `&[]` si aucun contexte propre.
 pub(crate) fn encrypt(key: &SecretKey, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedBlob> {
     let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let aad = versioned_aad(FORMAT_VERSION, aad);
     let ct = cipher
         .encrypt(
             &nonce,
             Payload {
                 msg: plaintext,
-                aad,
+                aad: &aad,
             },
         )
         .map_err(|_| CryptoError::Aead)?;
@@ -87,8 +99,15 @@ pub(crate) fn decrypt(key: &SecretKey, blob: &EncryptedBlob, aad: &[u8]) -> Resu
     let nonce = XNonce::from_slice(&nonce_bytes);
     let ct = B64.decode(&blob.ct).map_err(|_| CryptoError::Malformed)?;
 
+    let aad = versioned_aad(blob.v, aad);
     let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
     cipher
-        .decrypt(nonce, Payload { msg: &ct, aad })
+        .decrypt(
+            nonce,
+            Payload {
+                msg: &ct,
+                aad: &aad,
+            },
+        )
         .map_err(|_| CryptoError::Aead)
 }

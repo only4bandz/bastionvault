@@ -237,10 +237,33 @@ impl Vault {
     }
 
     /// Ouvre un manifest scellé. Échoue si le blob est altéré ou ne provient pas
-    /// de ce coffre ([`CryptoError::Aead`]).
+    /// de ce coffre ([`CryptoError::Aead`]), ou si le manifest est mal formé
+    /// (entrées non triées / dupliquées → [`CryptoError::Malformed`]).
+    ///
+    /// ⚠️ Cette variante ne protège PAS du rollback : un serveur peut resservir
+    /// un manifest plus ancien (mais authentique). Utilisez
+    /// [`Vault::open_manifest_checked`] dès que vous connaissez le dernier `seq`.
     pub fn open_manifest(&self, blob: &EncryptedBlob) -> Result<Manifest> {
         let bytes = aead::decrypt(&self.vault_key, blob, AAD_MANIFEST)?;
-        serde_json::from_slice(&bytes).map_err(|_| CryptoError::Malformed)
+        let manifest: Manifest =
+            serde_json::from_slice(&bytes).map_err(|_| CryptoError::Malformed)?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Ouvre un manifest scellé en **refusant un rollback** : le `seq` du
+    /// manifest doit être ≥ `last_seen_seq` (le dernier connu du client), sinon
+    /// [`CryptoError::StaleManifest`]. C'est l'API à privilégier en synchro.
+    pub fn open_manifest_checked(
+        &self,
+        blob: &EncryptedBlob,
+        last_seen_seq: u64,
+    ) -> Result<Manifest> {
+        let manifest = self.open_manifest(blob)?;
+        if manifest.seq() < last_seen_seq {
+            return Err(CryptoError::StaleManifest);
+        }
+        Ok(manifest)
     }
 
     /// Ré-enveloppe la clé de coffre sous un nouveau mot de passe maître, sans

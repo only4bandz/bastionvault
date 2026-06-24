@@ -39,4 +39,11 @@ pub enum CryptoError {
     /// déraisonnablement élevés (plafond anti-déni-de-service côté client).
     #[error("KDF parameters are outside the allowed policy")]
     KdfPolicy,
+
+    /// Manifest plus ancien que la dernière version connue → rollback détecté.
+    ///
+    /// Un serveur malveillant a resservi un manifest périmé pour masquer un
+    /// changement (suppression/ajout d'item).
+    #[error("stale manifest: possible rollback detected")]
+    StaleManifest,
 }

@@ -304,6 +304,22 @@ fn account_secret_parse_is_tolerant() {
 }
 
 #[test]
+fn account_secret_rejects_typo() {
+    let s = AccountSecret::generate();
+    let formatted = s.to_formatted();
+    // Modifie deux caractères du corps (zones secret + checksum) → checksum KO.
+    let mut bytes = formatted.into_bytes(); // ASCII
+    bytes[3] = if bytes[3] == b'A' { b'B' } else { b'A' };
+    let last = bytes.len() - 1;
+    bytes[last] = if bytes[last] == b'A' { b'B' } else { b'A' };
+    let corrupted = String::from_utf8(bytes).unwrap();
+    assert!(matches!(
+        AccountSecret::parse(&corrupted),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
 fn account_secret_parse_rejects_invalid() {
     // Trop court / vide après nettoyage → longueur incorrecte.
     assert!(matches!(
