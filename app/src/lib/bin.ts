@@ -19,15 +19,7 @@ export interface BinInfo {
 
 const cache = new Map<string, BinInfo | null>();
 
-function normalizeDomain(url: string): string {
-  return url
-    .replace(/^https?:\/\//i, "")
-    .replace(/^www\./i, "")
-    .split("/")[0]
-    .toLowerCase();
-}
-
-// binlist returns the bank *name* but rarely a URL — map common issuers (Canada-
+// Map common issuers (Canada-
 // focused, since that's the primary use) to a domain so we can show their logo.
 const BANK_DOMAINS: [RegExp, string][] = [
   [/imperial bank of commerce|cibc/i, "cibc.com"],
@@ -62,31 +54,28 @@ function domainForBankName(name?: string): string | undefined {
 }
 
 /**
- * Look up the issuing bank for a BIN via binlist.net. Best-effort and cached;
- * returns null on failure (rate limit / CORS / offline) so callers fall back to
- * the local scheme badge. The full card number is never sent — only the BIN.
+ * Look up the issuing bank for a BIN via the Bastion server's cached `/api/bin`
+ * endpoint (each BIN hits the upstream service at most once, server-side). The
+ * full card number is never sent — only the BIN. Returns null on miss so callers
+ * fall back to the local scheme badge.
  */
 export async function lookupBin(bin: string): Promise<BinInfo | null> {
   const key = bin.replace(/\D/g, "").slice(0, 8);
   if (key.length < 6) return null;
   if (cache.has(key)) return cache.get(key) ?? null;
   try {
-    const res = await fetch(`/binlist/${key}`);
-    if (!res.ok) {
-      cache.set(key, null);
-      return null;
-    }
-    const j = (await res.json()) as { scheme?: string; bank?: { name?: string; url?: string } };
-    const bankName = j.bank?.name || undefined;
+    const res = await fetch(`/api/bin/${key}`);
+    if (!res.ok) return null;
+    const j = (await res.json()) as { scheme?: string; bank_name?: string };
+    if (!j.scheme && !j.bank_name) return null; // upstream miss — retry later (cheap, hits server cache)
     const info: BinInfo = {
       scheme: (j.scheme as Scheme) || undefined,
-      bankName,
-      bankDomain: j.bank?.url ? normalizeDomain(j.bank.url) : domainForBankName(bankName),
+      bankName: j.bank_name || undefined,
+      bankDomain: domainForBankName(j.bank_name),
     };
     cache.set(key, info);
     return info;
   } catch {
-    cache.set(key, null);
     return null;
   }
 }
