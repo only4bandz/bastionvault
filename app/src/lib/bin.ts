@@ -1,4 +1,6 @@
 // Card network detection (local) + issuer (bank) lookup from the BIN/IIN.
+import { detectBankLocal } from "./bins-ca";
+
 export type Scheme = "visa" | "mastercard" | "amex" | "discover" | "unknown";
 
 /** Detect the card network locally from the leading digits (no network call). */
@@ -64,6 +66,15 @@ function domainForBankName(name?: string): string | undefined {
 export async function lookupBin(bin: string): Promise<BinInfo | null> {
   const key = bin.replace(/\D/g, "").slice(0, 8);
   if (key.length < 6) return null;
+
+  // 1. Local table first — instant, offline, no API, no rate limit.
+  const local = detectBankLocal(key);
+  if (local) {
+    const scheme = local.scheme ?? (detectScheme(key) === "unknown" ? undefined : detectScheme(key));
+    return { scheme, bankName: local.bank.name, bankDomain: local.bank.domain, cardType: local.type };
+  }
+
+  // 2. Fallback: server-cached binlist lookup for BINs not in the local table.
   if (cache.has(key)) return cache.get(key) ?? null;
   const pending = inflight.get(key);
   if (pending) return pending;
