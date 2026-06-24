@@ -10,8 +10,8 @@
 # secret to these APIs would defeat that. This guard fails the build if such an
 # API appears in the web app code.
 #
-# Scope: web/ application code, EXCLUDING web/pkg/ (generated wasm-bindgen glue,
-# a build artifact we do not control).
+# Scope: web/ (static demo) and app/src/ (the Bastion React app) — EXCLUDING the
+# generated pkg/ wasm-bindgen glue (a build artifact we do not control).
 #
 # Escape hatch: if a NON-secret value ever legitimately needs persistence, add
 # the marker `storage-guard:allow` in a comment on the same line. Use sparingly
@@ -27,8 +27,9 @@ PATTERN='localStorage|sessionStorage|indexedDB|document\.cookie'
 # Search web/ app CODE (html/js/ts variants), excluding the generated pkg/ glue.
 # Docs (*.md) are out of scope: they may name these APIs to describe the rule.
 # grep exit code: 0 = match found (a violation), 1 = no match (clean).
-hits="$(grep -rnE "$PATTERN" web/ \
+hits="$(grep -rnE "$PATTERN" web/ app/src/ \
   --exclude-dir=pkg \
+  --exclude-dir=node_modules --exclude-dir=dist \
   --include='*.html' --include='*.htm' \
   --include='*.js' --include='*.mjs' --include='*.cjs' \
   --include='*.ts' --include='*.tsx' --include='*.jsx' \
@@ -45,4 +46,4 @@ if [ -n "$hits" ]; then
   exit 1
 fi
 
-echo "✅ Browser secret-storage guard passed: no localStorage/sessionStorage/IndexedDB/cookie use in web/ app code."
+echo "✅ Browser secret-storage guard passed: no localStorage/sessionStorage/IndexedDB/cookie use in web/ or app/ code."
