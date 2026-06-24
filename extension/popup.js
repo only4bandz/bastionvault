@@ -78,7 +78,9 @@ function avatarFor(it) {
     // logos don't bleed our accent color. The <img> error fallback is wired in
     // JS (wireRows) — inline onerror= is forbidden by the extension-page CSP.
     // We stash the fallback color on the tile so wireRows can restore it.
-    return `<div class="ico ico-img" style="background:#fff" data-letter="${letter}" data-color="${color}"><img src="https://icons.duckduckgo.com/ip3/${esc(domain)}.ico" alt="" /></div>`;
+    // High-res favicon (sz=128) so it stays crisp even in the 64px detail
+    // hero. Resolved by the browser, never by the Bastion server.
+    return `<div class="ico ico-img" style="background:#fff" data-letter="${letter}" data-color="${color}"><img src="https://www.google.com/s2/favicons?sz=128&domain=${esc(domain)}" alt="" /></div>`;
   }
   return `<div class="ico" style="background:${color}">${letter}</div>`;
 }
@@ -159,16 +161,27 @@ function renderVault(query = "") {
   wireRows();
 }
 
-function wireRows() {
-  // Broken favicons fall back to the letter tile (CSP-safe, no inline onerror).
-  document.querySelectorAll(".ico[data-letter] img").forEach((img) => {
-    img.addEventListener("error", () => {
-      const tile = img.parentElement;
-      tile.textContent = tile.dataset.letter || "?";
-      tile.style.background = tile.dataset.color || "#232838"; // restore the letter-tile color
-      tile.classList.remove("ico-img");
+function letterFallback(img) {
+  const tile = img.parentElement;
+  tile.textContent = tile.dataset.letter || "?";
+  tile.style.background = tile.dataset.color || "#232838"; // restore the letter-tile color
+  tile.classList.remove("ico-img");
+}
+
+// Wire favicon fallbacks (CSP-safe, no inline onerror): fall back to the letter
+// tile on a load error, OR when the provider returns its tiny generic globe
+// (≤16px) for a domain it doesn't actually know.
+function wireFavicons(root) {
+  root.querySelectorAll(".ico[data-letter] img").forEach((img) => {
+    img.addEventListener("error", () => letterFallback(img));
+    img.addEventListener("load", () => {
+      if (img.naturalWidth && img.naturalWidth <= 16) letterFallback(img);
     });
   });
+}
+
+function wireRows() {
+  wireFavicons(document);
   document.querySelectorAll(".iconbtn[data-act]").forEach((btn) => {
     btn.addEventListener("click", async (e) => {
       e.stopPropagation();
@@ -297,15 +310,7 @@ async function showDetail(id) {
 
   document.getElementById("back").addEventListener("click", () => showVault(vaultState));
 
-  // Favicon fallback (same as the list).
-  app.querySelectorAll(".ico[data-letter] img").forEach((img) =>
-    img.addEventListener("error", () => {
-      const tile = img.parentElement;
-      tile.textContent = tile.dataset.letter || "?";
-      tile.style.background = tile.dataset.color || "#232838";
-      tile.classList.remove("ico-img");
-    })
-  );
+  wireFavicons(app); // same favicon fallback as the list
 
   app.querySelectorAll(".dfield").forEach((f) => {
     const text = f.querySelector(".dtext");
