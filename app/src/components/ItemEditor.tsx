@@ -1,6 +1,7 @@
-import { useState, type JSX } from "react";
+import { useEffect, useState, type JSX } from "react";
 import type { ItemType, VaultItem } from "../lib/types";
 import { generatePassword } from "../lib/generator";
+import { detectScheme, lookupBin } from "../lib/bin";
 import { IcCard, IcKey, IcNote, IcRefresh, IcX } from "./icons";
 
 const NEW = (): VaultItem => ({
@@ -21,6 +22,28 @@ export function ItemEditor({
 }): JSX.Element {
   const [item, setItem] = useState<VaultItem>(initial ?? NEW());
   const set = <K extends keyof VaultItem>(k: K, v: VaultItem[K]) => setItem((p) => ({ ...p, [k]: v }));
+
+  // Detect the card network locally (instant) and the issuing bank from the BIN
+  // (debounced lookup), so the item shows the right logo.
+  useEffect(() => {
+    if (item.type !== "card") return;
+    const num = item.cardNumber || "";
+    const scheme = detectScheme(num);
+    setItem((p) => {
+      const next = scheme === "unknown" ? undefined : scheme;
+      return p.cardBrand === next ? p : { ...p, cardBrand: next };
+    });
+    const bin = num.replace(/\D/g, "").slice(0, 8);
+    if (bin.length < 6) return;
+    const t = setTimeout(() => {
+      lookupBin(bin).then((r) => {
+        if (r && (r.bankDomain || r.bankName)) {
+          setItem((p) => ({ ...p, cardBank: r.bankName, cardBankDomain: r.bankDomain }));
+        }
+      });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [item.cardNumber, item.type]);
 
   function save() {
     if (!item.title.trim()) return;
@@ -81,7 +104,13 @@ export function ItemEditor({
             <>
               <div className="field">
                 <label>Card number</label>
-                <input className="input mono" value={item.cardNumber ?? ""} onChange={(e) => set("cardNumber", e.target.value)} />
+                <input className="input mono" value={item.cardNumber ?? ""} onChange={(e) => set("cardNumber", e.target.value)} placeholder="•••• •••• •••• ••••" />
+                {(item.cardBank || item.cardBrand) && (
+                  <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>
+                    Detected: {item.cardBank ? `${item.cardBank} · ` : ""}
+                    {(item.cardBrand || "").toUpperCase()}
+                  </div>
+                )}
               </div>
               <div className="input-row">
                 <div className="field" style={{ flex: 1 }}>

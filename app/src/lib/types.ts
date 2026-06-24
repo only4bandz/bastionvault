@@ -12,6 +12,9 @@ export interface VaultItem {
   cardNumber?: string;
   cardExp?: string;
   cardCvv?: string;
+  cardBrand?: string; // detected network: visa | mastercard | amex | discover
+  cardBank?: string; // detected issuing bank name (e.g. "CIBC")
+  cardBankDomain?: string; // detected bank domain (e.g. "cibc.com") for its logo
   // shared
   notes?: string;
   favorite?: boolean;
