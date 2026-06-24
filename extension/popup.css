@@ -145,6 +145,14 @@ body {
 .health.ok { color: var(--ok); }
 .health.warn { color: var(--warn, #f7b955); }
 
+/* ── generator ── */
+.genbox { display: flex; align-items: center; gap: 8px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 4px 0 14px; }
+.genpw { flex: 1; word-break: break-all; font-size: 15px; min-height: 20px; }
+.range { width: 100%; accent-color: var(--accent); }
+.opt { display: flex; align-items: center; gap: 10px; padding: 9px 2px; cursor: pointer; }
+.opt input { width: 16px; height: 16px; accent-color: var(--accent); }
+
 /* ── toast ── */
 .toast {
   position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);
