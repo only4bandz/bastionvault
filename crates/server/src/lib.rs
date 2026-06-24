@@ -10,12 +10,13 @@
 //! s'y substituer sans changer l'API HTTP.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -24,17 +25,32 @@ use serde::{Deserialize, Serialize};
 
 use crypto_core::{EncryptedBlob, KdfParams, Registration};
 
-/// Construit le routeur de l'application (utilisable tel quel dans les tests).
+/// Durée de vie d'un jeton de session par défaut (30 min).
+const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
+/// Taille maximale d'un corps de requête (1 Mio) — garde-fou anti-DoS mémoire.
+const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+/// Construit le routeur avec la TTL de session par défaut.
+///
+/// ⚠️ NON-PRODUCTION : ce serveur MVP n'a PAS de TLS, CORS, rate-limiting,
+/// quotas de stockage, ni persistance. Ces contrôles doivent être ajoutés
+/// (et testés) avant tout déploiement réel.
 pub fn app() -> Router {
-    let state = AppState::new();
+    app_with_ttl(DEFAULT_TOKEN_TTL)
+}
+
+/// Variante avec TTL explicite (utile pour tester l'expiration des jetons).
+pub fn app_with_ttl(token_ttl: Duration) -> Router {
+    let state = AppState::new(token_ttl);
     Router::new()
         .route("/health", get(health))
         .route("/accounts", post(create_account))
         .route("/accounts/:email/prelogin", get(prelogin))
-        .route("/sessions", post(create_session))
+        .route("/sessions", post(create_session).delete(delete_session))
         .route("/vault", get(get_vault))
         .route("/vault/items/:id", put(put_item).delete(delete_item))
         .route("/vault/manifest", put(put_manifest))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(state)
 }
 
@@ -43,12 +59,19 @@ pub fn app() -> Router {
 #[derive(Clone)]
 struct AppState {
     inner: Arc<RwLock<Inner>>,
+    token_ttl: Duration,
 }
 
 #[derive(Default)]
 struct Inner {
     accounts: HashMap<String, AccountRecord>, // email -> compte
-    sessions: HashMap<String, String>,        // jeton -> email
+    sessions: HashMap<String, Session>,       // jeton -> session
+}
+
+/// Session active : propriétaire du jeton et instant d'expiration.
+struct Session {
+    email: String,
+    expires_at: Instant,
 }
 
 /// Tout ce que le serveur retient d'un compte. Rien ici n'est déchiffrable.
@@ -63,10 +86,22 @@ struct AccountRecord {
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(token_ttl: Duration) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Inner::default())),
+            token_ttl,
         }
+    }
+
+    /// Verrou en lecture, en **récupérant** un éventuel empoisonnement : le
+    /// panic d'un autre handler ne doit pas mettre tout le serveur en DoS.
+    fn read(&self) -> RwLockReadGuard<'_, Inner> {
+        self.inner.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Idem en écriture.
+    fn write(&self) -> RwLockWriteGuard<'_, Inner> {
+        self.inner.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -128,11 +163,14 @@ async fn create_account(
     State(st): State<AppState>,
     Json(req): Json<CreateAccount>,
 ) -> Result<StatusCode, ApiError> {
-    // Hash lent calculé HORS du verrou (CPU), pour ne pas bloquer les lecteurs.
-    let auth_hash = hash_secret(req.registration.auth_secret.expose_b64())
+    // Hash lent sur un thread bloquant dédié (pas de starvation du runtime async).
+    let secret = req.registration.auth_secret.expose_b64().to_string();
+    let auth_hash = tokio::task::spawn_blocking(move || hash_secret(&secret))
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "hash failure"))?;
 
-    let mut inner = st.inner.write().unwrap();
+    let mut inner = st.write();
     if inner.accounts.contains_key(&req.email) {
         return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
     }
@@ -154,7 +192,7 @@ async fn prelogin(
     State(st): State<AppState>,
     Path(email): Path<String>,
 ) -> Result<Json<Prelogin>, ApiError> {
-    let inner = st.inner.read().unwrap();
+    let inner = st.read();
     let acc = inner
         .accounts
         .get(&email)
@@ -172,23 +210,28 @@ async fn create_session(
 ) -> Result<Json<LoginResponse>, ApiError> {
     // On copie le hash puis on relâche le verrou avant la vérification lente.
     let phc = st
-        .inner
         .read()
-        .unwrap()
         .accounts
         .get(&req.email)
         .map(|a| a.auth_hash.clone());
     // Même réponse pour « compte inconnu » et « mauvais secret ».
     let phc = phc.ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"))?;
-    if !verify_secret(&req.auth_secret, &phc) {
+    let secret = req.auth_secret.clone();
+    let ok = tokio::task::spawn_blocking(move || verify_secret(&secret, &phc))
+        .await
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?;
+    if !ok {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
     let token = new_token();
-    st.inner
-        .write()
-        .unwrap()
-        .sessions
-        .insert(token.clone(), req.email);
+    let expires_at = Instant::now() + st.token_ttl;
+    st.write().sessions.insert(
+        token.clone(),
+        Session {
+            email: req.email,
+            expires_at,
+        },
+    );
     Ok(Json(LoginResponse { token }))
 }
 
@@ -197,7 +240,7 @@ async fn get_vault(
     headers: HeaderMap,
 ) -> Result<Json<VaultResponse>, ApiError> {
     let email = require_auth(&st, &headers)?;
-    let inner = st.inner.read().unwrap();
+    let inner = st.read();
     let acc = inner
         .accounts
         .get(&email)
@@ -215,7 +258,7 @@ async fn put_item(
     Json(body): Json<BlobBody>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers)?;
-    let mut inner = st.inner.write().unwrap();
+    let mut inner = st.write();
     let acc = inner
         .accounts
         .get_mut(&email)
@@ -230,7 +273,7 @@ async fn delete_item(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers)?;
-    let mut inner = st.inner.write().unwrap();
+    let mut inner = st.write();
     let acc = inner
         .accounts
         .get_mut(&email)
@@ -245,7 +288,7 @@ async fn put_manifest(
     Json(body): Json<BlobBody>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers)?;
-    let mut inner = st.inner.write().unwrap();
+    let mut inner = st.write();
     let acc = inner
         .accounts
         .get_mut(&email)
@@ -256,20 +299,42 @@ async fn put_manifest(
 
 // ─── Helpers ───
 
-/// Extrait et valide le jeton « Authorization: Bearer … ». Renvoie l'email.
-fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
-    let token = headers
+/// Révoque la session courante (déconnexion).
+async fn delete_session(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let token = bearer_token(&headers)?.to_string();
+    st.write().sessions.remove(&token);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Extrait le jeton « Authorization: Bearer … ».
+fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
-    st.inner
-        .read()
-        .unwrap()
-        .sessions
-        .get(token)
-        .cloned()
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "missing bearer token"))
+}
+
+/// Valide le jeton (existence + non-expiration) et renvoie l'email. Évince un
+/// jeton expiré au passage.
+fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+    let token = bearer_token(headers)?.to_string();
+    let mut inner = st.write();
+    let email = match inner.sessions.get(&token) {
+        Some(s) if Instant::now() < s.expires_at => Some(s.email.clone()),
+        Some(_) => None, // expiré
+        None => return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
+    };
+    match email {
+        Some(email) => Ok(email),
+        None => {
+            inner.sessions.remove(&token);
+            Err(ApiError(StatusCode::UNAUTHORIZED, "session expired"))
+        }
+    }
 }
 
 /// Hash lent Argon2id (PHC) du secret d'authentification.

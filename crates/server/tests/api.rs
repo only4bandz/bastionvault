@@ -153,6 +153,57 @@ async fn full_account_and_vault_flow() {
     assert!(body["items"].get("github.com").is_none());
 }
 
+/// Inscrit un compte et renvoie (app, token de session valide).
+async fn registered_session(app: &Router, email: &str) -> String {
+    let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let auth_secret = reg.auth_secret.expose_b64().to_string();
+    let reg_value = serde_json::to_value(&reg).unwrap();
+    send(
+        app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({ "email": email, "registration": reg_value })),
+    )
+    .await;
+    let (_, body) = send(
+        app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": auth_secret })),
+    )
+    .await;
+    body["token"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn logout_revokes_token() {
+    let app = server::app();
+    let token = registered_session(&app, "bob@example.com").await;
+
+    // Jeton valide.
+    let (s, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Déconnexion.
+    let (s, _) = send(&app, "DELETE", "/sessions", Some(&token), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    // Jeton désormais révoqué.
+    let (s, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn expired_token_is_rejected() {
+    // TTL nulle → le jeton est expiré dès la requête suivante.
+    let app = server::app_with_ttl(std::time::Duration::ZERO);
+    let token = registered_session(&app, "carol@example.com").await;
+    let (s, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn prelogin_unknown_account_is_404() {
     let app = server::app();
