@@ -31,6 +31,36 @@ fn register_then_unlock_roundtrip() {
 }
 
 #[test]
+fn export_key_then_from_key_roundtrip() {
+    // Session rehydration: a vault rebuilt from an exported key decrypts items
+    // sealed by the original, and seals items the original can read back.
+    let (vault, _reg, _sk) =
+        Vault::register_with(b"correct horse battery staple", fast_kdf()).unwrap();
+    let blob = vault.encrypt_item(b"hunter2", "login-1").unwrap();
+
+    let key = vault.export_key();
+    let rebuilt = Vault::from_key(&key).unwrap();
+    assert_eq!(
+        rebuilt.decrypt_item(&blob, "login-1").unwrap().as_slice(),
+        b"hunter2"
+    );
+
+    let blob2 = rebuilt.encrypt_item(b"second", "login-2").unwrap();
+    assert_eq!(
+        vault.decrypt_item(&blob2, "login-2").unwrap().as_slice(),
+        b"second"
+    );
+}
+
+#[test]
+fn from_key_rejects_wrong_length() {
+    assert!(matches!(
+        Vault::from_key(&[0u8; 16]),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
 fn wrong_password_cannot_unlock() {
     let (_, reg, sk) = Vault::register_with(b"the right one", fast_kdf()).unwrap();
     let result = Vault::unlock(

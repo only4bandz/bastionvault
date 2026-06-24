@@ -25,9 +25,13 @@ const isBuiltin = (url) => {
   }
 };
 
+const keep = document.getElementById("keep");
+const DEFAULT_KEEP_MINUTES = 60;
+
 (async () => {
-  const { serverUrl } = await chrome.storage.local.get("serverUrl");
+  const { serverUrl, keepUnlockMinutes } = await chrome.storage.local.get(["serverUrl", "keepUnlockMinutes"]);
   input.value = serverUrl || DEFAULT_SERVER;
+  keep.value = String(keepUnlockMinutes || DEFAULT_KEEP_MINUTES);
 })();
 
 document.getElementById("save").addEventListener("click", async () => {
@@ -52,8 +56,9 @@ document.getElementById("save").addEventListener("click", async () => {
     }
   }
 
-  await chrome.storage.local.set({ serverUrl: url });
+  await chrome.storage.local.set({ serverUrl: url, keepUnlockMinutes: Number(keep.value) });
   saved.textContent = "Saved ✓";
   permnote.style.color = "var(--muted)";
-  permnote.textContent = `Bastion will sync with ${url}.`;
+  const label = keep.selectedOptions[0]?.textContent || `${keep.value} min`;
+  permnote.textContent = `Bastion will sync with ${url}. Keeps unlocked for ${label}.`;
 });

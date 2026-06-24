@@ -2,20 +2,25 @@
 //
 // This is the ONLY place the vault is ever decrypted. It holds the unlocked
 // session — the WASM `Account` (which owns the vault key), the bearer token and
-// the decrypted items — in memory ONLY. Nothing secret is written to
-// chrome.storage / disk (anti-stealer model, mirrors crypto-wasm Account::lock).
-// When Chrome evicts this worker the session is simply lost, which re-locks the
-// vault. Auto-lock on inactivity is enforced with a chrome.alarms timer.
+// the decrypted items — in memory.
 //
-// The popup and options pages are thin views that talk to this worker via
-// chrome.runtime messages; they never run the crypto themselves.
+// MV3 evicts this worker after seconds of inactivity, which would wipe that
+// memory and force a re-unlock. To honour the user's "keep unlocked for N"
+// choice, the session is also mirrored into `chrome.storage.session`: a
+// RAM-only, extension-private store that survives worker eviction but is never
+// written to disk and is unreadable by page scripts / infostealers. It holds
+// the exported vault key (see crypto-wasm Account::export_session) so the
+// worker can rehydrate WITHOUT re-deriving Argon2id — never the master password.
+// Everything is cleared on lock or at expiry; nothing secret touches
+// localStorage / IndexedDB / disk.
 
-import init, { unlock } from "./pkg/crypto_wasm.js";
+import init, { unlock, rehydrate } from "./pkg/crypto_wasm.js";
 import { makeApi, ApiError } from "./lib/api.js";
 
 const DEFAULT_SERVER = "http://127.0.0.1:7777";
-const AUTO_LOCK_MINUTES = 10;
+const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
+const SESSION_KEY = "session"; // key in chrome.storage.session
 
 // ── WASM (loaded lazily, once per worker lifetime) ──
 let wasmReady = null;
@@ -24,7 +29,7 @@ function ensureWasm() {
   return wasmReady;
 }
 
-// ── in-memory session (never persisted) ──
+// ── in-memory session (fast path) ──
 // { account, token, email, server, items: Map<id, item> }
 let session = null;
 
@@ -33,11 +38,40 @@ async function getServerUrl() {
   return serverUrl || DEFAULT_SERVER;
 }
 
-function bumpAutolock() {
-  chrome.alarms.create(AUTOLOCK_ALARM, { delayInMinutes: AUTO_LOCK_MINUTES });
+async function getKeepMinutes() {
+  const { keepUnlockMinutes } = await chrome.storage.local.get("keepUnlockMinutes");
+  const n = Number(keepUnlockMinutes);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_KEEP_MINUTES;
 }
 
-function lock() {
+// Push the lock deadline out to now + keep-unlock window, updating both the
+// alarm (proactive lock) and the persisted session (rehydration gate).
+async function touchSession() {
+  const minutes = await getKeepMinutes();
+  const expiresAt = Date.now() + minutes * 60_000;
+  chrome.alarms.create(AUTOLOCK_ALARM, { when: expiresAt });
+  const stored = await chrome.storage.session.get(SESSION_KEY);
+  if (stored[SESSION_KEY]) {
+    stored[SESSION_KEY].expiresAt = expiresAt;
+    await chrome.storage.session.set({ [SESSION_KEY]: stored[SESSION_KEY] });
+  }
+  return expiresAt;
+}
+
+async function persistSession() {
+  if (!session) return;
+  const minutes = await getKeepMinutes();
+  await chrome.storage.session.set({
+    [SESSION_KEY]: {
+      crypto: session.account.export_session(), // contains the vault key (RAM only)
+      email: session.email,
+      server: session.server,
+      expiresAt: Date.now() + minutes * 60_000,
+    },
+  });
+}
+
+async function lock() {
   if (session) {
     const { account, token, server } = session;
     if (token) makeApi(server).logout(token).catch(() => {});
@@ -48,20 +82,51 @@ function lock() {
     }
   }
   session = null;
+  await chrome.storage.session.remove(SESSION_KEY);
   chrome.alarms.clear(AUTOLOCK_ALARM);
   chrome.action.setBadgeText({ text: "" });
+}
+
+// Returns the live session, rehydrating from storage.session if the worker was
+// evicted. Returns null (locked) if there is no valid, unexpired session.
+async function ensureSession() {
+  if (session) return session;
+
+  const stored = (await chrome.storage.session.get(SESSION_KEY))[SESSION_KEY];
+  if (!stored) return null;
+  if (Date.now() > stored.expiresAt) {
+    await chrome.storage.session.remove(SESSION_KEY);
+    return null;
+  }
+
+  try {
+    await ensureWasm();
+    const account = rehydrate(stored.crypto); // no Argon2id; just the vault key
+    const api = makeApi(stored.server);
+    const token = await api.login(stored.email, account.auth_secret);
+    const vault = await api.getVault(token);
+    const items = new Map();
+    for (const [id, blob] of Object.entries(vault.items || {})) {
+      try {
+        items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
+      } catch {
+        /* skip corrupt/tampered item */
+      }
+    }
+    session = { account, token, email: stored.email, server: stored.server, items };
+    chrome.action.setBadgeText({ text: "✓" });
+    chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
+    return session;
+  } catch {
+    // Rehydration failed (server unreachable, expired data…) — stay locked but
+    // keep the stored blob so a later attempt can retry until it actually expires.
+    return null;
+  }
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === AUTOLOCK_ALARM) lock();
 });
-
-// Lock as soon as the browser locks / the user signs out of the OS session.
-if (chrome.idle?.onStateChanged) {
-  chrome.idle.onStateChanged.addListener((state) => {
-    if (state === "locked") lock();
-  });
-}
 
 async function doUnlock(email, password, secretKey) {
   await ensureWasm();
@@ -105,7 +170,8 @@ async function doUnlock(email, password, secretKey) {
   }
 
   session = { account, token, email, server, items };
-  bumpAutolock();
+  await persistSession();
+  await touchSession();
   chrome.action.setBadgeText({ text: "✓" });
   chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
 }
@@ -130,10 +196,6 @@ function toMeta(it) {
 function sortItems(a, b) {
   if (!!b.favorite !== !!a.favorite) return a.favorite ? -1 : 1;
   return (b.updatedAt || 0) - (a.updatedAt || 0);
-}
-
-function requireSession() {
-  if (!session) throw new Error("locked");
 }
 
 // ── credential autofill (injected into the active tab on demand) ──
@@ -170,7 +232,11 @@ function injectedFill(creds) {
   if (pw) {
     const scope = pw.form || document;
     const cands = Array.from(scope.querySelectorAll("input")).filter(
-      (i) => i !== pw && i.type !== "password" && !i.disabled && !i.readOnly &&
+      (i) =>
+        i !== pw &&
+        i.type !== "password" &&
+        !i.disabled &&
+        !i.readOnly &&
         ["text", "email", "tel", ""].includes((i.type || "").toLowerCase())
     );
     const hint = (i) => `${i.name} ${i.id} ${i.autocomplete}`.toLowerCase();
@@ -199,15 +265,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     try {
       switch (msg?.type) {
         case "STATE": {
-          if (session) bumpAutolock();
-          const server = session?.server || (await getServerUrl());
-          sendResponse({
-            ok: true,
-            locked: !session,
-            email: session?.email || null,
-            server,
-            count: session ? session.items.size : 0,
-          });
+          const s = await ensureSession();
+          if (s) await touchSession();
+          const server = s?.server || (await getServerUrl());
+          sendResponse({ ok: true, locked: !s, email: s?.email || null, server, count: s ? s.items.size : 0 });
           break;
         }
         case "UNLOCK":
@@ -215,26 +276,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true });
           break;
         case "LOCK":
-          lock();
+          await lock();
           sendResponse({ ok: true });
           break;
-        case "LIST":
-          requireSession();
-          bumpAutolock();
-          sendResponse({ ok: true, items: [...session.items.values()].map(toMeta).sort(sortItems) });
+        case "LIST": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          sendResponse({ ok: true, items: [...s.items.values()].map(toMeta).sort(sortItems) });
           break;
+        }
         case "REVEAL": {
-          requireSession();
-          bumpAutolock();
-          const it = session.items.get(msg.id);
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
           sendResponse({ ok: true, value: it[msg.field] || "" });
           break;
         }
         case "FILL": {
-          requireSession();
-          bumpAutolock();
-          const it = session.items.get(msg.id);
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
           const filled = await fillActiveTab(it);
           sendResponse({ ok: true, filled });
@@ -244,7 +309,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: false, error: "Unknown message." });
       }
     } catch (e) {
-      sendResponse({ ok: false, error: e?.message || String(e), locked: e?.message === "locked" });
+      sendResponse({ ok: false, error: e?.message || String(e) });
     }
   })();
   return true; // keep the channel open for the async response

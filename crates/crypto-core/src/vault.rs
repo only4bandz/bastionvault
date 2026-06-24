@@ -209,6 +209,33 @@ impl Vault {
         ))
     }
 
+    /// Exports the raw vault key for an **in-memory session handoff** — e.g. a
+    /// browser extension whose MV3 service worker is evicted every few seconds
+    /// and must rehydrate the unlocked vault without re-deriving Argon2id.
+    ///
+    /// ⚠️ These bytes ARE the crown decryption key: anyone holding them can
+    /// decrypt the whole vault. They grant no *new* power in a browser context
+    /// (a same-origin script can already read the key from memory — see the
+    /// crypto-wasm threat model), but the caller MUST keep them in RAM only
+    /// (e.g. `chrome.storage.session`, never `localStorage`/disk), for a bounded
+    /// lifetime, and wipe them on lock/expiry. The returned buffer is
+    /// `Zeroizing`, so it is wiped when dropped.
+    pub fn export_key(&self) -> Zeroizing<Vec<u8>> {
+        Zeroizing::new(self.vault_key.as_bytes().to_vec())
+    }
+
+    /// Rebuilds a vault from a key previously produced by [`Vault::export_key`].
+    /// This is a **session-rehydration** path, not an authentication one: it
+    /// performs no password/Secret Key derivation. Errors if the key is not
+    /// exactly [`KEY_LEN`] bytes.
+    pub fn from_key(key_bytes: &[u8]) -> Result<Self> {
+        let mut key_arr: [u8; KEY_LEN] =
+            key_bytes.try_into().map_err(|_| CryptoError::Malformed)?;
+        let vault_key = SecretKey::from_bytes(key_arr);
+        key_arr.zeroize();
+        Ok(Self { vault_key })
+    }
+
     /// Encrypts an item's content. `item_id` is authenticated (AAD) so that a
     /// ciphertext cannot be moved to another item.
     pub fn encrypt_item(&self, plaintext: &[u8], item_id: &str) -> Result<EncryptedBlob> {
