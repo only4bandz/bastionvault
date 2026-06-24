@@ -160,7 +160,7 @@ impl Manifest {
 }
 
 /// Résultat d'un [`Manifest::check`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrityReport {
     /// Items attendus (dans le manifest) mais absents côté serveur → suppression.
     pub missing: Vec<String>,
