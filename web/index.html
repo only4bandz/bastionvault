@@ -97,13 +97,36 @@
 
     let account = null; // unlocked vault, in memory only
     const renderPlain = () => {
-      if (!account) { $('plain-list').textContent = '— (locked)'; return; }
+      if (!account || account.is_locked) { $('plain-list').textContent = '— (locked)'; return; }
       const lines = Object.keys(server.items).map((id) => {
         try { return `${id} = ${account.decrypt_item(server.items[id], id)}`; }
         catch { return `${id} = <unreadable>`; }
       });
       $('plain-list').textContent = lines.length ? lines.join('\n') : '—';
     };
+
+    // ── Auto-lock: shrink the window during which the vault key lives in
+    // browser memory. We lock on inactivity, and whenever the tab is hidden
+    // or loses focus (a stealer's best moment to read memory unobserved).
+    const INACTIVITY_MS = 2 * 60 * 1000; // 2 min
+    let idleTimer = null;
+    const doLock = (reason) => {
+      if (!account || account.is_locked) return;
+      account.lock();                 // drops + zeroizes the vault key in WASM
+      $('btn-add').disabled = true;
+      renderPlain();
+      log(`Locked (${reason}). Unlock again to read items.`, 'warn');
+    };
+    const armIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => doLock('inactivity'), INACTIVITY_MS);
+    };
+    ['mousemove', 'keydown', 'click'].forEach((ev) =>
+      window.addEventListener(ev, armIdle, { passive: true }));
+    window.addEventListener('blur', () => doLock('focus lost'));
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') doLock('tab hidden');
+    });
 
     await init();
     log('WASM module ready. Create a vault to get started.', 'ok');
@@ -114,15 +137,18 @@
         account = register($('reg-pw').value);
         server.registration = account.registration_json;
         server.items = {};
-        const sk = account.secret_key;
+        // One-shot reveal: after this single call the Secret Key is dropped
+        // (zeroized) in WASM and cannot be read again.
+        const reveal = JSON.parse(account.reveal_secret('alice@example.com'));
         $('secret-out').innerHTML =
           `<label>Secret Key (keep it safe — shown only once)</label>` +
-          `<pre class="warn">${sk}</pre>` +
-          `<details><summary class="hint">View the Emergency Kit</summary><pre>${account.emergency_kit('alice@example.com')}</pre></details>`;
-        $('unlock-sk').value = sk;       // pre-filled for the demo
+          `<pre class="warn">${reveal.secret_key}</pre>` +
+          `<details><summary class="hint">View the Emergency Kit</summary><pre>${reveal.emergency_kit}</pre></details>`;
+        $('unlock-sk').value = reveal.secret_key;  // pre-filled for the demo
         $('unlock-pw').value = $('reg-pw').value;
         $('btn-add').disabled = false;
         $('btn-unlock').disabled = false;
+        armIdle();
         renderServer(); renderPlain();
         log('Vault created. The server only receives opaque data.', 'ok');
       } catch (e) { log('Error: ' + e, 'err'); }
@@ -132,6 +158,7 @@
       try {
         const id = $('item-id').value, val = $('item-val').value;
         server.items[id] = account.encrypt_item(val, id);
+        armIdle();
         renderServer(); renderPlain();
         log(`Item "${id}" encrypted client-side then sent to the server.`, 'ok');
       } catch (e) { log('Error: ' + e, 'err'); }
@@ -142,6 +169,8 @@
         if (!server.registration) { log('Create a vault first.', 'warn'); return; }
         log('Unlocking…');
         account = unlock($('unlock-pw').value, $('unlock-sk').value, server.registration);
+        $('btn-add').disabled = false;
+        armIdle();
         renderPlain();
         log('Unlocked. Items decrypted in memory.', 'ok');
       } catch (e) {
