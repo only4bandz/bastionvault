@@ -42,3 +42,14 @@ fn wrong_secret_key_fails_in_wasm() {
         .secret_key();
     assert!(unlock("pw", &other, &reg).is_err());
 }
+
+#[wasm_bindgen_test]
+fn manifest_bindings_roundtrip_and_rollback_in_wasm() {
+    let account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    // Scelle un manifest, le rouvre (anti-rollback), et rejette un rollback.
+    let sealed = account.seal_manifest("{\"seq\":2,\"entries\":[]}").unwrap();
+    let opened = account.open_manifest_checked(&sealed, 2).unwrap();
+    assert!(opened.contains("\"seq\":2"));
+    // last_seen_seq=5 > 2 → rollback détecté.
+    assert!(account.open_manifest_checked(&sealed, 5).is_err());
+}
