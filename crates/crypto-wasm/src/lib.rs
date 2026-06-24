@@ -33,6 +33,7 @@
 use wasm_bindgen::prelude::*;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use crypto_core::send::{self, IdentityKeys as SendIdentity, PublicIdentity, Sender};
 use crypto_core::{AccountSecret, EncryptedBlob, KdfParams, Manifest, Registration, Vault};
 use std::collections::HashMap;
 use zeroize::Zeroize;
@@ -40,6 +41,30 @@ use zeroize::Zeroize;
 /// Converts a displayable error into a `JsError` (opaque message, no secret).
 fn js_err<E: core::fmt::Display>(e: E) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// Reserved vault-item id under which the Bastion Send identity is stored
+/// (encrypted under the vault key, synced like any other item).
+const SEND_IDENTITY_ITEM_ID: &str = "bastion:send-identity";
+
+/// Item id (for the app to store/sync the encrypted Send identity).
+#[wasm_bindgen]
+pub fn send_identity_item_id() -> String {
+    SEND_IDENTITY_ITEM_ID.to_string()
+}
+
+/// Safety number to compare out-of-band with a contact — binds both Bastion
+/// ids + encryption + signing keys + versions (Signal-style, 60 digits).
+#[wasm_bindgen]
+pub fn send_safety_number(
+    id_a: &str,
+    pub_a_json: &str,
+    id_b: &str,
+    pub_b_json: &str,
+) -> Result<String, JsError> {
+    let a: PublicIdentity = serde_json::from_str(pub_a_json).map_err(js_err)?;
+    let b: PublicIdentity = serde_json::from_str(pub_b_json).map_err(js_err)?;
+    Ok(send::safety_number(id_a, &a, id_b, &b))
 }
 
 /// An unlocked account on the browser side: holds the vault in memory along
@@ -58,6 +83,10 @@ pub struct Account {
     /// re-hashed there with Argon2id). Held so the app can log in / re-login, and
     /// dropped on [`Account::lock`].
     auth_secret: Option<String>,
+    /// Bastion Send identity (X25519 + Ed25519), once generated/loaded. Lives
+    /// only while unlocked; dropped on [`Account::lock`]. Persisted encrypted in
+    /// the vault under the reserved item id [`SEND_IDENTITY_ITEM_ID`].
+    identity: Option<SendIdentity>,
 }
 
 impl Account {
@@ -66,6 +95,11 @@ impl Account {
         self.vault
             .as_ref()
             .ok_or_else(|| JsError::new("vault locked"))
+    }
+    fn identity(&self) -> Result<&SendIdentity, JsError> {
+        self.identity
+            .as_ref()
+            .ok_or_else(|| JsError::new("no Send identity (call create/load first)"))
     }
 }
 
@@ -94,6 +128,7 @@ impl Account {
         self.vault = None;
         self.secret = None;
         self.auth_secret = None;
+        self.identity = None;
     }
 
     /// The server authentication secret (base64), or `""` if locked. Send this
@@ -160,6 +195,115 @@ impl Account {
         serde_json::to_string(&session).map_err(js_err)
     }
 
+    // ─── Bastion Send (E2E encrypted notes between users) ───
+
+    /// Generate a fresh Send identity, hold it in memory, and return the
+    /// ENCRYPTED reserved vault item (JSON `EncryptedBlob`) to persist on the
+    /// server under [`send_identity_item_id`]. Replaces any existing one.
+    pub fn create_send_identity(&mut self) -> Result<String, JsError> {
+        let ident = SendIdentity::generate(1);
+        let stored = B64.encode(&*ident.to_bytes());
+        let blob = {
+            let vault = self.vault()?;
+            vault
+                .encrypt_item(stored.as_bytes(), SEND_IDENTITY_ITEM_ID)
+                .map_err(js_err)?
+        };
+        self.identity = Some(ident);
+        serde_json::to_string(&blob).map_err(js_err)
+    }
+
+    /// Load the Send identity from its encrypted reserved vault item (the
+    /// `EncryptedBlob` JSON fetched from the server). Call on unlock if present.
+    pub fn load_send_identity(&mut self, blob_json: &str) -> Result<(), JsError> {
+        let blob: EncryptedBlob = serde_json::from_str(blob_json).map_err(js_err)?;
+        let ident = {
+            let vault = self.vault()?;
+            let stored = vault
+                .decrypt_item(&blob, SEND_IDENTITY_ITEM_ID)
+                .map_err(js_err)?;
+            let bytes = B64.decode(&*stored).map_err(js_err)?;
+            SendIdentity::from_bytes(&bytes).map_err(js_err)?
+        };
+        self.identity = Some(ident);
+        Ok(())
+    }
+
+    /// `true` if a Send identity is loaded in memory.
+    #[wasm_bindgen(getter)]
+    pub fn has_send_identity(&self) -> bool {
+        self.identity.is_some()
+    }
+
+    /// The PUBLIC half of the Send identity (JSON `PublicIdentity`) — this is
+    /// what gets published/shared so others can encrypt to you.
+    pub fn send_identity_public(&self) -> Result<String, JsError> {
+        serde_json::to_string(&self.identity()?.public()).map_err(js_err)
+    }
+
+    /// Encrypt a note to a recipient. `recipient_public_json` is their
+    /// `PublicIdentity`. If `sender_id` is set, the note is signed by this
+    /// identity (sender stays hidden from the server, verifiable by the
+    /// recipient). Returns the `SendBlob` JSON to upload.
+    pub fn send_seal(
+        &self,
+        plaintext: &str,
+        recipient_id: &str,
+        recipient_public_json: &str,
+        passphrase: Option<String>,
+        sender_id: Option<String>,
+    ) -> Result<String, JsError> {
+        let recip: PublicIdentity = serde_json::from_str(recipient_public_json).map_err(js_err)?;
+        let signer = match &sender_id {
+            Some(id) => Some((self.identity()?, id.as_str())),
+            None => None,
+        };
+        let blob = send::seal(
+            plaintext.as_bytes(),
+            recipient_id,
+            &recip,
+            passphrase.as_deref().map(str::as_bytes),
+            signer,
+        )
+        .map_err(js_err)?;
+        serde_json::to_string(&blob).map_err(js_err)
+    }
+
+    /// Open a `SendBlob` addressed to this identity. If `verify_sender_json`
+    /// (the claimed sender's `PublicIdentity`) is supplied, the signature is
+    /// verified. Returns JSON `{ "plaintext": "...", "sender": { "state":
+    /// "anonymous"|"unverified"|"verified", "id": "…"|null } }`.
+    pub fn send_open(
+        &self,
+        blob_json: &str,
+        passphrase: Option<String>,
+        verify_sender_json: Option<String>,
+    ) -> Result<String, JsError> {
+        let blob: send::SendBlob = serde_json::from_str(blob_json).map_err(js_err)?;
+        let verifier: Option<PublicIdentity> = match &verify_sender_json {
+            Some(j) => Some(serde_json::from_str(j).map_err(js_err)?),
+            None => None,
+        };
+        let opened = send::open(
+            &blob,
+            self.identity()?,
+            passphrase.as_deref().map(str::as_bytes),
+            verifier.as_ref(),
+        )
+        .map_err(js_err)?;
+        let plaintext = String::from_utf8(opened.plaintext.to_vec()).map_err(js_err)?;
+        let (state, id) = match opened.sender {
+            Sender::Anonymous => ("anonymous", None),
+            Sender::Unverified(id) => ("unverified", Some(id)),
+            Sender::Verified(id) => ("verified", Some(id)),
+        };
+        let out = serde_json::json!({
+            "plaintext": plaintext,
+            "sender": { "state": state, "id": id },
+        });
+        serde_json::to_string(&out).map_err(js_err)
+    }
+
     // ─── Integrity manifest (verification on the Rust/WASM side, not in JS) ───
 
     /// Seals a manifest (JSON) under the vault key; returns the JSON blob.
@@ -217,6 +361,7 @@ pub fn register(master_password: &str) -> Result<Account, JsError> {
         registration_json,
         secret: Some(secret),
         auth_secret,
+        identity: None,
     })
 }
 
@@ -243,6 +388,7 @@ pub fn register_with(
         registration_json,
         secret: Some(secret),
         auth_secret,
+        identity: None,
     })
 }
 
@@ -273,6 +419,7 @@ pub fn unlock(
         registration_json: registration_json.to_string(),
         secret: None,
         auth_secret: Some(auth.expose_b64().to_string()),
+        identity: None,
     })
 }
 
@@ -310,5 +457,6 @@ pub fn rehydrate(session_json: &str) -> Result<Account, JsError> {
         } else {
             Some(auth_secret.to_string())
         },
+        identity: None,
     })
 }
