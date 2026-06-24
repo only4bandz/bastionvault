@@ -1,0 +1,362 @@
+// Bastion extension — background service worker (ES module).
+//
+// This is the ONLY place the vault is ever decrypted. It holds the unlocked
+// session — the WASM `Account` (which owns the vault key), the bearer token and
+// the decrypted items — in memory.
+//
+// MV3 evicts this worker after seconds of inactivity, which would wipe that
+// memory and force a re-unlock. To honour the user's "keep unlocked for N"
+// choice, the session is also mirrored into `chrome.storage.session`: a
+// RAM-only, extension-private store that survives worker eviction but is never
+// written to disk and is unreadable by page scripts / infostealers. It holds
+// the exported vault key (see crypto-wasm Account::export_session) so the
+// worker can rehydrate WITHOUT re-deriving Argon2id — never the master password.
+// Everything is cleared on lock or at expiry; nothing secret touches
+// localStorage / IndexedDB / disk.
+
+import init, { unlock, rehydrate } from "./pkg/crypto_wasm.js";
+import { makeApi, ApiError } from "./lib/api.js";
+import { matchesSite } from "./lib/match.js";
+
+const DEFAULT_SERVER = "http://127.0.0.1:7777";
+const DEFAULT_KEEP_MINUTES = 60;
+const AUTOLOCK_ALARM = "bastion-autolock";
+const SESSION_KEY = "session"; // key in chrome.storage.session
+
+// ── WASM (loaded lazily, once per worker lifetime) ──
+let wasmReady = null;
+function ensureWasm() {
+  if (!wasmReady) wasmReady = init();
+  return wasmReady;
+}
+
+// ── in-memory session (fast path) ──
+// { account, token, email, server, items: Map<id, item> }
+let session = null;
+
+async function getServerUrl() {
+  const { serverUrl } = await chrome.storage.local.get("serverUrl");
+  return serverUrl || DEFAULT_SERVER;
+}
+
+async function getKeepMinutes() {
+  const { keepUnlockMinutes } = await chrome.storage.local.get("keepUnlockMinutes");
+  const n = Number(keepUnlockMinutes);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_KEEP_MINUTES;
+}
+
+// Push the lock deadline out to now + keep-unlock window, updating both the
+// alarm (proactive lock) and the persisted session (rehydration gate).
+async function touchSession() {
+  const minutes = await getKeepMinutes();
+  const expiresAt = Date.now() + minutes * 60_000;
+  chrome.alarms.create(AUTOLOCK_ALARM, { when: expiresAt });
+  const stored = await chrome.storage.session.get(SESSION_KEY);
+  if (stored[SESSION_KEY]) {
+    stored[SESSION_KEY].expiresAt = expiresAt;
+    await chrome.storage.session.set({ [SESSION_KEY]: stored[SESSION_KEY] });
+  }
+  return expiresAt;
+}
+
+async function persistSession() {
+  if (!session) return;
+  const minutes = await getKeepMinutes();
+  await chrome.storage.session.set({
+    [SESSION_KEY]: {
+      crypto: session.account.export_session(), // contains the vault key (RAM only)
+      email: session.email,
+      server: session.server,
+      expiresAt: Date.now() + minutes * 60_000,
+    },
+  });
+}
+
+async function lock() {
+  if (session) {
+    const { account, token, server } = session;
+    if (token) makeApi(server).logout(token).catch(() => {});
+    try {
+      account.lock(); // drops + zeroizes the vault key inside WASM
+    } catch {
+      /* already locked */
+    }
+  }
+  session = null;
+  await chrome.storage.session.remove(SESSION_KEY);
+  chrome.alarms.clear(AUTOLOCK_ALARM);
+  chrome.action.setBadgeText({ text: "" });
+}
+
+// Returns the live session, rehydrating from storage.session if the worker was
+// evicted. Returns null (locked) if there is no valid, unexpired session.
+async function ensureSession() {
+  if (session) return session;
+
+  const stored = (await chrome.storage.session.get(SESSION_KEY))[SESSION_KEY];
+  if (!stored) return null;
+  if (Date.now() > stored.expiresAt) {
+    await chrome.storage.session.remove(SESSION_KEY);
+    return null;
+  }
+
+  try {
+    await ensureWasm();
+    const account = rehydrate(stored.crypto); // no Argon2id; just the vault key
+    const api = makeApi(stored.server);
+    const token = await api.login(stored.email, account.auth_secret);
+    const vault = await api.getVault(token);
+    const items = new Map();
+    for (const [id, blob] of Object.entries(vault.items || {})) {
+      try {
+        items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
+      } catch {
+        /* skip corrupt/tampered item */
+      }
+    }
+    session = { account, token, email: stored.email, server: stored.server, items };
+    chrome.action.setBadgeText({ text: "✓" });
+    chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
+    return session;
+  } catch {
+    // Rehydration failed (server unreachable, expired data…) — stay locked but
+    // keep the stored blob so a later attempt can retry until it actually expires.
+    return null;
+  }
+}
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === AUTOLOCK_ALARM) lock();
+});
+
+async function doUnlock(email, password, secretKey) {
+  await ensureWasm();
+  const server = await getServerUrl();
+  const api = makeApi(server);
+
+  let pre;
+  try {
+    pre = await api.prelogin(email);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) throw new Error("No vault found for this email.");
+    throw e;
+  }
+
+  // unlock() only needs salt/kdf/wrapped key; the auth secret is re-derived inside.
+  const regJson = JSON.stringify({
+    version: 1,
+    salt: pre.salt,
+    kdf: pre.kdf,
+    wrapped_vault_key: pre.wrapped_vault_key,
+    auth_secret: "",
+  });
+
+  let account;
+  try {
+    account = unlock(password, secretKey, regJson);
+  } catch {
+    throw new Error("Invalid master password or Secret Key.");
+  }
+
+  const token = await api.login(email, account.auth_secret);
+  const vault = await api.getVault(token);
+
+  const items = new Map();
+  for (const [id, blob] of Object.entries(vault.items || {})) {
+    try {
+      items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
+    } catch {
+      // Skip an item that fails to decrypt (corrupt / tampered).
+    }
+  }
+
+  session = { account, token, email, server, items };
+  await persistSession();
+  await touchSession();
+  chrome.action.setBadgeText({ text: "✓" });
+  chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
+}
+
+// Public, non-secret view of an item for the popup list.
+function toMeta(it) {
+  return {
+    id: it.id,
+    type: it.type,
+    title: it.title,
+    username: it.username || "",
+    url: it.url || "",
+    cardBrand: it.cardBrand || "",
+    cardBankDomain: it.cardBankDomain || "",
+    cardLast4: (it.cardNumber || "").replace(/\D/g, "").slice(-4),
+    hasPassword: !!it.password,
+    favorite: !!it.favorite,
+    updatedAt: it.updatedAt || 0,
+  };
+}
+
+function sortItems(a, b) {
+  if (!!b.favorite !== !!a.favorite) return a.favorite ? -1 : 1;
+  return (b.updatedAt || 0) - (a.updatedAt || 0);
+}
+
+// Login items whose site matches the given host (incl. equivalent domains),
+// newest first.
+function suggestionsFor(s, host) {
+  return [...s.items.values()]
+    .filter((it) => it.type === "login" && (it.username || it.password))
+    .filter((it) => matchesSite(it.url || it.title, host))
+    .sort(sortItems)
+    .map((it) => ({ id: it.id, title: it.title, username: it.username || "" }));
+}
+
+// ── credential autofill (injected into the active tab on demand) ──
+async function fillActiveTab(item) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error("No active tab to fill.");
+  // Browser-internal pages (chrome://, the Web Store, etc.) can't be scripted.
+  if (!/^https?:\/\//i.test(tab.url || "")) {
+    throw new Error("Open a website to fill credentials — this page can't be filled.");
+  }
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id, allFrames: true },
+    args: [{ username: item.username || "", password: item.password || "" }],
+    func: injectedFill,
+  });
+  return results.some((r) => r.result);
+}
+
+// Runs in the page context. Must be self-contained (it is serialized, so it
+// cannot reference anything outside its own body).
+function injectedFill(creds) {
+  const setNative = (el, value) => {
+    const proto = Object.getPrototypeOf(el);
+    const desc = Object.getOwnPropertyDescriptor(proto, "value");
+    if (desc && desc.set) desc.set.call(el, value);
+    else el.value = value;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  const pw = document.querySelector('input[type="password"]:not([disabled]):not([readonly])');
+  let user = null;
+
+  if (pw) {
+    const scope = pw.form || document;
+    const cands = Array.from(scope.querySelectorAll("input")).filter(
+      (i) =>
+        i !== pw &&
+        i.type !== "password" &&
+        !i.disabled &&
+        !i.readOnly &&
+        ["text", "email", "tel", ""].includes((i.type || "").toLowerCase())
+    );
+    const hint = (i) => `${i.name} ${i.id} ${i.autocomplete}`.toLowerCase();
+    user = cands.find((i) => /user|email|login|account|phone/.test(hint(i))) || cands[0] || null;
+  } else {
+    user = document.querySelector(
+      'input[autocomplete="username"], input[type="email"], input[name*="user" i], input[id*="user" i]'
+    );
+  }
+
+  let filled = false;
+  if (pw && creds.password) {
+    setNative(pw, creds.password);
+    filled = true;
+  }
+  if (user && creds.username) {
+    setNative(user, creds.username);
+    filled = true;
+  }
+  return filled;
+}
+
+// ── message router ──
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  (async () => {
+    try {
+      switch (msg?.type) {
+        case "STATE": {
+          const s = await ensureSession();
+          if (s) await touchSession();
+          const server = s?.server || (await getServerUrl());
+          sendResponse({ ok: true, locked: !s, email: s?.email || null, server, count: s ? s.items.size : 0 });
+          break;
+        }
+        case "UNLOCK":
+          await doUnlock(msg.email, msg.password, msg.secretKey);
+          sendResponse({ ok: true });
+          break;
+        case "LOCK":
+          await lock();
+          sendResponse({ ok: true });
+          break;
+        case "LIST": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          sendResponse({ ok: true, items: [...s.items.values()].map(toMeta).sort(sortItems) });
+          break;
+        }
+        case "REVEAL": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const it = s.items.get(msg.id);
+          if (!it) throw new Error("Item not found.");
+          sendResponse({ ok: true, value: it[msg.field] || "" });
+          break;
+        }
+        case "SUGGEST": {
+          // Inline-autofill suggestions for a page's login fields. Returns only
+          // non-secret metadata (id/title/username); never passwords. Stays
+          // silent (no prompt) when locked.
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: true, items: [] });
+          await touchSession();
+          sendResponse({ ok: true, items: suggestionsFor(s, msg.host) });
+          break;
+        }
+        case "CREDS": {
+          // The chosen credential for an inline fill done by the content script
+          // (which has DOM access; the background can't executeScript without a
+          // host grant on an arbitrary site). Password leaves WASM only here,
+          // for the field the user explicitly picked.
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const it = s.items.get(msg.id);
+          if (!it) throw new Error("Item not found.");
+          sendResponse({ ok: true, username: it.username || "", password: it.password || "" });
+          break;
+        }
+        case "ITEM": {
+          // Full decrypted item for the detail view. The popup is a trusted
+          // extension-page context (same trust boundary that already gets
+          // individual secrets via REVEAL); content scripts never see this.
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const it = s.items.get(msg.id);
+          if (!it) throw new Error("Item not found.");
+          sendResponse({ ok: true, item: it });
+          break;
+        }
+        case "FILL": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const it = s.items.get(msg.id);
+          if (!it) throw new Error("Item not found.");
+          const filled = await fillActiveTab(it);
+          sendResponse({ ok: true, filled });
+          break;
+        }
+        default:
+          sendResponse({ ok: false, error: "Unknown message." });
+      }
+    } catch (e) {
+      sendResponse({ ok: false, error: e?.message || String(e) });
+    }
+  })();
+  return true; // keep the channel open for the async response
+});

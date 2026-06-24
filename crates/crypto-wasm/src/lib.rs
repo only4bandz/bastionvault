@@ -32,6 +32,7 @@
 
 use wasm_bindgen::prelude::*;
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use crypto_core::{AccountSecret, EncryptedBlob, KdfParams, Manifest, Registration, Vault};
 use std::collections::HashMap;
 
@@ -135,6 +136,27 @@ impl Account {
         let blob: EncryptedBlob = serde_json::from_str(blob_json).map_err(js_err)?;
         let plain = self.vault()?.decrypt_item(&blob, item_id).map_err(js_err)?;
         String::from_utf8(plain.to_vec()).map_err(js_err)
+    }
+
+    /// Exports the unlocked session as JSON `{ "vault_key": "<b64>",
+    /// "registration_json": "…", "auth_secret": "<b64>" }`, for a caller that
+    /// must survive being torn down and rebuilt (e.g. a Chrome MV3 service
+    /// worker that Chrome evicts after seconds of inactivity).
+    ///
+    /// ⚠️ The `vault_key` is the crown decryption key. The ONLY acceptable home
+    /// for this blob is RAM-backed, extension-private storage
+    /// (`chrome.storage.session`) for a bounded lifetime — NEVER `localStorage`,
+    /// IndexedDB, cookies, or any on-disk store, and never off the device. It
+    /// lets [`rehydrate`] rebuild the account without re-deriving Argon2id.
+    /// Errors if the account is locked.
+    pub fn export_session(&self) -> Result<String, JsError> {
+        let key = self.vault()?.export_key();
+        let session = serde_json::json!({
+            "vault_key": B64.encode(&*key),
+            "registration_json": self.registration_json,
+            "auth_secret": self.auth_secret.clone().unwrap_or_default(),
+        });
+        serde_json::to_string(&session).map_err(js_err)
     }
 
     // ─── Integrity manifest (verification on the Rust/WASM side, not in JS) ───
@@ -250,5 +272,35 @@ pub fn unlock(
         registration_json: registration_json.to_string(),
         secret: None,
         auth_secret: Some(auth.expose_b64().to_string()),
+    })
+}
+
+/// Rebuilds an [`Account`] from a session blob produced by
+/// [`Account::export_session`] — no password / Secret Key, no Argon2id. Used to
+/// restore an unlocked session after the host (e.g. an MV3 service worker) was
+/// torn down. The Secret Key is never present on a rehydrated account, so
+/// `reveal_secret` correctly fails on it.
+#[wasm_bindgen]
+pub fn rehydrate(session_json: &str) -> Result<Account, JsError> {
+    let v: serde_json::Value = serde_json::from_str(session_json).map_err(js_err)?;
+    let vault_key_b64 = v["vault_key"]
+        .as_str()
+        .ok_or_else(|| JsError::new("missing vault_key"))?;
+    let registration_json = v["registration_json"]
+        .as_str()
+        .ok_or_else(|| JsError::new("missing registration_json"))?;
+    let auth_secret = v["auth_secret"].as_str().unwrap_or_default();
+
+    let key_bytes = B64.decode(vault_key_b64).map_err(js_err)?;
+    let vault = Vault::from_key(&key_bytes).map_err(js_err)?;
+    Ok(Account {
+        vault: Some(vault),
+        registration_json: registration_json.to_string(),
+        secret: None,
+        auth_secret: if auth_secret.is_empty() {
+            None
+        } else {
+            Some(auth_secret.to_string())
+        },
     })
 }
