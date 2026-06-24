@@ -6,11 +6,12 @@
 //! - a **slow Argon2id hash** of the authentication secret (never the raw secret);
 //! - the items and the manifest, as opaque [`EncryptedBlob`]s.
 //!
-//! Storage is in memory (MVP); a persistent layer (SQLite…) can be
-//! substituted for it without changing the HTTP API.
+//! Durability: data is persisted to **SQLite** (still zero-knowledge — only
+//! opaque blobs and the auth-secret hash are stored). An in-memory cache backs
+//! the reads and is loaded from SQLite at startup; mutations are write-through.
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
@@ -21,6 +22,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use crypto_core::{EncryptedBlob, KdfParams, Registration};
@@ -30,18 +32,33 @@ const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
 /// Maximum request body size (1 MiB) — guardrail against memory DoS.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
-/// Builds the router with the default session TTL.
+/// Builds the router, persisting to the SQLite database at `$BASTION_DB`
+/// (default `bastion.db` in the working directory).
 ///
-/// ⚠️ NON-PRODUCTION: this MVP server has NO TLS, CORS, rate limiting,
-/// storage quotas, or persistence. These controls must be added
-/// (and tested) before any real deployment.
+/// ⚠️ NON-PRODUCTION: this server still has NO TLS, CORS, rate limiting, or
+/// storage quotas. These controls must be added (and tested) before deployment.
 pub fn app() -> Router {
-    app_with_ttl(DEFAULT_TOKEN_TTL)
+    let db_path = std::env::var("BASTION_DB").unwrap_or_else(|_| "bastion.db".to_string());
+    build(DEFAULT_TOKEN_TTL, &db_path)
 }
 
-/// Variant with an explicit TTL (useful for testing token expiration).
-pub fn app_with_ttl(token_ttl: Duration) -> Router {
-    let state = AppState::new(token_ttl);
+/// Variant with an explicit SQLite path (used to test persistence).
+pub fn app_with_db(db_path: &str) -> Router {
+    build(DEFAULT_TOKEN_TTL, db_path)
+}
+
+/// In-memory (non-persistent) variant — used by tests for isolation.
+pub fn app_in_memory() -> Router {
+    build(DEFAULT_TOKEN_TTL, ":memory:")
+}
+
+/// In-memory variant with an explicit TTL (tests for token expiration).
+pub fn app_in_memory_with_ttl(token_ttl: Duration) -> Router {
+    build(token_ttl, ":memory:")
+}
+
+fn build(token_ttl: Duration, db_path: &str) -> Router {
+    let state = AppState::new(token_ttl, db_path);
     Router::new()
         .route("/health", get(health))
         .route("/accounts", post(create_account))
@@ -59,10 +76,10 @@ pub fn app_with_ttl(token_ttl: Duration) -> Router {
 #[derive(Clone)]
 struct AppState {
     inner: Arc<RwLock<Inner>>,
+    db: Db,
     token_ttl: Duration,
 }
 
-#[derive(Default)]
 struct Inner {
     accounts: HashMap<String, AccountRecord>, // email -> account
     sessions: HashMap<String, Session>,       // token -> session
@@ -86,9 +103,15 @@ struct AccountRecord {
 }
 
 impl AppState {
-    fn new(token_ttl: Duration) -> Self {
+    fn new(token_ttl: Duration, db_path: &str) -> Self {
+        let db = Db::open(db_path);
+        let accounts = db.load_accounts();
         Self {
-            inner: Arc::new(RwLock::new(Inner::default())),
+            inner: Arc::new(RwLock::new(Inner {
+                accounts,
+                sessions: HashMap::new(),
+            })),
+            db,
             token_ttl,
         }
     }
@@ -102,6 +125,157 @@ impl AppState {
     /// Same for writing.
     fn write(&self) -> RwLockWriteGuard<'_, Inner> {
         self.inner.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+// ─── SQLite persistence (write-through; the in-memory cache backs reads) ───
+
+#[derive(Clone)]
+struct Db {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl Db {
+    fn open(path: &str) -> Self {
+        let conn = Connection::open(path).expect("open database");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             CREATE TABLE IF NOT EXISTS accounts(
+               email TEXT PRIMARY KEY, salt TEXT NOT NULL, kdf TEXT NOT NULL,
+               wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS items(
+               email TEXT NOT NULL, id TEXT NOT NULL, blob TEXT NOT NULL,
+               PRIMARY KEY(email, id));
+             CREATE TABLE IF NOT EXISTS manifests(
+               email TEXT PRIMARY KEY, blob TEXT NOT NULL);",
+        )
+        .expect("init schema");
+        Self {
+            conn: Arc::new(Mutex::new(conn)),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn save_account(
+        &self,
+        email: &str,
+        salt: &str,
+        kdf_json: &str,
+        wrapped_json: &str,
+        auth_hash: &str,
+    ) -> rusqlite::Result<()> {
+        self.lock().execute(
+            "INSERT OR REPLACE INTO accounts(email,salt,kdf,wrapped_vault_key,auth_hash) \
+             VALUES(?1,?2,?3,?4,?5)",
+            params![email, salt, kdf_json, wrapped_json, auth_hash],
+        )?;
+        Ok(())
+    }
+
+    fn put_item(&self, email: &str, id: &str, blob_json: &str) -> rusqlite::Result<()> {
+        self.lock().execute(
+            "INSERT OR REPLACE INTO items(email,id,blob) VALUES(?1,?2,?3)",
+            params![email, id, blob_json],
+        )?;
+        Ok(())
+    }
+
+    fn delete_item(&self, email: &str, id: &str) -> rusqlite::Result<()> {
+        self.lock().execute(
+            "DELETE FROM items WHERE email=?1 AND id=?2",
+            params![email, id],
+        )?;
+        Ok(())
+    }
+
+    fn put_manifest(&self, email: &str, blob_json: &str) -> rusqlite::Result<()> {
+        self.lock().execute(
+            "INSERT OR REPLACE INTO manifests(email,blob) VALUES(?1,?2)",
+            params![email, blob_json],
+        )?;
+        Ok(())
+    }
+
+    /// Loads all accounts (with their items and manifest) at startup.
+    fn load_accounts(&self) -> HashMap<String, AccountRecord> {
+        let conn = self.lock();
+        let mut accounts: HashMap<String, AccountRecord> = HashMap::new();
+
+        {
+            let mut stmt = conn
+                .prepare("SELECT email,salt,kdf,wrapped_vault_key,auth_hash FROM accounts")
+                .expect("prepare accounts");
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })
+                .expect("query accounts");
+            for (email, salt, kdf_s, wrapped_s, auth_hash) in rows.flatten() {
+                let kdf: KdfParams = match serde_json::from_str(&kdf_s) {
+                    Ok(k) => k,
+                    Err(_) => continue,
+                };
+                let wrapped_vault_key: EncryptedBlob = match serde_json::from_str(&wrapped_s) {
+                    Ok(w) => w,
+                    Err(_) => continue,
+                };
+                accounts.insert(
+                    email,
+                    AccountRecord {
+                        salt,
+                        kdf,
+                        wrapped_vault_key,
+                        auth_hash,
+                        items: HashMap::new(),
+                        manifest: None,
+                    },
+                );
+            }
+        }
+        {
+            let mut stmt = conn
+                .prepare("SELECT email,id,blob FROM items")
+                .expect("prepare items");
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })
+                .expect("query items");
+            for (email, id, blob_s) in rows.flatten() {
+                if let Some(acc) = accounts.get_mut(&email) {
+                    if let Ok(blob) = serde_json::from_str(&blob_s) {
+                        acc.items.insert(id, blob);
+                    }
+                }
+            }
+        }
+        {
+            let mut stmt = conn
+                .prepare("SELECT email,blob FROM manifests")
+                .expect("prepare manifests");
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .expect("query manifests");
+            for (email, blob_s) in rows.flatten() {
+                if let Some(acc) = accounts.get_mut(&email) {
+                    acc.manifest = serde_json::from_str(&blob_s).ok();
+                }
+            }
+        }
+        accounts
     }
 }
 
@@ -170,11 +344,24 @@ async fn create_account(
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "hash failure"))?;
 
-    let mut inner = st.write();
-    if inner.accounts.contains_key(&req.email) {
+    if st.read().accounts.contains_key(&req.email) {
         return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
     }
-    inner.accounts.insert(
+    let kdf_json = serde_json::to_string(&req.registration.kdf)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+    let wrapped_json = serde_json::to_string(&req.registration.wrapped_vault_key)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+    // Persist first (source of truth), then update the in-memory cache.
+    st.db
+        .save_account(
+            &req.email,
+            &req.registration.salt,
+            &kdf_json,
+            &wrapped_json,
+            &auth_hash,
+        )
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    st.write().accounts.insert(
         req.email,
         AccountRecord {
             salt: req.registration.salt,
@@ -258,12 +445,17 @@ async fn put_item(
     Json(body): Json<BlobBody>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers)?;
-    let mut inner = st.write();
-    let acc = inner
-        .accounts
-        .get_mut(&email)
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    acc.items.insert(id, body.blob);
+    let blob_json = serde_json::to_string(&body.blob)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+    if !st.read().accounts.contains_key(&email) {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
+    }
+    st.db
+        .put_item(&email, &id, &blob_json)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    if let Some(acc) = st.write().accounts.get_mut(&email) {
+        acc.items.insert(id, body.blob);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -273,12 +465,12 @@ async fn delete_item(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers)?;
-    let mut inner = st.write();
-    let acc = inner
-        .accounts
-        .get_mut(&email)
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    acc.items.remove(&id);
+    st.db
+        .delete_item(&email, &id)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    if let Some(acc) = st.write().accounts.get_mut(&email) {
+        acc.items.remove(&id);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -288,12 +480,17 @@ async fn put_manifest(
     Json(body): Json<BlobBody>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers)?;
-    let mut inner = st.write();
-    let acc = inner
-        .accounts
-        .get_mut(&email)
-        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    acc.manifest = Some(body.blob);
+    let blob_json = serde_json::to_string(&body.blob)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+    if !st.read().accounts.contains_key(&email) {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
+    }
+    st.db
+        .put_manifest(&email, &blob_json)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    if let Some(acc) = st.write().accounts.get_mut(&email) {
+        acc.manifest = Some(body.blob);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
