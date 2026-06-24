@@ -295,6 +295,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, value: it[msg.field] || "" });
           break;
         }
+        case "ITEM": {
+          // Full decrypted item for the detail view. The popup is a trusted
+          // extension-page context (same trust boundary that already gets
+          // individual secrets via REVEAL); content scripts never see this.
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const it = s.items.get(msg.id);
+          if (!it) throw new Error("Item not found.");
+          sendResponse({ ok: true, item: it });
+          break;
+        }
         case "FILL": {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });

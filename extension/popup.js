@@ -42,6 +42,11 @@ const ICON = {
   fill: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h13"/><path d="m13 6 6 6-6 6"/></svg>',
   lock: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   gear: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.4 2.6a7 7 0 0 0-1.7 1l-2.3-1-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.4 2.6h5l.4-2.6a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5c.1-.3.1-.7.1-1z"/></svg>',
+  back: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 6-6 6 6 6"/></svg>',
+  eye: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
+  eyeOff: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.6 10.6a3 3 0 0 0 4.2 4.2"/><path d="M9.4 5.2A10 10 0 0 1 22 12a13 13 0 0 1-2.4 3.2M6.3 6.3A13 13 0 0 0 2 12s3.5 7 10 7a10 10 0 0 0 3-.5"/></svg>',
+  link: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/></svg>',
+  shield: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>',
 };
 const SHIELD = '<svg class="logo" viewBox="0 0 32 32" aria-hidden><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9a8cff"/><stop offset="1" stop-color="#5a47e6"/></linearGradient></defs><path fill="url(#bg)" d="M16 2l11 4v8.5c0 7-4.7 12.9-11 15.5C9.7 27.4 5 21.5 5 14.5V6l11-4z"/><circle cx="16" cy="14.5" r="3" fill="#0a0c12"/><path fill="#0a0c12" d="M14.6 15.5h2.8l1 5.5h-4.8z"/></svg>';
 
@@ -95,6 +100,22 @@ function subtitleFor(it) {
 let allItems = [];
 let currentHost = null;
 let currentServer = "";
+let vaultState = null;
+
+// Rough local password-strength estimate (no network). Returns {label, ok}.
+function passwordStrength(pw) {
+  if (!pw) return { label: "No password", ok: false, level: 0 };
+  let score = 0;
+  if (pw.length >= 8) score++;
+  if (pw.length >= 12) score++;
+  if (pw.length >= 16) score++;
+  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
+  if (/\d/.test(pw)) score++;
+  if (/[^A-Za-z0-9]/.test(pw)) score++;
+  if (score >= 5) return { label: "Strong password", ok: true, level: 3 };
+  if (score >= 3) return { label: "Fair password", ok: false, level: 2 };
+  return { label: "Weak password", ok: false, level: 1 };
+}
 
 function rowHtml(it) {
   const fill = it.type === "login" && (it.username || it.hasPassword)
@@ -180,9 +201,14 @@ function wireRows() {
       }
     });
   });
+  // Clicking the row itself (not an action button) opens the detail view.
+  document.querySelectorAll(".row[data-id]").forEach((row) => {
+    row.addEventListener("click", () => showDetail(row.dataset.id));
+  });
 }
 
 async function showVault(state) {
+  vaultState = state;
   currentServer = state.server || currentServer;
   const initial = esc((state.email || "?")[0].toUpperCase());
   app.innerHTML = `
@@ -214,6 +240,101 @@ async function showVault(state) {
   if (!list.ok) return showUnlock({ server: state.server });
   allItems = list.items;
   renderVault();
+}
+
+async function showDetail(id) {
+  const r = await send({ type: "ITEM", id });
+  if (!r.ok || r.locked) return showUnlock({ server: currentServer });
+  const it = r.item;
+
+  // One field block. `secret` masks the value behind a reveal toggle.
+  const field = (label, value, opts = {}) => {
+    if (!value) return "";
+    const { secret = false, mono = false, link = false } = opts;
+    const display = secret ? "•".repeat(Math.min(value.length, 20)) : value;
+    const acts =
+      `${link ? `<button class="iconbtn" data-open title="Open">${ICON.link}</button>` : ""}` +
+      `${secret ? `<button class="iconbtn" data-reveal title="Reveal">${ICON.eye}</button>` : ""}` +
+      `<button class="iconbtn" data-copy title="Copy ${esc(label)}">${ICON.copy}</button>`;
+    return `<div class="dfield">
+      <div class="dlabel">${esc(label)}</div>
+      <div class="dval">
+        <span class="dtext ${mono ? "mono" : ""}" data-value="${esc(value)}" data-secret="${secret ? 1 : 0}" data-shown="0">${esc(display)}</span>
+        <div class="dacts">${acts}</div>
+      </div>
+    </div>`;
+  };
+
+  let body = "";
+  if (it.type === "login") {
+    const s = passwordStrength(it.password || "");
+    body =
+      field("Email or Username", it.username) +
+      field("Password", it.password, { secret: true, mono: true }) +
+      (it.password
+        ? `<div class="dfield"><div class="dlabel">Password Health</div>
+             <div class="health ${s.ok ? "ok" : "warn"}">${ICON.shield}<span>${esc(s.label)}</span></div></div>`
+        : "") +
+      field("Website", it.url, { link: true });
+  } else if (it.type === "card") {
+    body =
+      field("Cardholder", it.username) +
+      field("Card Number", it.cardNumber, { secret: true, mono: true }) +
+      field("Expiry", it.cardExp, { mono: true }) +
+      field("CVV", it.cardCvv, { secret: true, mono: true });
+  }
+  body += field("Notes", it.notes);
+
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop">
+        <button class="iconbtn" id="back" title="Back">${ICON.back}</button>
+        <div class="spacer"></div>
+      </div>
+      <div class="dhero">${avatarFor(toMetaLike(it))}<h2>${esc(it.title)}</h2></div>
+      <div class="dscroll">${body || `<div class="empty">Nothing to show.</div>`}</div>
+    </div>`;
+
+  document.getElementById("back").addEventListener("click", () => showVault(vaultState));
+
+  // Favicon fallback (same as the list).
+  app.querySelectorAll(".ico[data-letter] img").forEach((img) =>
+    img.addEventListener("error", () => {
+      const tile = img.parentElement;
+      tile.textContent = tile.dataset.letter || "?";
+      tile.style.background = tile.dataset.color || "#232838";
+      tile.classList.remove("ico-img");
+    })
+  );
+
+  app.querySelectorAll(".dfield").forEach((f) => {
+    const text = f.querySelector(".dtext");
+    const value = text?.dataset.value || "";
+    f.querySelector("[data-copy]")?.addEventListener("click", () =>
+      copyText(value, f.querySelector(".dlabel").textContent)
+    );
+    f.querySelector("[data-open]")?.addEventListener("click", () => {
+      const url = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+      chrome.tabs.create({ url });
+    });
+    const reveal = f.querySelector("[data-reveal]");
+    reveal?.addEventListener("click", () => {
+      const shown = text.dataset.shown === "1";
+      text.dataset.shown = shown ? "0" : "1";
+      text.textContent = shown ? "•".repeat(Math.min(value.length, 20)) : value;
+      reveal.innerHTML = shown ? ICON.eye : ICON.eyeOff;
+    });
+  });
+}
+
+// Minimal shape for avatarFor() from a full item.
+function toMetaLike(it) {
+  return {
+    type: it.type,
+    title: it.title,
+    url: it.url,
+    cardBankDomain: it.cardBankDomain,
+  };
 }
 
 function showUnlock(state) {
