@@ -4,6 +4,10 @@
 # Generated WASM package (rebuild with web/build.sh)
 /web/pkg
 
+# Server SQLite database (runtime data)
+/bastion.db
+/bastion.db-*
+
 # Tooling state — not part of the crate
 /.codex
 /.agents
