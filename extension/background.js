@@ -198,6 +198,35 @@ function sortItems(a, b) {
   return (b.updatedAt || 0) - (a.updatedAt || 0);
 }
 
+// ── domain matching (for inline autofill suggestions) ──
+function domainOf(value) {
+  const c = (value || "").trim();
+  if (!c.includes(".")) return null;
+  let h = c;
+  try {
+    h = /^https?:\/\//i.test(c) ? new URL(c).hostname : c.split("/")[0];
+  } catch {
+    h = c.split("/")[0];
+  }
+  h = h.toLowerCase().replace(/^www\./, "");
+  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(h) ? h : null;
+}
+
+function sameSite(a, b) {
+  if (!a || !b) return false;
+  return a === b || a.endsWith("." + b) || b.endsWith("." + a);
+}
+
+// Login items whose domain matches the given host, newest first.
+function suggestionsFor(s, host) {
+  const h = (host || "").toLowerCase().replace(/^www\./, "");
+  return [...s.items.values()]
+    .filter((it) => it.type === "login" && (it.username || it.password))
+    .filter((it) => sameSite(domainOf(it.url || it.title), h))
+    .sort(sortItems)
+    .map((it) => ({ id: it.id, title: it.title, username: it.username || "" }));
+}
+
 // ── credential autofill (injected into the active tab on demand) ──
 async function fillActiveTab(item) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -293,6 +322,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
           sendResponse({ ok: true, value: it[msg.field] || "" });
+          break;
+        }
+        case "SUGGEST": {
+          // Inline-autofill suggestions for a page's login fields. Returns only
+          // non-secret metadata (id/title/username); never passwords. Stays
+          // silent (no prompt) when locked.
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: true, items: [] });
+          await touchSession();
+          sendResponse({ ok: true, items: suggestionsFor(s, msg.host) });
+          break;
+        }
+        case "CREDS": {
+          // The chosen credential for an inline fill done by the content script
+          // (which has DOM access; the background can't executeScript without a
+          // host grant on an arbitrary site). Password leaves WASM only here,
+          // for the field the user explicitly picked.
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const it = s.items.get(msg.id);
+          if (!it) throw new Error("Item not found.");
+          sendResponse({ ok: true, username: it.username || "", password: it.password || "" });
           break;
         }
         case "ITEM": {

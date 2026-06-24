@@ -28,9 +28,12 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
   **re-locks** the vault — by design.
 - **Auto-lock** after 10 minutes of inactivity, and immediately when the OS
   session locks (`chrome.idle`).
-- Autofill is **on demand only**: there is no always-on content script. When
-  you click *Fill*, the worker injects a one-shot fill function into the active
-  tab via `chrome.scripting` (needs `activeTab`).
+- Two autofill paths: (1) **inline** — a content script shows a dropdown of
+  matching accounts under a login field; on pick it fetches just that
+  credential (`CREDS`) and fills the page DOM directly. The background only
+  hands out non-secret metadata (`SUGGEST`) until the user explicitly picks an
+  account. (2) **from the popup** — the *Fill* button injects a one-shot fill
+  function into the active tab via `chrome.scripting` (`activeTab`).
 - Cross-origin calls to the server are made from the worker under
   `host_permissions`, so no CORS relaxation is needed on the server.
 

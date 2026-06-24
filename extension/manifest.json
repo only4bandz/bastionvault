@@ -24,6 +24,14 @@
     "type": "module"
   },
   "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
   "permissions": ["storage", "activeTab", "scripting", "alarms"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
