@@ -312,3 +312,162 @@ async fn data_persists_across_restart() {
     let _ = std::fs::remove_file(format!("{path}-wal"));
     let _ = std::fs::remove_file(format!("{path}-shm"));
 }
+
+/// Sign up + log in an account; returns its bearer token. Uses the email as the
+/// master password for test determinism/uniqueness.
+async fn signup_login(app: &Router, email: &str) -> String {
+    let (_v, reg, _sk) = Vault::register_with(email.as_bytes(), fast_kdf()).unwrap();
+    let auth = reg.auth_secret.expose_b64().to_string();
+    let regv = serde_json::to_value(&reg).unwrap();
+    let (s, _) = send(
+        app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({ "email": email, "registration": regv })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, b) = send(
+        app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": auth })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    b["token"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn bastion_send_directory_and_inbox_flow() {
+    let app = server::app_in_memory();
+    let alice = signup_login(&app, "alice@example.com").await;
+    let bob = signup_login(&app, "bob@example.com").await;
+
+    // Send endpoints require auth.
+    let (s, _) = send(&app, "GET", "/send/inbox", None, None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+
+    // Bob publishes his (opaque) public identity → stable Bastion ID.
+    let bob_pub = json!({ "enc_pub": "b-enc", "sig_pub": "b-sig", "key_version": 1 });
+    let (s, b) = send(
+        &app,
+        "PUT",
+        "/send/identity",
+        Some(&bob),
+        Some(bob_pub.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let bob_id = b["bastion_id"].as_str().unwrap().to_string();
+    assert!(!bob_id.is_empty());
+
+    // whoami echoes it; re-publishing keeps the same id.
+    let (_s, w) = send(&app, "GET", "/send/whoami", Some(&bob), None).await;
+    assert_eq!(w["bastion_id"], bob_id);
+    let (_s, b2) = send(
+        &app,
+        "PUT",
+        "/send/identity",
+        Some(&bob),
+        Some(json!({ "enc_pub": "b-enc2" })),
+    )
+    .await;
+    assert_eq!(
+        b2["bastion_id"], bob_id,
+        "rotation keeps the bastion_id stable"
+    );
+
+    // Alice publishes too (so she has an inbox of her own).
+    let (_s, _) = send(
+        &app,
+        "PUT",
+        "/send/identity",
+        Some(&alice),
+        Some(json!({ "enc_pub": "a-enc" })),
+    )
+    .await;
+
+    // Fetching an inbox with no published identity → 404 (Carol never published).
+    let carol = signup_login(&app, "carol@example.com").await;
+    let (s, _) = send(&app, "GET", "/send/inbox", Some(&carol), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Alice resolves Bob's directory entry; unknown id → 404.
+    let (s, dir) = send(
+        &app,
+        "GET",
+        &format!("/send/directory/{bob_id}"),
+        Some(&alice),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(dir["enc_pub"], "b-enc2");
+    let (s, _) = send(&app, "GET", "/send/directory/NOPE", Some(&alice), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Alice sends an opaque blob to Bob.
+    let post = |mid: &str, exp: Option<i64>| json!({ "recipient_id": bob_id, "message_id": mid, "blob": { "v": 1, "ct": "opaque" }, "expires_at": exp });
+    let (s, _) = send(&app, "POST", "/send", Some(&alice), Some(post("m1", None))).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    // Replay (same message_id) → 409.
+    let (s, _) = send(&app, "POST", "/send", Some(&alice), Some(post("m1", None))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+
+    // Unknown recipient → 404.
+    let (s, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(&alice),
+        Some(json!({ "recipient_id": "NOPE", "message_id": "m2", "blob": {} })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // An already-expired message is delivered but filtered out of the inbox.
+    let (s, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(&alice),
+        Some(post("m-exp", Some(1))),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    // Bob's inbox has m1 only; Alice's inbox is empty.
+    let (s, inbox) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let ids: Vec<&str> = inbox
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["message_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["m1"]);
+    let (_s, ainbox) = send(&app, "GET", "/send/inbox", Some(&alice), None).await;
+    assert_eq!(ainbox.as_array().unwrap().len(), 0);
+
+    // Bob reads-once: delete m1.
+    let (s, _) = send(&app, "DELETE", "/send/inbox/m1", Some(&bob), None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_s, inbox) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
+    assert_eq!(inbox.as_array().unwrap().len(), 0);
+
+    // Oversized blob → 413.
+    let big = "X".repeat(300 * 1024);
+    let (s, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(&alice),
+        Some(json!({ "recipient_id": bob_id, "message_id": "big", "blob": { "ct": big } })),
+    )
+    .await;
+    assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
+}
