@@ -3,11 +3,12 @@ import { Brand } from "../components/Brand";
 import { Generator } from "../components/Generator";
 import { ItemEditor } from "../components/ItemEditor";
 import { ImportModal } from "../components/ImportModal";
+import { Favicon } from "../components/Favicon";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
   IcLock, IcMask, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
-import { itemColor, TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
+import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { strength } from "../lib/generator";
 import type { ImportResult } from "../lib/import";
 
@@ -169,7 +170,7 @@ export function Vault({
                   {filtered.map((i) => (
                     <div className="row" key={i.id} onClick={() => setDetail(i)}>
                       <div className="title">
-                        <div className="fav-ico" style={{ background: itemColor(i.title) }}>{(i.title[0] || "?").toUpperCase()}</div>
+                        <Favicon item={i} size={36} />
                         <div style={{ minWidth: 0 }}>
                           <div className="ttl">{i.title}</div>
                           <div className="sub">{i.type === "login" ? i.username || i.url || "—" : TYPE_LABEL[i.type]}</div>
@@ -262,7 +263,7 @@ function ItemDetailView({
     <div className="overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <div className="fav-ico" style={{ background: itemColor(item.title), width: 32, height: 32 }}>{(item.title[0] || "?").toUpperCase()}</div>
+          <Favicon item={item} size={32} />
           <h3>{item.title}</h3>
           <span className="pill" style={{ marginLeft: 8 }}>{typeIcon(item.type, 12)} {TYPE_LABEL[item.type]}</span>
           <button className="icon-btn x" onClick={onClose}><IcX size={18} /></button>
@@ -310,7 +311,7 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
         <div style={{ fontWeight: 700, marginBottom: 10, color }}>{title} · {list.length}</div>
         {list.map((i) => (
           <div className="row-copy" key={i.id} style={{ cursor: "pointer" }} onClick={() => onOpen(i)}>
-            <div className="fav-ico" style={{ background: itemColor(i.title), width: 28, height: 28, fontSize: 12 }}>{(i.title[0] || "?").toUpperCase()}</div>
+            <Favicon item={i} size={28} />
             <span className="v">{i.title}</span>
             <span className="faint" style={{ fontSize: 12 }}>{i.username}</span>
           </div>
