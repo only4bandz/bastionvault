@@ -8,7 +8,9 @@ Chrome** plus tard — les deux partagent le même cœur crypto (Rust → WASM).
 ## Modèle de sécurité
 
 ```
-mot de passe maître ──Argon2id(sel, 64Mio)──► clé maître  (ne quitte jamais l'appareil)
+mot de passe maître ──Argon2id(sel, 64Mio)──► clé maître
+                                                 │
+              Secret Key (128 bits, user) ──────►│ HKDF-Extract (sel)
                                                  │
                             ┌──────HKDF──────────┼──────HKDF──────┐
                             ▼                                     ▼
@@ -20,6 +22,10 @@ mot de passe maître ──Argon2id(sel, 64Mio)──► clé maître  (ne quitt
 ```
 
 - **Argon2id** (64 Mio, 3 passes) protège contre le brute-force hors-ligne.
+- **Secret Key** (128 bits, modèle 1Password) : un second facteur détenu par
+  l'utilisateur, mélangé comme sel HKDF. Le brute-force hors-ligne devient
+  infaisable **même avec un mot de passe faible** — le serveur ne la voit jamais.
+  Montrée une fois via un **Emergency Kit**, ressaisie sur chaque appareil.
 - **XChaCha20-Poly1305** chiffre chaque item (AEAD, nonce 192 bits aléatoire).
 - La **clé de coffre** est aléatoire et *enveloppée* : changer de mot de passe
   maître ne re-chiffre pas tous les items.

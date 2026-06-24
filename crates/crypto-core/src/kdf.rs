@@ -16,6 +16,7 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::account_secret::AccountSecret;
 use crate::error::{CryptoError, Result};
 use crate::secret::{SecretKey, KEY_LEN};
 
@@ -149,8 +150,8 @@ const INFO_VAULT_WRAP: &[u8] = b"pm:v1:vault-wrap-key";
 const INFO_AUTH: &[u8] = b"pm:v1:auth-secret";
 
 /// Étage 2 — dérive la clé qui chiffre (wrap) la clé de coffre.
-pub fn derive_wrap_key(master: &SecretKey) -> SecretKey {
-    expand(master, INFO_VAULT_WRAP)
+pub fn derive_wrap_key(master: &SecretKey, account_secret: &AccountSecret) -> SecretKey {
+    expand(master, account_secret, INFO_VAULT_WRAP)
 }
 
 /// Étage 2 — dérive le secret d'authentification envoyé au serveur.
@@ -160,13 +161,17 @@ pub fn derive_wrap_key(master: &SecretKey) -> SecretKey {
 ///
 /// ⚠️ Côté serveur, ce secret DOIT être re-hashé lentement (Argon2id) avant
 /// stockage et comparé en temps constant — voir [`crate::vault::Registration`].
-pub fn derive_auth_secret(master: &SecretKey) -> SecretKey {
-    expand(master, INFO_AUTH)
+pub fn derive_auth_secret(master: &SecretKey, account_secret: &AccountSecret) -> SecretKey {
+    expand(master, account_secret, INFO_AUTH)
 }
 
-/// HKDF-Expand (sans sel ; la clé maître est déjà uniforme et de pleine entropie).
-fn expand(master: &SecretKey, info: &[u8]) -> SecretKey {
-    let hk = Hkdf::<Sha256>::from_prk(master.as_bytes()).expect("PRK length == 32 == HashLen");
+/// HKDF avec la **Secret Key comme sel** (HKDF-Extract), puis Expand par domaine.
+///
+/// Mélanger la Secret Key au stade Extract la fait entrer dans toutes les sous-
+/// clés : sans elle, rien n'est dérivable même si la clé maître (donc le mot de
+/// passe) est connue. C'est ce qui rend le brute-force hors-ligne infaisable.
+fn expand(master: &SecretKey, account_secret: &AccountSecret, info: &[u8]) -> SecretKey {
+    let hk = Hkdf::<Sha256>::new(Some(account_secret.as_bytes()), master.as_bytes());
     let mut out = [0u8; KEY_LEN];
     hk.expand(info, &mut out)
         .expect("32 octets <= 255 * HashLen");

@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::account_secret::AccountSecret;
 use crate::aead::{self, EncryptedBlob};
 use crate::error::{CryptoError, Result};
 use crate::kdf::{self, KdfParams};
@@ -115,9 +116,10 @@ pub struct Vault {
 impl Vault {
     /// Crée un nouveau compte à partir d'un mot de passe maître.
     ///
-    /// Retourne le coffre déverrouillé et les [`Registration`] à envoyer au
-    /// serveur. Utilise les [`KdfParams`] par défaut.
-    pub fn register(master_password: &[u8]) -> Result<(Self, Registration)> {
+    /// Génère une [`AccountSecret`] (Secret Key) aléatoire et la **retourne** :
+    /// l'appelant DOIT la montrer une seule fois (Emergency Kit) puis ne jamais
+    /// la stocker côté serveur. Utilise les [`KdfParams`] par défaut.
+    pub fn register(master_password: &[u8]) -> Result<(Self, Registration, AccountSecret)> {
         Self::register_with(master_password, KdfParams::default())
     }
 
@@ -125,15 +127,18 @@ impl Vault {
     pub fn register_with(
         master_password: &[u8],
         kdf_params: KdfParams,
-    ) -> Result<(Self, Registration)> {
+    ) -> Result<(Self, Registration, AccountSecret)> {
         if master_password.is_empty() {
             return Err(CryptoError::EmptyPassword);
         }
         kdf_params.validate_for_new_vault()?;
         let salt = kdf::generate_salt();
         let master = kdf::derive_master_key(master_password, &salt, kdf_params)?;
-        let wrap_key = kdf::derive_wrap_key(&master);
-        let auth_secret = kdf::derive_auth_secret(&master);
+
+        // Secret Key : deuxième facteur de dérivation, jamais transmis au serveur.
+        let account_secret = AccountSecret::generate();
+        let wrap_key = kdf::derive_wrap_key(&master, &account_secret);
+        let auth_secret = kdf::derive_auth_secret(&master, &account_secret);
 
         // Clé de coffre = clé aléatoire indépendante du mot de passe.
         let vault_key = SecretKey::generate();
@@ -146,19 +151,21 @@ impl Vault {
             wrapped_vault_key,
             auth_secret: AuthSecret::from_b64(B64.encode(auth_secret.as_bytes())),
         };
-        Ok((Self { vault_key }, registration))
+        Ok((Self { vault_key }, registration, account_secret))
     }
 
     /// Déverrouille un coffre existant.
     ///
-    /// `salt`, `kdf`, `wrapped_vault_key` proviennent du serveur (récupérés via
-    /// l'email avant la saisie du mot de passe). Retourne le coffre et le
-    /// secret d'authentification (base64) à présenter au serveur.
+    /// Requiert le mot de passe maître **et** la [`AccountSecret`] (Secret Key) :
+    /// les deux facteurs sont nécessaires. `salt`, `kdf`, `wrapped_vault_key`
+    /// proviennent du serveur (récupérés via l'email avant la saisie). Retourne
+    /// le coffre et le secret d'authentification à présenter au serveur.
     ///
-    /// Un mot de passe erroné fait échouer le déballage de la clé de coffre
-    /// avec [`CryptoError::Aead`] — indistinguable d'une donnée altérée.
+    /// Un mot de passe OU une Secret Key erronés font échouer le déballage avec
+    /// [`CryptoError::Aead`] — indistinguable d'une donnée altérée.
     pub fn unlock(
         master_password: &[u8],
+        account_secret: &AccountSecret,
         salt: &str,
         kdf_params: KdfParams,
         wrapped_vault_key: &EncryptedBlob,
@@ -179,8 +186,8 @@ impl Vault {
             salt_bytes.try_into().map_err(|_| CryptoError::Malformed)?;
 
         let master = kdf::derive_master_key(master_password, &salt_arr, kdf_params)?;
-        let wrap_key = kdf::derive_wrap_key(&master);
-        let auth_secret = kdf::derive_auth_secret(&master);
+        let wrap_key = kdf::derive_wrap_key(&master, account_secret);
+        let auth_secret = kdf::derive_auth_secret(&master, account_secret);
 
         // La clé de coffre en clair ne doit transiter que par des tampons
         // effacés : `Zeroizing` nettoie le Vec déchiffré, et on efface la copie
@@ -225,9 +232,13 @@ impl Vault {
     /// réinitialiser silencieusement des paramètres KDF choisis par l'appelant
     /// (ce qui pourrait les affaiblir). Passer [`KdfParams::default`] pour le
     /// comportement standard.
+    ///
+    /// La [`AccountSecret`] reste **inchangée** lors d'une rotation de mot de
+    /// passe (c'est le secret du compte, pas du mot de passe) : on la repasse.
     pub fn rotate_master_password(
         &self,
         new_password: &[u8],
+        account_secret: &AccountSecret,
         kdf_params: KdfParams,
     ) -> Result<Registration> {
         if new_password.is_empty() {
@@ -238,8 +249,8 @@ impl Vault {
         kdf_params.validate_for_new_vault()?;
         let salt = kdf::generate_salt();
         let master = kdf::derive_master_key(new_password, &salt, kdf_params)?;
-        let wrap_key = kdf::derive_wrap_key(&master);
-        let auth_secret = kdf::derive_auth_secret(&master);
+        let wrap_key = kdf::derive_wrap_key(&master, account_secret);
+        let auth_secret = kdf::derive_auth_secret(&master, account_secret);
         let wrapped_vault_key = aead::encrypt(&wrap_key, self.vault_key.as_bytes(), AAD_VAULT_KEY)?;
         Ok(Registration {
             version: aead::FORMAT_VERSION,
