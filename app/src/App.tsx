@@ -9,7 +9,8 @@ import type { VaultItem } from "./lib/types";
 
 type Phase = "welcome" | "reveal" | "unlock" | "vault";
 
-const AUTO_LOCK_MS = 8 * 60 * 1000; // lock after 8 minutes of inactivity
+const AUTO_LOCK_MS = 10 * 60 * 1000; // lock after 10 minutes of inactivity
+const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
 
 function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
   const out: VaultItem[] = [];
@@ -47,24 +48,33 @@ export default function App(): JSX.Element {
     setPhase("unlock");
   }, [account, token]);
 
-  // Auto-lock on inactivity + when the tab is hidden/blurred.
+  // Auto-lock on prolonged inactivity, or after the tab has been genuinely
+  // hidden for a grace period. We deliberately do NOT lock on window `blur`
+  // (it fires for the address bar, extensions, autofill, screenshots…), which
+  // would kick the user out constantly.
   useEffect(() => {
     if (phase !== "vault") return;
-    let timer = window.setTimeout(lock, AUTO_LOCK_MS);
+    let idle = window.setTimeout(lock, AUTO_LOCK_MS);
+    let hideTimer: number | undefined;
     const reset = () => {
-      window.clearTimeout(timer);
-      timer = window.setTimeout(lock, AUTO_LOCK_MS);
+      window.clearTimeout(idle);
+      idle = window.setTimeout(lock, AUTO_LOCK_MS);
     };
-    const onHidden = () => document.visibilityState === "hidden" && lock();
-    const acts = ["mousemove", "keydown", "click", "scroll"];
+    const onVis = () => {
+      if (document.visibilityState === "hidden") {
+        hideTimer = window.setTimeout(lock, HIDDEN_GRACE_MS);
+      } else {
+        window.clearTimeout(hideTimer);
+      }
+    };
+    const acts = ["mousemove", "keydown", "click", "scroll", "touchstart"];
     acts.forEach((e) => window.addEventListener(e, reset, { passive: true }));
-    document.addEventListener("visibilitychange", onHidden);
-    window.addEventListener("blur", lock);
+    document.addEventListener("visibilitychange", onVis);
     return () => {
-      window.clearTimeout(timer);
+      window.clearTimeout(idle);
+      window.clearTimeout(hideTimer);
       acts.forEach((e) => window.removeEventListener(e, reset));
-      document.removeEventListener("visibilitychange", onHidden);
-      window.removeEventListener("blur", lock);
+      document.removeEventListener("visibilitychange", onVis);
     };
   }, [phase, lock]);
 
