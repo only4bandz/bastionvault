@@ -155,8 +155,11 @@ pub fn derive_wrap_key(master: &SecretKey) -> SecretKey {
 
 /// Étage 2 — dérive le secret d'authentification envoyé au serveur.
 ///
-/// Le serveur n'apprend rien de la clé maître : HKFD est à sens unique et ce
+/// Le serveur n'apprend rien de la clé maître : HKDF est à sens unique et ce
 /// secret est indépendant de la clé de chiffrement du coffre.
+///
+/// ⚠️ Côté serveur, ce secret DOIT être re-hashé lentement (Argon2id) avant
+/// stockage et comparé en temps constant — voir [`crate::vault::Registration`].
 pub fn derive_auth_secret(master: &SecretKey) -> SecretKey {
     expand(master, INFO_AUTH)
 }

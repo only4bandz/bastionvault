@@ -11,6 +11,13 @@
 //! - **HKDF-SHA256** : séparation en sous-clés indépendantes.
 //! - **XChaCha20-Poly1305** : chiffrement authentifié (nonce 192 bits).
 //!
+//! ## ⚠️ Cible WASM — non encore validée
+//! Le crate vise natif **et** WebAssembly, mais le support navigateur n'est PAS
+//! prouvé à ce stade. L'aléa ([`rand_core`]/`getrandom`) doit être câblé sur
+//! l'entropie du navigateur (feature `getrandom/js`) et **vérifié par un test
+//! `wasm32` réel** dans le futur crate `crypto-wasm` avant toute revendication
+//! de support. Tant que ce n'est pas fait, considérer WASM comme non garanti.
+//!
 //! ## Démarrage rapide
 //! ```
 //! use crypto_core::vault::Vault;
@@ -40,4 +47,4 @@ pub mod vault;
 pub use aead::EncryptedBlob;
 pub use error::{CryptoError, Result};
 pub use kdf::KdfParams;
-pub use vault::{Registration, Vault};
+pub use vault::{AuthSecret, Registration, Vault};

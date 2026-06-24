@@ -82,12 +82,58 @@ fn auth_secret_is_stable_and_secret() {
     // Re-déverrouiller redonne le MÊME secret d'auth (déterministe par sel/pw).
     let (_, auth_a) = Vault::unlock(pw, &reg1.salt, reg1.kdf, &reg1.wrapped_vault_key).unwrap();
     let (_, auth_b) = Vault::unlock(pw, &reg1.salt, reg1.kdf, &reg1.wrapped_vault_key).unwrap();
-    assert_eq!(auth_a, auth_b);
-    // Mais il diffère du secret enregistré au signup ? Non : il doit l'égaler.
-    assert_eq!(auth_a, reg1.auth_secret);
+    // Comparaisons en temps constant (le newtype n'expose pas PartialEq).
+    assert!(auth_a.ct_eq(&auth_b));
+    // Et il doit égaler le secret enregistré au signup.
+    assert!(auth_a.ct_eq(&reg1.auth_secret));
     assert!(auth_secret_eq(
         auth_a.as_bytes(),
         reg1.auth_secret.as_bytes()
+    ));
+}
+
+#[test]
+fn auth_secret_debug_is_redacted() {
+    let (_, reg) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let secret = reg.auth_secret.expose_b64().to_string();
+    // Le Debug du secret ne doit pas révéler sa valeur.
+    let dbg = format!("{:?}", reg.auth_secret);
+    assert!(dbg.contains("redacted"));
+    assert!(!dbg.contains(&secret));
+    // Le Debug de Registration ne doit pas non plus fuiter le secret.
+    assert!(!format!("{:?}", reg).contains(&secret));
+}
+
+#[test]
+fn unknown_blob_version_is_rejected() {
+    let (vault, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let mut blob = vault.encrypt_item(b"x", "i").unwrap();
+    blob.v = 2; // version inconnue
+    assert!(matches!(
+        vault.decrypt_item(&blob, "i"),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
+fn oversized_ciphertext_is_rejected_before_decode() {
+    let (vault, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let mut blob = vault.encrypt_item(b"x", "i").unwrap();
+    // ~12 Mio encodés > plafond 8 Mio → rejet sans allouer le déchiffrement.
+    blob.ct = base64_encode(&vec![0u8; 9 * 1024 * 1024]);
+    assert!(matches!(
+        vault.decrypt_item(&blob, "i"),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
+fn oversized_salt_is_rejected_before_decode() {
+    let (_, reg) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let huge_salt = "A".repeat(100); // > 64 caractères
+    assert!(matches!(
+        Vault::unlock(b"pw", &huge_salt, reg.kdf, &reg.wrapped_vault_key),
+        Err(CryptoError::Malformed)
     ));
 }
 

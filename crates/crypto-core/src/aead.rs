@@ -17,12 +17,26 @@ use crate::secret::SecretKey;
 
 const NONCE_LEN: usize = 24;
 
-/// Une enveloppe chiffrée : nonce + chiffré (qui inclut le tag d'authentification).
+/// Version du format d'enveloppe AEAD. Permet de migrer (nouvel algorithme,
+/// nouveau schéma) sans rendre illisibles les coffres existants.
+pub const FORMAT_VERSION: u8 = 1;
+
+// Bornes sur des entrées NON FIABLES, vérifiées AVANT tout décodage base64 ou
+// allocation : un blob fourni par un serveur malveillant ne doit pas pouvoir
+// déclencher une allocation massive avant l'authentification. Le nonce encodé
+// fait ~32 octets ; on plafonne le chiffré encodé à ~8 Mio (≈ 6 Mio de clair),
+// large pour une note sécurisée mais garde-fou anti-DoS.
+const MAX_ENCODED_NONCE_LEN: usize = 64;
+const MAX_ENCODED_CT_LEN: usize = 8 * 1024 * 1024;
+
+/// Une enveloppe chiffrée : version + nonce + chiffré (qui inclut le tag d'auth).
 ///
 /// Sérialisable (base64) pour le stockage serveur et le transport. Ne contient
 /// aucun secret : sans la clé, c'est du bruit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptedBlob {
+    /// Version du format (voir [`FORMAT_VERSION`]).
+    pub v: u8,
     /// Nonce de 192 bits, encodé base64.
     pub nonce: String,
     /// Texte chiffré + tag Poly1305, encodé base64.
@@ -47,6 +61,7 @@ pub(crate) fn encrypt(key: &SecretKey, plaintext: &[u8], aad: &[u8]) -> Result<E
         )
         .map_err(|_| CryptoError::Aead)?;
     Ok(EncryptedBlob {
+        v: FORMAT_VERSION,
         nonce: B64.encode(nonce),
         ct: B64.encode(ct),
     })
@@ -55,6 +70,14 @@ pub(crate) fn encrypt(key: &SecretKey, plaintext: &[u8], aad: &[u8]) -> Result<E
 /// Déchiffre une enveloppe. Échoue si la clé est fausse, le nonce/chiffré
 /// malformé, ou si le chiffré (ou l'`aad`) a été altéré.
 pub(crate) fn decrypt(key: &SecretKey, blob: &EncryptedBlob, aad: &[u8]) -> Result<Vec<u8>> {
+    // Version connue ?
+    if blob.v != FORMAT_VERSION {
+        return Err(CryptoError::Malformed);
+    }
+    // Bornes d'entrée AVANT décodage/allocation (anti-DoS sur input non fiable).
+    if blob.nonce.len() > MAX_ENCODED_NONCE_LEN || blob.ct.len() > MAX_ENCODED_CT_LEN {
+        return Err(CryptoError::Malformed);
+    }
     let nonce_bytes = B64
         .decode(&blob.nonce)
         .map_err(|_| CryptoError::Malformed)?;
