@@ -24,15 +24,19 @@ function toast(text) {
 async function copyText(text, label) {
   try {
     await navigator.clipboard.writeText(text);
-    toast(`${label} copied`);
-    // Best-effort clipboard hygiene: clear after 25s if still ours.
+    toast(`${label} copied · clears in 12s`);
+    // Best-effort hygiene: overwrite the clipboard after 12s *only if it's still
+    // the value we copied*. Caveats (documented, not silently relied on): the
+    // popup must still be open for the timer to fire, and readText() needs a
+    // focused document — so this is a courtesy, not a guarantee. Prefer autofill
+    // over copy for secrets. OS/clipboard-manager/sync copies are out of scope.
     setTimeout(async () => {
       try {
         if ((await navigator.clipboard.readText()) === text) await navigator.clipboard.writeText("");
       } catch {
-        /* clipboard not readable; ignore */
+        /* clipboard not readable without focus/permission; ignore */
       }
-    }, 25000);
+    }, 12000);
   } catch {
     toast("Copy failed");
   }
@@ -60,13 +64,14 @@ function avatarFor(it) {
   const letter = esc((it.title || "?")[0].toUpperCase());
   const color = colorFor(it.title || "");
   if (domain) {
-    // Real favicons sit on a clean white tile (like NordPass) so transparent
-    // logos don't bleed our accent color. The <img> error fallback is wired in
-    // JS (wireRows) — inline onerror= is forbidden by the extension-page CSP.
-    // We stash the fallback color on the tile so wireRows can restore it.
-    // High-res favicon (sz=128) so it stays crisp even in the 64px detail
-    // hero. Resolved by the browser, never by the Bastion server.
-    return `<div class="ico ico-img" style="background:#fff" data-letter="${letter}" data-color="${color}"><img src="https://www.google.com/s2/favicons?sz=128&domain=${esc(domain)}" alt="" /></div>`;
+    // Favicon comes from Chrome's LOCAL cache via the _favicon API — NO request
+    // to any third party, so the set of sites in the vault is never disclosed
+    // (a zero-knowledge requirement; the old Google s2 fetch leaked every
+    // domain). Clean white tile (NordPass-like) so transparent logos don't
+    // bleed our color; falls back to the letter tile in wireFavicons (inline
+    // onerror= is forbidden by the extension-page CSP).
+    const fav = chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent("https://" + domain)}&size=64`);
+    return `<div class="ico ico-img" style="background:#fff" data-letter="${letter}" data-color="${color}"><img src="${esc(fav)}" alt="" /></div>`;
   }
   return `<div class="ico" style="background:${color}">${letter}</div>`;
 }

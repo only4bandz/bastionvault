@@ -11,8 +11,8 @@
 // written to disk and is unreadable by page scripts / infostealers. It holds
 // the exported vault key (see crypto-wasm Account::export_session) so the
 // worker can rehydrate WITHOUT re-deriving Argon2id — never the master password.
-// Everything is cleared on lock or at expiry; nothing secret touches
-// localStorage / IndexedDB / disk.
+// Everything is cleared on lock or at expiry; nothing secret touches any
+// disk-backed web storage (enforced by scripts/check-no-browser-secret-storage.sh).
 
 import init, { unlock, rehydrate } from "./pkg/crypto_wasm.js";
 import { makeApi, ApiError } from "./lib/api.js";
@@ -22,6 +22,27 @@ const DEFAULT_SERVER = "http://127.0.0.1:7777";
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
 const SESSION_KEY = "session"; // key in chrome.storage.session
+const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
+
+// chrome.storage.session is TRUSTED_CONTEXTS by default (NOT readable by content
+// scripts); set it explicitly so a future code change can't silently widen it
+// and expose the in-RAM vault key / staged passwords to page-injected scripts.
+chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch(() => {});
+
+// Messages a content script (running on arbitrary web pages) is allowed to send.
+// Everything else (LIST/ITEM/REVEAL/FILL/UNLOCK/LOCK/STATE) is for extension
+// pages only — see the sender check in the message router.
+const CONTENT_ALLOWED = new Set(["SUGGEST", "CREDS", "STAGE_USER", "STAGE_SAVE", "PENDING_SAVE", "SAVE_LOGIN", "CLEAR_PENDING"]);
+const EXT_ORIGIN = chrome.runtime.getURL("").replace(/\/$/, "");
+
+// Host of the sender frame (for content-script messages); null for ext pages.
+function hostFromSender(sender) {
+  try {
+    return new URL(sender.url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
 
 // ── WASM (loaded lazily, once per worker lifetime) ──
 let wasmReady = null;
@@ -39,18 +60,26 @@ async function getServerUrl() {
   return serverUrl || DEFAULT_SERVER;
 }
 
+const MAX_KEEP_MINUTES = 12 * 60; // hard ceiling (matches the options UI max)
 async function getKeepMinutes() {
   const { keepUnlockMinutes } = await chrome.storage.local.get("keepUnlockMinutes");
   const n = Number(keepUnlockMinutes);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_KEEP_MINUTES;
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_KEEP_MINUTES;
+  return Math.min(n, MAX_KEEP_MINUTES); // clamp so a tampered storage value can't extend it
 }
 
-// Push the lock deadline out to now + keep-unlock window, updating both the
-// alarm (proactive lock) and the persisted session (rehydration gate).
+// Push the lock deadline out to now + keep-unlock window, updating the alarm
+// (proactive lock), the persisted session, and the in-memory deadline (so a
+// sensitive op never runs past expiry even if the alarm is late).
+// IMPORTANT: only call on EXPLICIT user actions (unlock, popup interaction,
+// credential pick/fill). Never from passive content-script signals like
+// SUGGEST/PENDING_SAVE, or merely browsing pages with login fields would keep
+// the vault unlocked indefinitely.
 async function touchSession() {
   const minutes = await getKeepMinutes();
   const expiresAt = Date.now() + minutes * 60_000;
   chrome.alarms.create(AUTOLOCK_ALARM, { when: expiresAt });
+  if (session) session.expiresAt = expiresAt;
   const stored = await chrome.storage.session.get(SESSION_KEY);
   if (stored[SESSION_KEY]) {
     stored[SESSION_KEY].expiresAt = expiresAt;
@@ -72,7 +101,31 @@ async function persistSession() {
   });
 }
 
+// ── pending "save this login?" (staged at form submit, survives the navigation
+// that follows via storage.session; plaintext lives in RAM only until the user
+// saves or dismisses) ──
+let pendingSave = null;
+let lastUser = ""; // last username/email typed (for multi-step sign-ups)
+async function setPending(p) {
+  pendingSave = { ...p, stagedAt: Date.now() };
+  await chrome.storage.session.set({ pendingSave });
+}
+async function getPending() {
+  if (!pendingSave) pendingSave = (await chrome.storage.session.get("pendingSave")).pendingSave || null;
+  // Expire a staged credential so a plaintext password never lingers.
+  if (pendingSave && Date.now() - (pendingSave.stagedAt || 0) > PENDING_TTL_MS) {
+    await clearPending();
+    return null;
+  }
+  return pendingSave;
+}
+async function clearPending() {
+  pendingSave = null;
+  await chrome.storage.session.remove("pendingSave");
+}
+
 async function lock() {
+  await clearPending(); // don't leave a staged plaintext password around
   if (session) {
     const { account, token, server } = session;
     if (token) makeApi(server).logout(token).catch(() => {});
@@ -91,7 +144,13 @@ async function lock() {
 // Returns the live session, rehydrating from storage.session if the worker was
 // evicted. Returns null (locked) if there is no valid, unexpired session.
 async function ensureSession() {
-  if (session) return session;
+  if (session) {
+    if (session.expiresAt && Date.now() > session.expiresAt) {
+      await lock(); // enforce expiry on the in-memory path, not just via the alarm
+      return null;
+    }
+    return session;
+  }
 
   const stored = (await chrome.storage.session.get(SESSION_KEY))[SESSION_KEY];
   if (!stored) return null;
@@ -114,7 +173,7 @@ async function ensureSession() {
         /* skip corrupt/tampered item */
       }
     }
-    session = { account, token, email: stored.email, server: stored.server, items };
+    session = { account, token, email: stored.email, server: stored.server, items, expiresAt: stored.expiresAt };
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
     return session;
@@ -217,8 +276,10 @@ async function fillActiveTab(item) {
   if (!/^https?:\/\//i.test(tab.url || "")) {
     throw new Error("Open a website to fill credentials — this page can't be filled.");
   }
+  // Top frame ONLY: filling all frames would write the password into any
+  // (possibly malicious, cross-origin) embedded iframe with a password field.
   const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id, allFrames: true },
+    target: { tabId: tab.id, frameIds: [0] },
     args: [{ username: item.username || "", password: item.password || "" }],
     func: injectedFill,
   });
@@ -237,7 +298,15 @@ function injectedFill(creds) {
     el.dispatchEvent(new Event("change", { bubbles: true }));
   };
 
-  const pw = document.querySelector('input[type="password"]:not([disabled]):not([readonly])');
+  const visible = (el) => {
+    if (!el || el.disabled || el.readOnly) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 4 || r.height < 4) return false;
+    const cs = getComputedStyle(el);
+    return cs.visibility !== "hidden" && cs.display !== "none" && Number(cs.opacity) > 0.05;
+  };
+
+  const pw = Array.from(document.querySelectorAll('input[type="password"]:not([disabled]):not([readonly])')).find(visible);
   let user = null;
 
   if (pw) {
@@ -271,7 +340,19 @@ function injectedFill(creds) {
 }
 
 // ── message router ──
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Reject privileged verbs from non-extension senders (content scripts on web
+  // pages). A web page can't reach this listener directly (no
+  // externally_connectable), but this contains the blast radius if our own
+  // content script is ever coerced, and forces content traffic through the
+  // host-scoped SUGGEST/CREDS path only.
+  const isExtPage = !!sender?.url && sender.url.startsWith(EXT_ORIGIN);
+  if (!isExtPage && !CONTENT_ALLOWED.has(msg?.type)) {
+    sendResponse({ ok: false, error: "forbidden" });
+    return false;
+  }
+  const senderHost = isExtPage ? null : hostFromSender(sender);
+
   (async () => {
     try {
       switch (msg?.type) {
@@ -308,27 +389,102 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         }
         case "SUGGEST": {
           // Inline-autofill suggestions for a page's login fields. Returns only
-          // non-secret metadata (id/title/username); never passwords. Stays
-          // silent (no prompt) when locked.
+          // non-secret metadata (id/title/username); never passwords. Host comes
+          // from the SENDER frame, not the message. Passive — does NOT extend the
+          // keep-unlock window.
           const s = await ensureSession();
-          if (!s) return sendResponse({ ok: true, items: [] });
-          await touchSession();
-          sendResponse({ ok: true, items: suggestionsFor(s, msg.host) });
+          if (!s || !senderHost) return sendResponse({ ok: true, items: [] });
+          sendResponse({ ok: true, items: suggestionsFor(s, senderHost) });
           break;
         }
         case "CREDS": {
-          // The chosen credential for an inline fill done by the content script
-          // (which has DOM access; the background can't executeScript without a
-          // host grant on an arbitrary site). Password leaves WASM only here,
-          // for the field the user explicitly picked.
+          // The chosen credential for an inline fill done by the content script.
+          // Password leaves WASM only here, for the field the user explicitly
+          // picked — and ONLY if the item's site matches the sender frame's host
+          // (so a frame can't pull credentials for an unrelated site by id).
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
-          await touchSession();
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
+          if (!senderHost || !matchesSite(it.url || it.title, senderHost)) {
+            return sendResponse({ ok: false, error: "forbidden" });
+          }
+          await touchSession(); // explicit user pick → extend the window
           sendResponse({ ok: true, username: it.username || "", password: it.password || "" });
           break;
         }
+        case "STAGE_USER": {
+          // Username/email typed (often on a prior step than the password).
+          lastUser = (msg.username || "").trim();
+          await chrome.storage.session.set({ lastUser });
+          sendResponse({ ok: true });
+          break;
+        }
+        case "STAGE_SAVE": {
+          // Form submitted with a password — remember it so we can offer to save
+          // once the page settles. Host/URL are taken from the SENDER frame, not
+          // the message, so a page can't stage a save for another origin.
+          if (msg.password && senderHost) {
+            if (!lastUser) lastUser = (await chrome.storage.session.get("lastUser")).lastUser || "";
+            await setPending({ host: senderHost, url: sender.url, username: msg.username || lastUser || "", password: msg.password });
+          }
+          sendResponse({ ok: true });
+          break;
+        }
+        case "PENDING_SAVE": {
+          // Does a staged credential exist for THIS sender frame? Returns only
+          // the non-secret bits; the password stays in the worker. Passive — no
+          // keep-unlock extension. Host comes from the sender.
+          const p = await getPending();
+          if (p && senderHost && matchesSite(p.url || p.host, senderHost)) {
+            const s = session;
+            const dup =
+              s && [...s.items.values()].some((it) => it.type === "login" && it.username === p.username && matchesSite(it.url || it.title, senderHost));
+            sendResponse({ ok: true, pending: dup ? null : { username: p.username, host: p.host } });
+          } else {
+            sendResponse({ ok: true, pending: null });
+          }
+          break;
+        }
+        case "SAVE_LOGIN": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          const p = await getPending();
+          if (!p) return sendResponse({ ok: false, error: "Nothing to save." });
+          // The committing frame MUST be the site the credential was staged for.
+          // Otherwise a content script on site Y could commit (and, via the
+          // dedupe path, overwrite) a credential staged on site X. Host and
+          // title are taken from the staged pending (host-bound at STAGE_SAVE),
+          // never from the message.
+          if (!senderHost || !matchesSite(p.url || p.host, senderHost)) {
+            return sendResponse({ ok: false, error: "forbidden" });
+          }
+          await touchSession();
+          const username = (msg.username ?? p.username) || "";
+          const title = p.host;
+          const url = p.url || `https://${p.host}`;
+
+          // Update in place if this site+username already exists; else create.
+          let item = [...s.items.values()].find(
+            (it) => it.type === "login" && it.username === username && matchesSite(it.url || it.title, p.host)
+          );
+          if (item) {
+            item.password = p.password;
+            item.updatedAt = Date.now();
+          } else {
+            item = { id: crypto.randomUUID(), type: "login", title, username, password: p.password, url, updatedAt: Date.now() };
+          }
+          const blob = JSON.parse(s.account.encrypt_item(JSON.stringify(item), item.id));
+          await makeApi(s.server).putItem(s.token, item.id, blob);
+          s.items.set(item.id, item);
+          await clearPending();
+          sendResponse({ ok: true });
+          break;
+        }
+        case "CLEAR_PENDING":
+          await clearPending();
+          sendResponse({ ok: true });
+          break;
         case "ITEM": {
           // Full decrypted item for the detail view. The popup is a trusted
           // extension-page context (same trust boundary that already gets

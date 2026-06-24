@@ -35,6 +35,7 @@ use wasm_bindgen::prelude::*;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use crypto_core::{AccountSecret, EncryptedBlob, KdfParams, Manifest, Registration, Vault};
 use std::collections::HashMap;
+use zeroize::Zeroize;
 
 /// Converts a displayable error into a `JsError` (opaque message, no secret).
 fn js_err<E: core::fmt::Display>(e: E) -> JsError {
@@ -291,8 +292,15 @@ pub fn rehydrate(session_json: &str) -> Result<Account, JsError> {
         .ok_or_else(|| JsError::new("missing registration_json"))?;
     let auth_secret = v["auth_secret"].as_str().unwrap_or_default();
 
-    let key_bytes = B64.decode(vault_key_b64).map_err(js_err)?;
+    // Defense in depth: the registration must be well-formed (reject malformed /
+    // attacker-mangled stored sessions instead of building a half-valid Account).
+    serde_json::from_str::<Registration>(registration_json)
+        .map_err(|_| JsError::new("invalid registration"))?;
+
+    // Decode into a buffer we zeroize once the key has been copied into the Vault.
+    let mut key_bytes = B64.decode(vault_key_b64).map_err(js_err)?;
     let vault = Vault::from_key(&key_bytes).map_err(js_err)?;
+    key_bytes.zeroize();
     Ok(Account {
         vault: Some(vault),
         registration_json: registration_json.to_string(),
