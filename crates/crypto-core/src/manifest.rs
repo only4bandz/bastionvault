@@ -1,19 +1,20 @@
-//! Manifest d'intégrité du coffre.
+//! Vault integrity manifest.
 //!
-//! L'AEAD par-item protège le *contenu* de chaque item (toute altération d'un
-//! chiffré est détectée). Il ne protège PAS l'**ensemble** : un serveur
-//! malveillant peut toujours
-//! - supprimer un item (le client ne le voit plus),
-//! - injecter un item,
-//! - resservir une **ancienne** version d'un item (rollback) — un chiffré
-//!   périmé reste un chiffré valide.
+//! Per-item AEAD protects the *content* of each item (any tampering with a
+//! ciphertext is detected). It does NOT protect the **set as a whole**: a
+//! malicious server can still
+//! - delete an item (the client no longer sees it),
+//! - inject an item,
+//! - re-serve an **older** version of an item (rollback) — a stale ciphertext
+//!   is still a valid ciphertext.
 //!
-//! Le manifest comble ce trou. C'est un index chiffré sous la `vault_key` qui
-//! mémorise, pour chaque item, un **digest** de son chiffré, plus un compteur
-//! `seq` monotone. À la synchro, le client compare ce que renvoie le serveur au
-//! manifest : tout écart (manquant / inattendu / corrompu) trahit une
-//! manipulation. Comme il est chiffré sous la `vault_key`, seul ce coffre peut
-//! le lire — un manifest d'un autre compte ne déchiffre pas.
+//! The manifest fills this gap. It is an index encrypted under the `vault_key`
+//! that records, for each item, a **digest** of its ciphertext, plus a
+//! monotonic `seq` counter. On sync, the client compares what the server
+//! returns against the manifest: any discrepancy (missing / unexpected /
+//! corrupted) betrays tampering. Since it is encrypted under the `vault_key`,
+//! only this vault can read it — a manifest from another account will not
+//! decrypt.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
@@ -23,12 +24,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::aead::EncryptedBlob;
 use crate::error::{CryptoError, Result};
 
-/// Domaine de hachage du digest d'un item (séparation cryptographique).
+/// Hashing domain for an item's digest (cryptographic separation).
 const ITEM_DIGEST_DOMAIN: &[u8] = b"pm:v1:item-digest";
 
-/// Digest stable d'un chiffré d'item : `SHA-256(domaine || v || nonce || 0 || ct)`.
-/// Inclut la version de format ; le séparateur `0` n'appartient pas à l'alphabet
-/// base64, donc la concaténation est non ambiguë.
+/// Stable digest of an item's ciphertext: `SHA-256(domain || v || nonce || 0 || ct)`.
+/// Includes the format version; the separator `0` is not part of the base64
+/// alphabet, so the concatenation is unambiguous.
 fn item_digest(blob: &EncryptedBlob) -> String {
     let mut h = Sha256::new();
     h.update(ITEM_DIGEST_DOMAIN);
@@ -39,39 +40,39 @@ fn item_digest(blob: &EncryptedBlob) -> String {
     B64.encode(h.finalize())
 }
 
-/// Une entrée du manifest : l'id d'un item et le digest de son chiffré courant.
+/// A manifest entry: an item's id and the digest of its current ciphertext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestEntry {
-    /// Identifiant opaque de l'item.
+    /// Opaque identifier of the item.
     pub id: String,
-    /// Digest base64 du chiffré attendu pour cet item.
+    /// Base64 digest of the ciphertext expected for this item.
     pub digest: String,
 }
 
-/// Index d'intégrité du coffre. Entrées triées par id (déterminisme).
+/// Vault integrity index. Entries sorted by id (determinism).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
-    /// Compteur monotone, incrémenté à chaque modification. Le client mémorise
-    /// le dernier `seq` connu pour détecter qu'un serveur resert un vieux
-    /// manifest (rollback global).
+    /// Monotonic counter, incremented on each change. The client remembers the
+    /// last known `seq` to detect a server re-serving an old manifest (global
+    /// rollback).
     pub seq: u64,
-    /// Entrées, triées par `id`.
+    /// Entries, sorted by `id`.
     pub entries: Vec<ManifestEntry>,
 }
 
 impl Manifest {
-    /// Manifest vide (seq = 0).
+    /// Empty manifest (seq = 0).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Compteur de version courant.
+    /// Current version counter.
     pub fn seq(&self) -> u64 {
         self.seq
     }
 
-    /// Ajoute ou met à jour l'entrée d'un item à partir de son chiffré, et
-    /// incrémente `seq`.
+    /// Adds or updates an item's entry from its ciphertext, and increments
+    /// `seq`.
     pub fn set(&mut self, id: &str, blob: &EncryptedBlob) {
         let digest = item_digest(blob);
         match self.entries.binary_search_by(|e| e.id.as_str().cmp(id)) {
@@ -87,7 +88,7 @@ impl Manifest {
         self.seq += 1;
     }
 
-    /// Retire un item. Incrémente `seq` et renvoie `true` si l'item existait.
+    /// Removes an item. Increments `seq` and returns `true` if the item existed.
     pub fn remove(&mut self, id: &str) -> bool {
         if let Ok(i) = self.entries.binary_search_by(|e| e.id.as_str().cmp(id)) {
             self.entries.remove(i);
@@ -98,9 +99,9 @@ impl Manifest {
         }
     }
 
-    /// Vérifie l'invariant interne : entrées **triées par id et sans doublon**.
-    /// Appelé à l'ouverture d'un manifest scellé — défense contre un manifest
-    /// corrompu/mal formé dont des ids dupliqués masqueraient des items.
+    /// Checks the internal invariant: entries **sorted by id and without
+    /// duplicates**. Called when opening a sealed manifest — a defense against a
+    /// corrupted/malformed manifest whose duplicate ids would hide items.
     pub fn validate(&self) -> Result<()> {
         for pair in self.entries.windows(2) {
             if pair[0].id >= pair[1].id {
@@ -110,10 +111,10 @@ impl Manifest {
         Ok(())
     }
 
-    /// Confronte le manifest à l'ensemble d'items réellement servis par le
-    /// serveur. Renvoie un rapport listant les écarts.
+    /// Compares the manifest against the set of items actually served by the
+    /// server. Returns a report listing the discrepancies.
     ///
-    /// `present` = couples `(id, chiffré)` reçus du serveur.
+    /// `present` = `(id, ciphertext)` pairs received from the server.
     pub fn check(&self, present: &[(&str, &EncryptedBlob)]) -> IntegrityReport {
         let expected: BTreeMap<&str, &str> = self
             .entries
@@ -125,8 +126,8 @@ impl Manifest {
             .map(|(id, blob)| (*id, item_digest(blob)))
             .collect();
 
-        // IDs servis en double : le serveur tente peut-être de masquer un item
-        // derrière un homonyme. On les signale au lieu de les fusionner.
+        // IDs served twice: the server may be trying to hide an item behind a
+        // namesake. We report them instead of merging them.
         let mut seen = BTreeSet::new();
         let mut duplicates = Vec::new();
         for (id, _) in present {
@@ -159,22 +160,22 @@ impl Manifest {
     }
 }
 
-/// Résultat d'un [`Manifest::check`].
+/// Result of a [`Manifest::check`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntegrityReport {
-    /// Items attendus (dans le manifest) mais absents côté serveur → suppression.
+    /// Items expected (in the manifest) but absent on the server → deletion.
     pub missing: Vec<String>,
-    /// Items servis mais absents du manifest → injection.
+    /// Items served but absent from the manifest → injection.
     pub unexpected: Vec<String>,
-    /// Items présents des deux côtés mais au digest différent → altération,
-    /// substitution ou rollback d'un item.
+    /// Items present on both sides but with a different digest → tampering,
+    /// substitution, or rollback of an item.
     pub corrupted: Vec<String>,
-    /// IDs servis plusieurs fois par le serveur → réponse mal formée/hostile.
+    /// IDs served multiple times by the server → malformed/hostile response.
     pub duplicates: Vec<String>,
 }
 
 impl IntegrityReport {
-    /// `true` si aucun écart : le coffre servi correspond exactement au manifest.
+    /// `true` if there is no discrepancy: the served vault matches the manifest exactly.
     pub fn is_intact(&self) -> bool {
         self.missing.is_empty()
             && self.unexpected.is_empty()

@@ -1,25 +1,25 @@
-//! API de haut niveau : inscription, déverrouillage, chiffrement des items.
+//! High-level API: registration, unlocking, item encryption.
 //!
-//! C'est l'interface qu'utiliseront l'app web et l'extension Chrome (via WASM).
-//! Tout se passe côté client. Le serveur ne stocke que des données opaques.
+//! This is the interface the web app and the Chrome extension will use (via
+//! WASM). Everything happens client-side. The server only stores opaque data.
 //!
-//! Modèle de clés (inspiré de Bitwarden / 1Password) :
+//! Key model (inspired by Bitwarden / 1Password):
 //!
 //! ```text
-//!   mot de passe maître ──Argon2id(sel)──► clé maître
-//!                                            │
-//!                          ┌─────HKDF────────┼─────HKDF─────┐
-//!                          ▼                                ▼
-//!                     clé de wrap                      secret d'auth ──► serveur
-//!                          │                            (vérifie l'identité,
-//!                          │ chiffre/déchiffre           n'ouvre rien)
-//!                          ▼
-//!     clé de coffre (aléatoire) ──chiffre──► tous les items
+//!   master password ──Argon2id(salt)──► master key
+//!                                          │
+//!                        ┌─────HKDF────────┼─────HKDF─────┐
+//!                        ▼                                ▼
+//!                    wrap key                        auth secret ──► server
+//!                        │                          (verifies identity,
+//!                        │ encrypts/decrypts          opens nothing)
+//!                        ▼
+//!     vault key (random) ──encrypts──► all the items
 //! ```
 //!
-//! La clé de coffre est une clé aléatoire, *enveloppée* par la clé de wrap.
-//! Avantage : changer de mot de passe maître ne ré-enveloppe que la clé de
-//! coffre — pas besoin de re-chiffrer tous les items.
+//! The vault key is a random key, *wrapped* by the wrap key. Benefit: changing
+//! the master password only re-wraps the vault key — no need to re-encrypt all
+//! the items.
 
 use core::fmt;
 
@@ -35,22 +35,22 @@ use crate::kdf::{self, KdfParams};
 use crate::manifest::Manifest;
 use crate::secret::{SecretKey, KEY_LEN};
 
-/// AAD liant la clé de coffre enveloppée à son rôle.
+/// AAD binding the wrapped vault key to its role.
 const AAD_VAULT_KEY: &[u8] = b"pm:v1:wrapped-vault-key";
 
-/// AAD liant le manifest d'intégrité à son rôle.
+/// AAD binding the integrity manifest to its role.
 const AAD_MANIFEST: &[u8] = b"pm:v1:manifest";
 
-/// Borne sur le sel encodé reçu (non fiable), vérifiée avant décodage.
-/// Le sel fait 16 octets → ~24 caractères base64 ; 64 laisse de la marge.
+/// Bound on the received (untrusted) encoded salt, checked before decoding.
+/// The salt is 16 bytes → ~24 base64 characters; 64 leaves margin.
 const MAX_ENCODED_SALT_LEN: usize = 64;
 
-/// Secret d'authentification présenté au serveur. Type dédié plutôt qu'une
-/// `String` nue pour éviter les fuites : `Debug` est **masqué**, il n'est pas
-/// `Clone`, et la comparaison se fait en **temps constant**.
+/// Authentication secret presented to the server. A dedicated type rather than
+/// a bare `String` to avoid leaks: `Debug` is **redacted**, it is not `Clone`,
+/// and comparison is done in **constant time**.
 ///
-/// Sérialise/désérialise de façon transparente comme la chaîne base64 sous-
-/// jacente (format réseau inchangé).
+/// Serializes/deserializes transparently as the underlying base64 string (the
+/// wire format is unchanged).
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct AuthSecret(String);
@@ -60,17 +60,17 @@ impl AuthSecret {
         Self(value)
     }
 
-    /// Expose la valeur base64 — à n'envoyer **qu'au serveur**, jamais à logger.
+    /// Exposes the base64 value — to be sent **only to the server**, never logged.
     pub fn expose_b64(&self) -> &str {
         &self.0
     }
 
-    /// Octets (base64) pour transmission/comparaison contrôlée.
+    /// Bytes (base64) for controlled transmission/comparison.
     pub fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
 
-    /// Égalité en temps constant avec un autre secret d'authentification.
+    /// Constant-time equality with another authentication secret.
     pub fn ct_eq(&self, other: &AuthSecret) -> bool {
         auth_secret_eq(self.0.as_bytes(), other.0.as_bytes())
     }
@@ -82,52 +82,50 @@ impl fmt::Debug for AuthSecret {
     }
 }
 
-/// Données à publier au serveur lors de l'inscription. Aucune n'est secrète
-/// au sens où le serveur ne peut rien déchiffrer avec.
+/// Data to publish to the server during registration. None of it is secret in
+/// the sense that the server cannot decrypt anything with it.
 ///
-/// Pas de `Clone` : `auth_secret` est un credential, on évite les copies
-/// silencieuses.
+/// No `Clone`: `auth_secret` is a credential, so we avoid silent copies.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Registration {
-    /// Version du format d'enregistrement, pour migrer le schéma sans casser
-    /// les comptes existants.
+    /// Version of the registration format, to migrate the schema without
+    /// breaking existing accounts.
     pub version: u8,
-    /// Sel Argon2 (base64). Public par nature.
+    /// Argon2 salt (base64). Public by nature.
     pub salt: String,
-    /// Paramètres KDF à réutiliser au login.
+    /// KDF parameters to reuse at login.
     pub kdf: KdfParams,
-    /// Clé de coffre enveloppée par la clé de wrap.
+    /// Vault key wrapped by the wrap key.
     pub wrapped_vault_key: EncryptedBlob,
-    /// Secret d'authentification (base64), présenté au serveur pour prouver
-    /// l'identité — il n'ouvre **aucun** coffre (indépendant de la clé de wrap).
+    /// Authentication secret (base64), presented to the server to prove
+    /// identity — it opens **no** vault (independent of the wrap key).
     ///
-    /// ⚠️ SÉCURITÉ SERVEUR (obligation) : bien que ce secret ait 256 bits
-    /// d'entropie, le serveur ne DOIT JAMAIS le stocker en clair ni avec un hash
-    /// rapide (SHA-256, bcrypt à faible coût…). Il DOIT le passer dans un hash
-    /// lent dédié (Argon2id de préférence) avant stockage, et le comparer en
-    /// temps constant via [`AuthSecret::ct_eq`] / [`auth_secret_eq`]. Objectif :
-    /// une fuite de la base ne doit jamais permettre de rejouer
-    /// l'authentification d'un utilisateur.
+    /// ⚠️ SERVER SECURITY (requirement): although this secret has 256 bits of
+    /// entropy, the server must NEVER store it in the clear or with a fast hash
+    /// (SHA-256, low-cost bcrypt, etc.). It MUST run it through a dedicated slow
+    /// hash (Argon2id preferably) before storage, and compare it in constant
+    /// time via [`AuthSecret::ct_eq`] / [`auth_secret_eq`]. Goal: a database
+    /// leak must never allow replaying a user's authentication.
     pub auth_secret: AuthSecret,
 }
 
-/// Un coffre déverrouillé : détient la clé de coffre en clair (en mémoire,
-/// effacée au drop) et peut chiffrer/déchiffrer les items.
+/// An unlocked vault: holds the vault key in the clear (in memory, wiped on
+/// drop) and can encrypt/decrypt items.
 pub struct Vault {
     vault_key: SecretKey,
 }
 
 impl Vault {
-    /// Crée un nouveau compte à partir d'un mot de passe maître.
+    /// Creates a new account from a master password.
     ///
-    /// Génère une [`AccountSecret`] (Secret Key) aléatoire et la **retourne** :
-    /// l'appelant DOIT la montrer une seule fois (Emergency Kit) puis ne jamais
-    /// la stocker côté serveur. Utilise les [`KdfParams`] par défaut.
+    /// Generates a random [`AccountSecret`] (Secret Key) and **returns** it: the
+    /// caller MUST show it only once (Emergency Kit) and then never store it on
+    /// the server side. Uses the default [`KdfParams`].
     pub fn register(master_password: &[u8]) -> Result<(Self, Registration, AccountSecret)> {
         Self::register_with(master_password, KdfParams::default())
     }
 
-    /// Variante de [`Vault::register`] avec des paramètres KDF explicites.
+    /// Variant of [`Vault::register`] with explicit KDF parameters.
     pub fn register_with(
         master_password: &[u8],
         kdf_params: KdfParams,
@@ -139,12 +137,12 @@ impl Vault {
         let salt = kdf::generate_salt();
         let master = kdf::derive_master_key(master_password, &salt, kdf_params)?;
 
-        // Secret Key : deuxième facteur de dérivation, jamais transmis au serveur.
+        // Secret Key: second derivation factor, never sent to the server.
         let account_secret = AccountSecret::generate();
         let wrap_key = kdf::derive_wrap_key(&master, &account_secret);
         let auth_secret = kdf::derive_auth_secret(&master, &account_secret);
 
-        // Clé de coffre = clé aléatoire indépendante du mot de passe.
+        // Vault key = random key, independent of the password.
         let vault_key = SecretKey::generate();
         let wrapped_vault_key = aead::encrypt(&wrap_key, vault_key.as_bytes(), AAD_VAULT_KEY)?;
 
@@ -158,15 +156,15 @@ impl Vault {
         Ok((Self { vault_key }, registration, account_secret))
     }
 
-    /// Déverrouille un coffre existant.
+    /// Unlocks an existing vault.
     ///
-    /// Requiert le mot de passe maître **et** la [`AccountSecret`] (Secret Key) :
-    /// les deux facteurs sont nécessaires. `salt`, `kdf`, `wrapped_vault_key`
-    /// proviennent du serveur (récupérés via l'email avant la saisie). Retourne
-    /// le coffre et le secret d'authentification à présenter au serveur.
+    /// Requires the master password **and** the [`AccountSecret`] (Secret Key):
+    /// both factors are necessary. `salt`, `kdf`, `wrapped_vault_key` come from
+    /// the server (fetched via the email before input). Returns the vault and
+    /// the authentication secret to present to the server.
     ///
-    /// Un mot de passe OU une Secret Key erronés font échouer le déballage avec
-    /// [`CryptoError::Aead`] — indistinguable d'une donnée altérée.
+    /// A wrong password OR a wrong Secret Key makes the unwrap fail with
+    /// [`CryptoError::Aead`] — indistinguishable from tampered data.
     pub fn unlock(
         master_password: &[u8],
         account_secret: &AccountSecret,
@@ -177,11 +175,11 @@ impl Vault {
         if master_password.is_empty() {
             return Err(CryptoError::EmptyPassword);
         }
-        // Plafond seul : on accepte des params « legacy » faibles (sinon on
-        // verrouillerait l'utilisateur), mais on refuse des params absurdes
-        // qui épuiseraient la mémoire avant tout déchiffrement utile.
+        // Ceiling only: we accept weak "legacy" params (otherwise we would lock
+        // the user out), but we reject absurd params that would exhaust memory
+        // before any useful decryption.
         kdf_params.validate_for_unlock()?;
-        // Borne sur le sel non fiable avant décodage (anti-allocation).
+        // Bound on the untrusted salt before decoding (anti-allocation).
         if salt.len() > MAX_ENCODED_SALT_LEN {
             return Err(CryptoError::Malformed);
         }
@@ -193,9 +191,9 @@ impl Vault {
         let wrap_key = kdf::derive_wrap_key(&master, account_secret);
         let auth_secret = kdf::derive_auth_secret(&master, account_secret);
 
-        // La clé de coffre en clair ne doit transiter que par des tampons
-        // effacés : `Zeroizing` nettoie le Vec déchiffré, et on efface la copie
-        // sur la pile une fois la clé déplacée dans le `SecretKey`.
+        // The plaintext vault key must only pass through wiped buffers:
+        // `Zeroizing` clears the decrypted Vec, and we wipe the stack copy once
+        // the key has been moved into the `SecretKey`.
         let key_bytes = Zeroizing::new(aead::decrypt(&wrap_key, wrapped_vault_key, AAD_VAULT_KEY)?);
         if key_bytes.len() != KEY_LEN {
             return Err(CryptoError::Malformed);
@@ -211,16 +209,16 @@ impl Vault {
         ))
     }
 
-    /// Chiffre le contenu d'un item. `item_id` est authentifié (AAD) pour
-    /// qu'un chiffré ne puisse pas être déplacé vers un autre item.
+    /// Encrypts an item's content. `item_id` is authenticated (AAD) so that a
+    /// ciphertext cannot be moved to another item.
     pub fn encrypt_item(&self, plaintext: &[u8], item_id: &str) -> Result<EncryptedBlob> {
         aead::encrypt(&self.vault_key, plaintext, item_id.as_bytes())
     }
 
-    /// Déchiffre le contenu d'un item.
+    /// Decrypts an item's content.
     ///
-    /// Le clair retourné est du **matériel sensible** : il est enveloppé dans
-    /// [`Zeroizing`] pour être effacé de la mémoire dès que l'appelant le drop.
+    /// The returned plaintext is **sensitive material**: it is wrapped in
+    /// [`Zeroizing`] so it is wiped from memory as soon as the caller drops it.
     pub fn decrypt_item(&self, blob: &EncryptedBlob, item_id: &str) -> Result<Zeroizing<Vec<u8>>> {
         Ok(Zeroizing::new(aead::decrypt(
             &self.vault_key,
@@ -229,20 +227,20 @@ impl Vault {
         )?))
     }
 
-    /// Scelle un [`Manifest`] d'intégrité sous la clé de coffre. Le blob produit
-    /// est opaque pour le serveur et n'est lisible que par ce coffre.
+    /// Seals an integrity [`Manifest`] under the vault key. The resulting blob
+    /// is opaque to the server and readable only by this vault.
     pub fn seal_manifest(&self, manifest: &Manifest) -> Result<EncryptedBlob> {
         let bytes = serde_json::to_vec(manifest).map_err(|_| CryptoError::Malformed)?;
         aead::encrypt(&self.vault_key, &bytes, AAD_MANIFEST)
     }
 
-    /// Ouvre un manifest scellé. Échoue si le blob est altéré ou ne provient pas
-    /// de ce coffre ([`CryptoError::Aead`]), ou si le manifest est mal formé
-    /// (entrées non triées / dupliquées → [`CryptoError::Malformed`]).
+    /// Opens a sealed manifest. Fails if the blob is tampered with or does not
+    /// come from this vault ([`CryptoError::Aead`]), or if the manifest is
+    /// malformed (unsorted / duplicate entries → [`CryptoError::Malformed`]).
     ///
-    /// ⚠️ Cette variante ne protège PAS du rollback : un serveur peut resservir
-    /// un manifest plus ancien (mais authentique). Utilisez
-    /// [`Vault::open_manifest_checked`] dès que vous connaissez le dernier `seq`.
+    /// ⚠️ This variant does NOT protect against rollback: a server can re-serve
+    /// an older (but authentic) manifest. Use
+    /// [`Vault::open_manifest_checked`] as soon as you know the latest `seq`.
     pub fn open_manifest(&self, blob: &EncryptedBlob) -> Result<Manifest> {
         let bytes = aead::decrypt(&self.vault_key, blob, AAD_MANIFEST)?;
         let manifest: Manifest =
@@ -251,9 +249,9 @@ impl Vault {
         Ok(manifest)
     }
 
-    /// Ouvre un manifest scellé en **refusant un rollback** : le `seq` du
-    /// manifest doit être ≥ `last_seen_seq` (le dernier connu du client), sinon
-    /// [`CryptoError::StaleManifest`]. C'est l'API à privilégier en synchro.
+    /// Opens a sealed manifest while **refusing a rollback**: the manifest's
+    /// `seq` must be ≥ `last_seen_seq` (the latest the client knows), otherwise
+    /// [`CryptoError::StaleManifest`]. This is the preferred API for syncing.
     pub fn open_manifest_checked(
         &self,
         blob: &EncryptedBlob,
@@ -266,16 +264,15 @@ impl Vault {
         Ok(manifest)
     }
 
-    /// Ré-enveloppe la clé de coffre sous un nouveau mot de passe maître, sans
-    /// re-chiffrer les items. Retourne les nouvelles [`Registration`].
+    /// Re-wraps the vault key under a new master password, without re-encrypting
+    /// the items. Returns the new [`Registration`].
     ///
-    /// Les [`KdfParams`] sont fournis explicitement : la rotation ne doit jamais
-    /// réinitialiser silencieusement des paramètres KDF choisis par l'appelant
-    /// (ce qui pourrait les affaiblir). Passer [`KdfParams::default`] pour le
-    /// comportement standard.
+    /// The [`KdfParams`] are provided explicitly: rotation must never silently
+    /// reset KDF parameters chosen by the caller (which could weaken them). Pass
+    /// [`KdfParams::default`] for the standard behavior.
     ///
-    /// La [`AccountSecret`] reste **inchangée** lors d'une rotation de mot de
-    /// passe (c'est le secret du compte, pas du mot de passe) : on la repasse.
+    /// The [`AccountSecret`] stays **unchanged** during a master-password
+    /// rotation (it is the account's secret, not the password's): pass it back in.
     pub fn rotate_master_password(
         &self,
         new_password: &[u8],
@@ -285,8 +282,8 @@ impl Vault {
         if new_password.is_empty() {
             return Err(CryptoError::EmptyPassword);
         }
-        // La rotation est le moment naturel pour durcir : on applique la
-        // politique courante (plancher + plafond), pas seulement le plafond.
+        // Rotation is the natural moment to harden: we apply the current policy
+        // (floor + ceiling), not just the ceiling.
         kdf_params.validate_for_new_vault()?;
         let salt = kdf::generate_salt();
         let master = kdf::derive_master_key(new_password, &salt, kdf_params)?;
@@ -303,8 +300,8 @@ impl Vault {
     }
 }
 
-/// Compare deux secrets d'authentification en temps constant (anti timing-attack).
-/// Destiné au serveur lorsqu'il vérifie le secret présenté.
+/// Compares two authentication secrets in constant time (anti timing-attack).
+/// Intended for the server when it verifies the presented secret.
 pub fn auth_secret_eq(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }

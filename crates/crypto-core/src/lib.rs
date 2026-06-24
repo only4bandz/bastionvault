@@ -1,38 +1,38 @@
 //! # crypto-core
 //!
-//! Cœur cryptographique **zero-knowledge** du gestionnaire de mots de passe.
+//! **Zero-knowledge** cryptographic core of the password manager.
 //!
-//! Tout le chiffrement se fait côté client (navigateur via WASM, ou natif).
-//! Le serveur ne voit jamais le mot de passe maître, la clé maître, ni un seul
-//! item en clair — uniquement des [`aead::EncryptedBlob`] opaques.
+//! All encryption happens client-side (in the browser via WASM, or natively).
+//! The server never sees the master password, the master key, or a single
+//! item in the clear — only opaque [`aead::EncryptedBlob`] values.
 //!
 //! ## Primitives
-//! - **Argon2id** : dérivation lente et mémoire-dure du mot de passe maître.
-//! - **Secret Key** (128 bits, détenue par l'utilisateur) mélangée comme sel
-//!   HKDF → brute-force hors-ligne infaisable même avec un mot de passe faible.
-//! - **HKDF-SHA256** : séparation en sous-clés indépendantes.
-//! - **XChaCha20-Poly1305** : chiffrement authentifié (nonce 192 bits).
+//! - **Argon2id**: slow, memory-hard derivation of the master password.
+//! - **Secret Key** (128 bits, held by the user) mixed in as the HKDF salt
+//!   → offline brute-force is infeasible even with a weak password.
+//! - **HKDF-SHA256**: separation into independent sub-keys.
+//! - **XChaCha20-Poly1305**: authenticated encryption (192-bit nonce).
 //!
-//! ## Cible WASM — validée
-//! Le crate vise natif **et** WebAssembly. Le crate `crypto-wasm` câble l'aléa
-//! sur l'entropie du navigateur (`getrandom/js`) et le valide par un test
-//! `wasm32` réel (`wasm-pack test --node`) : génération de sel/clés/nonces et
-//! cycle complet inscription → chiffrement → déverrouillage passent en WASM.
+//! ## WASM target — validated
+//! The crate targets native **and** WebAssembly. The `crypto-wasm` crate wires
+//! randomness to the browser's entropy (`getrandom/js`) and validates it with a
+//! real `wasm32` test (`wasm-pack test --node`): salt/key/nonce generation and
+//! the full registration → encryption → unlock cycle all pass under WASM.
 //!
-//! ## Démarrage rapide
+//! ## Quick start
 //! ```
 //! use crypto_core::vault::Vault;
 //!
-//! // Inscription : crée le coffre + renvoie la Secret Key à montrer une fois.
-//! let (vault, reg, secret_key) = Vault::register(b"mon mot de passe maitre").unwrap();
+//! // Registration: creates the vault + returns the Secret Key to show once.
+//! let (vault, reg, secret_key) = Vault::register(b"my master password").unwrap();
 //! let _emergency_kit = secret_key.emergency_kit("alice@example.com");
 //!
-//! // Chiffrement d'un item (le serveur ne stockera que ce blob).
+//! // Encrypting an item (the server will only store this blob).
 //! let blob = vault.encrypt_item(b"super-secret", "item-1").unwrap();
 //!
-//! // Déverrouillage : mot de passe maître ET Secret Key sont requis.
+//! // Unlock: both the master password AND the Secret Key are required.
 //! let (vault2, _auth) = Vault::unlock(
-//!     b"mon mot de passe maitre",
+//!     b"my master password",
 //!     &secret_key,
 //!     &reg.salt,
 //!     reg.kdf,
@@ -50,9 +50,9 @@ pub mod manifest;
 pub mod secret;
 pub mod vault;
 
-// API publique recommandée : passez par `Vault`. Les primitives AEAD bas niveau
-// (`aead::encrypt`/`decrypt`) sont volontairement `pub(crate)` pour éviter les
-// pièges (nonce/AAD mal gérés, clair brut non effacé).
+// Recommended public API: go through `Vault`. The low-level AEAD primitives
+// (`aead::encrypt`/`decrypt`) are deliberately `pub(crate)` to avoid pitfalls
+// (mishandled nonce/AAD, raw plaintext left unwiped).
 pub use account_secret::AccountSecret;
 pub use aead::EncryptedBlob;
 pub use error::{CryptoError, Result};

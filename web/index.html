@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>🔐 Coffre zero-knowledge — démo WASM</title>
+  <title>🔐 Zero-knowledge vault — WASM demo</title>
   <style>
     :root { --bg:#070b12; --panel:#0e151f; --line:#1d2a3a; --txt:#cfe0f0; --dim:#6c8199;
             --accent:#37e0a0; --warn:#ffb454; --err:#ff5c6c; }
@@ -34,49 +34,49 @@
 </head>
 <body>
   <header>
-    <h1>🔐 COFFRE ZERO-KNOWLEDGE <span class="pill">démo · Rust → WASM</span></h1>
-    <div class="sub">Tout le chiffrement tourne dans CE navigateur (crypto-core compilé en WebAssembly). Le « serveur » à droite ne voit que des blobs chiffrés.</div>
+    <h1>🔐 ZERO-KNOWLEDGE VAULT <span class="pill">demo · Rust → WASM</span></h1>
+    <div class="sub">All encryption runs in THIS browser (crypto-core compiled to WebAssembly). The "server" on the right only ever sees encrypted blobs.</div>
   </header>
 
   <main>
     <section class="panel">
-      <h2>1 · Compte</h2>
-      <label>Mot de passe maître</label>
+      <h2>1 · Account</h2>
+      <label>Master password</label>
       <input id="reg-pw" type="password" value="correct horse battery staple" />
-      <button id="btn-register">Créer le coffre</button>
-      <div class="hint">Argon2id 64 Mio — la création prend ~1 s dans le navigateur.</div>
+      <button id="btn-register">Create vault</button>
+      <div class="hint">Argon2id 64 MiB — creation takes ~1 s in the browser.</div>
       <div id="secret-out"></div>
 
-      <h2 style="margin-top:20px">2 · Déverrouiller (autre appareil)</h2>
-      <label>Mot de passe maître</label>
+      <h2 style="margin-top:20px">2 · Unlock (another device)</h2>
+      <label>Master password</label>
       <input id="unlock-pw" type="password" />
       <label>Secret Key</label>
       <input id="unlock-sk" placeholder="A1-XXXXX-XXXXX-…" />
-      <button id="btn-unlock" disabled>Déverrouiller depuis le « serveur »</button>
+      <button id="btn-unlock" disabled>Unlock from the "server"</button>
       <div id="unlock-out"></div>
     </section>
 
     <section class="panel">
       <h2>3 · Items</h2>
       <div class="row">
-        <div><label>Nom (id)</label><input id="item-id" value="github.com" /></div>
+        <div><label>Name (id)</label><input id="item-id" value="github.com" /></div>
         <div><label>Secret</label><input id="item-val" value="hunter2" /></div>
       </div>
-      <button id="btn-add" disabled>Chiffrer & enregistrer</button>
+      <button id="btn-add" disabled>Encrypt & save</button>
       <div id="item-out"></div>
-      <h2 style="margin-top:20px">Items déchiffrés (en mémoire)</h2>
+      <h2 style="margin-top:20px">Decrypted items (in memory)</h2>
       <pre id="plain-list">—</pre>
     </section>
 
     <section class="panel server">
-      <h2>🗄 Serveur — ce qu'il stocke (opaque)</h2>
-      <div class="hint">Registration + blobs chiffrés. Aucun mot de passe, aucun secret en clair.</div>
-      <pre id="server-view">(vide)</pre>
+      <h2>🗄 Server — what it stores (opaque)</h2>
+      <div class="hint">Registration + encrypted blobs. No passwords, no secrets in plaintext.</div>
+      <pre id="server-view">(empty)</pre>
     </section>
 
     <section class="panel">
-      <h2>État</h2>
-      <pre id="log">Chargement du module WASM…</pre>
+      <h2>Status</h2>
+      <pre id="log">Loading WASM module…</pre>
     </section>
   </main>
 
@@ -86,7 +86,7 @@
     const $ = (id) => document.getElementById(id);
     const log = (msg, cls='') => { $('log').innerHTML = `<span class="${cls}">${msg}</span>`; };
 
-    // Le « serveur » = simple stockage local de données opaques.
+    // The "server" = simple local storage of opaque data.
     const server = { registration: null, items: {} /* id -> blobJSON */ };
     const renderServer = () => {
       $('server-view').textContent = JSON.stringify({
@@ -95,37 +95,37 @@
       }, null, 2);
     };
 
-    let account = null; // coffre déverrouillé, en mémoire uniquement
+    let account = null; // unlocked vault, in memory only
     const renderPlain = () => {
-      if (!account) { $('plain-list').textContent = '— (verrouillé)'; return; }
+      if (!account) { $('plain-list').textContent = '— (locked)'; return; }
       const lines = Object.keys(server.items).map((id) => {
         try { return `${id} = ${account.decrypt_item(server.items[id], id)}`; }
-        catch { return `${id} = <illisible>`; }
+        catch { return `${id} = <unreadable>`; }
       });
       $('plain-list').textContent = lines.length ? lines.join('\n') : '—';
     };
 
     await init();
-    log('Module WASM prêt. Crée un coffre pour commencer.', 'ok');
+    log('WASM module ready. Create a vault to get started.', 'ok');
 
     $('btn-register').onclick = () => {
       try {
-        log('Dérivation Argon2id…');
+        log('Deriving Argon2id…');
         account = register($('reg-pw').value);
         server.registration = account.registration_json;
         server.items = {};
         const sk = account.secret_key;
         $('secret-out').innerHTML =
-          `<label>Secret Key (à conserver — montrée une seule fois)</label>` +
+          `<label>Secret Key (keep it safe — shown only once)</label>` +
           `<pre class="warn">${sk}</pre>` +
-          `<details><summary class="hint">Voir l'Emergency Kit</summary><pre>${account.emergency_kit('alice@example.com')}</pre></details>`;
-        $('unlock-sk').value = sk;       // pré-rempli pour la démo
+          `<details><summary class="hint">View the Emergency Kit</summary><pre>${account.emergency_kit('alice@example.com')}</pre></details>`;
+        $('unlock-sk').value = sk;       // pre-filled for the demo
         $('unlock-pw').value = $('reg-pw').value;
         $('btn-add').disabled = false;
         $('btn-unlock').disabled = false;
         renderServer(); renderPlain();
-        log('Coffre créé. Le serveur ne reçoit que des données opaques.', 'ok');
-      } catch (e) { log('Erreur: ' + e, 'err'); }
+        log('Vault created. The server only receives opaque data.', 'ok');
+      } catch (e) { log('Error: ' + e, 'err'); }
     };
 
     $('btn-add').onclick = () => {
@@ -133,20 +133,20 @@
         const id = $('item-id').value, val = $('item-val').value;
         server.items[id] = account.encrypt_item(val, id);
         renderServer(); renderPlain();
-        log(`Item « ${id} » chiffré côté client puis envoyé au serveur.`, 'ok');
-      } catch (e) { log('Erreur: ' + e, 'err'); }
+        log(`Item "${id}" encrypted client-side then sent to the server.`, 'ok');
+      } catch (e) { log('Error: ' + e, 'err'); }
     };
 
     $('btn-unlock').onclick = () => {
       try {
-        if (!server.registration) { log('Crée d\'abord un coffre.', 'warn'); return; }
-        log('Déverrouillage…');
+        if (!server.registration) { log('Create a vault first.', 'warn'); return; }
+        log('Unlocking…');
         account = unlock($('unlock-pw').value, $('unlock-sk').value, server.registration);
         renderPlain();
-        log('Déverrouillé. Items déchiffrés en mémoire.', 'ok');
+        log('Unlocked. Items decrypted in memory.', 'ok');
       } catch (e) {
         account = null; renderPlain();
-        log('Échec: mot de passe ou Secret Key invalide.', 'err');
+        log('Failed: invalid password or Secret Key.', 'err');
       }
     };
   </script>

@@ -1,89 +1,89 @@
-# 🔐 Gestionnaire de mots de passe (zero-knowledge)
+# 🔐 Password manager (zero-knowledge)
 
-Gestionnaire de mots de passe **zero-knowledge** en Rust : le serveur ne voit
-jamais ton mot de passe maître ni un seul secret en clair. Tout le chiffrement
-se fait côté client. Conçu pour une app web aujourd'hui, et une **extension
-Chrome** plus tard — les deux partagent le même cœur crypto (Rust → WASM).
+A **zero-knowledge** password manager written in Rust: the server never sees
+your master password or a single secret in plaintext. All encryption happens
+client-side. Designed for a web app today, and a **Chrome extension** later —
+both share the same crypto core (Rust → WASM).
 
-## Modèle de sécurité
+## Security model
 
 ```
-mot de passe maître ──Argon2id(sel, 64Mio)──► clé maître
-                                                 │
-              Secret Key (128 bits, user) ──────►│ HKDF-Extract (sel)
-                                                 │
-                            ┌──────HKDF──────────┼──────HKDF──────┐
-                            ▼                                     ▼
-                       clé de wrap                          secret d'auth ──► serveur
-                            │                                (prouve l'identité,
-                            │ enveloppe                       ne déchiffre rien)
-                            ▼
-        clé de coffre (aléatoire 256 bits) ──chiffre──► tous les items
+master password ──Argon2id(salt, 64MiB)──► master key
+                                              │
+            Secret Key (128-bit, user) ──────►│ HKDF-Extract (salt)
+                                              │
+                          ┌──────HKDF─────────┼──────HKDF──────┐
+                          ▼                                    ▼
+                     wrap key                            auth secret ──► server
+                          │                              (proves identity,
+                          │ wraps                         decrypts nothing)
+                          ▼
+        vault key (random 256-bit) ──encrypts──► all items
 ```
 
-- **Argon2id** (64 Mio, 3 passes) protège contre le brute-force hors-ligne.
-- **Secret Key** (128 bits, modèle 1Password) : un second facteur détenu par
-  l'utilisateur, mélangé comme sel HKDF. Le brute-force hors-ligne devient
-  infaisable **même avec un mot de passe faible** — le serveur ne la voit jamais.
-  Montrée une fois via un **Emergency Kit**, ressaisie sur chaque appareil.
-- **XChaCha20-Poly1305** chiffre chaque item (AEAD, nonce 192 bits aléatoire).
-- La **clé de coffre** est aléatoire et *enveloppée* : changer de mot de passe
-  maître ne re-chiffre pas tous les items.
-- **Manifest d'intégrité** : un index chiffré sous la clé de coffre liste le
-  digest de chaque item. À la synchro, on détecte si un serveur malveillant a
-  supprimé, injecté, ou rollbacké un item (ce que l'AEAD par-item seul ne voit
-  pas). Un compteur `seq` monotone bloque le rollback du manifest lui-même.
-- Le serveur ne stocke que des **blobs opaques** + un hash lent du secret d'auth.
-  Une fuite serveur ne révèle aucun mot de passe.
+- **Argon2id** (64 MiB, 3 passes) protects against offline brute-force.
+- **Secret Key** (128 bits, 1Password model): a second factor held by the user,
+  mixed in as an HKDF salt. Offline brute-force becomes infeasible **even with a
+  weak password** — the server never sees it. Shown once via an **Emergency
+  Kit**, re-entered on each device.
+- **XChaCha20-Poly1305** encrypts each item (AEAD, random 192-bit nonce).
+- The **vault key** is random and *wrapped*: changing the master password does
+  not re-encrypt every item.
+- **Integrity manifest**: an index encrypted under the vault key lists the
+  digest of each item. On sync, it detects whether a malicious server has
+  deleted, injected, or rolled back an item (which per-item AEAD alone cannot
+  catch). A monotonic `seq` counter blocks rollback of the manifest itself.
+- The server only stores **opaque blobs** + a slow hash of the auth secret. A
+  server breach reveals no passwords.
 
 ## Structure
 
 ```
-crates/crypto-core/   ✅ Cœur crypto, Rust pur, 32 tests. Compile natif + WASM.
-crates/crypto-wasm/   ✅ Liaisons wasm-bindgen + test wasm32 (entropie validée).
-web/                  ✅ Démo navigateur (chiffre/déchiffre en WASM). Voir web/README.md
-crates/server/        ✅ API Axum zero-knowledge : comptes + blobs chiffrés (en mémoire, MVP)
+crates/crypto-core/   ✅ Crypto core, pure Rust, 32 tests. Compiles native + WASM.
+crates/crypto-wasm/   ✅ wasm-bindgen bindings + wasm32 test (entropy validated).
+web/                  ✅ Browser demo (encrypt/decrypt in WASM). See web/README.md
+crates/server/        ✅ Zero-knowledge Axum API: accounts + encrypted blobs (in-memory, MVP)
 ```
 
-### Serveur — endpoints
+### Server — endpoints
 
-Zero-knowledge : ne stocke que des blobs opaques + un **hash Argon2id** du
-secret d'auth (jamais le secret nu). Réutilise les types de `crypto-core`.
+Zero-knowledge: stores only opaque blobs + an **Argon2id hash** of the auth
+secret (never the raw secret). Reuses the types from `crypto-core`.
 
-| Méthode | Route | Rôle |
+| Method | Route | Role |
 |---|---|---|
-| `POST` | `/accounts` | Crée un compte (stocke `salt`, `kdf`, clé enveloppée, hash du secret) |
-| `GET` | `/accounts/:email/prelogin` | Renvoie `salt`+`kdf`+clé enveloppée (pour dériver côté client) |
-| `POST` | `/sessions` | Vérifie le secret d'auth (Argon2id, `spawn_blocking`) → jeton bearer (TTL 30 min) |
-| `DELETE` | `/sessions` | Révoque le jeton courant (déconnexion) |
-| `GET` | `/vault` | Items chiffrés + manifest (auth) |
-| `PUT`/`DELETE` | `/vault/items/:id` | Upsert / suppression d'un item chiffré (auth) |
-| `PUT` | `/vault/manifest` | Stocke le manifest d'intégrité (auth) |
+| `POST` | `/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
+| `GET` | `/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
+| `POST` | `/sessions` | Verifies the auth secret (Argon2id, `spawn_blocking`) → bearer token (TTL 30 min) |
+| `DELETE` | `/sessions` | Revokes the current token (logout) |
+| `GET` | `/vault` | Encrypted items + manifest (auth) |
+| `PUT`/`DELETE` | `/vault/items/:id` | Upsert / deletion of an encrypted item (auth) |
+| `PUT` | `/vault/manifest` | Stores the integrity manifest (auth) |
 
 ```bash
-cargo run -p server          # écoute sur http://127.0.0.1:7777
+cargo run -p server          # listens on http://127.0.0.1:7777
 ```
 
-## Feuille de route
+## Roadmap
 
-| # | Étape | État |
+| # | Step | Status |
 |---|-------|------|
-| 1 | Cœur crypto (Argon2id, politique KDF, AEAD, key wrapping) | ✅ Fait |
-| 2 | Secret Key (deux-secrets) + Emergency Kit | ✅ Fait |
-| 3 | Manifest d'intégrité du coffre | ✅ Fait |
-| 4 | Liaisons WASM + démo navigateur (entropie validée) | ✅ Fait |
-| 5 | API serveur Axum (comptes, stockage chiffré) — MVP en mémoire | ✅ Fait |
-| 6 | Persistance serveur (SQLite) + interface web complète | ⬜ |
-| 7 | 2FA TOTP (authenticator) | ⬜ |
-| 8 | Clés FIDO2 / WebAuthn (YubiKey, Trustkey) | ⬜ |
-| 9 | Vérification SMS | ⬜ |
-| 10 | Extension Chrome (réutilise crypto-core via WASM) | ⬜ |
+| 1 | Crypto core (Argon2id, KDF policy, AEAD, key wrapping) | ✅ Done |
+| 2 | Secret Key (two-secret) + Emergency Kit | ✅ Done |
+| 3 | Vault integrity manifest | ✅ Done |
+| 4 | WASM bindings + browser demo (entropy validated) | ✅ Done |
+| 5 | Axum server API (accounts, encrypted storage) — in-memory MVP | ✅ Done |
+| 6 | Server persistence (SQLite) + full web interface | ⬜ |
+| 7 | TOTP 2FA (authenticator) | ⬜ |
+| 8 | FIDO2 / WebAuthn keys (YubiKey, Trustkey) | ⬜ |
+| 9 | SMS verification | ⬜ |
+| 10 | Chrome extension (reuses crypto-core via WASM) | ⬜ |
 
-## Développement
+## Development
 
 ```bash
-cargo test --workspace                       # tests natifs (cœur crypto)
-wasm-pack test --node crates/crypto-wasm     # tests WASM (entropie navigateur)
-./web/build.sh                               # build le module WASM de la démo
-cd web && python3 -m http.server 8080        # servir la démo → http://localhost:8080
+cargo test --workspace                       # native tests (crypto core)
+wasm-pack test --node crates/crypto-wasm     # WASM tests (browser entropy)
+./web/build.sh                               # build the demo's WASM module
+cd web && python3 -m http.server 8080        # serve the demo → http://localhost:8080
 ```
