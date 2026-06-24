@@ -16,6 +16,7 @@
 
 import init, { unlock, rehydrate } from "./pkg/crypto_wasm.js";
 import { makeApi, ApiError } from "./lib/api.js";
+import { matchesSite } from "./lib/match.js";
 
 const DEFAULT_SERVER = "http://127.0.0.1:7777";
 const DEFAULT_KEEP_MINUTES = 60;
@@ -198,31 +199,12 @@ function sortItems(a, b) {
   return (b.updatedAt || 0) - (a.updatedAt || 0);
 }
 
-// ── domain matching (for inline autofill suggestions) ──
-function domainOf(value) {
-  const c = (value || "").trim();
-  if (!c.includes(".")) return null;
-  let h = c;
-  try {
-    h = /^https?:\/\//i.test(c) ? new URL(c).hostname : c.split("/")[0];
-  } catch {
-    h = c.split("/")[0];
-  }
-  h = h.toLowerCase().replace(/^www\./, "");
-  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(h) ? h : null;
-}
-
-function sameSite(a, b) {
-  if (!a || !b) return false;
-  return a === b || a.endsWith("." + b) || b.endsWith("." + a);
-}
-
-// Login items whose domain matches the given host, newest first.
+// Login items whose site matches the given host (incl. equivalent domains),
+// newest first.
 function suggestionsFor(s, host) {
-  const h = (host || "").toLowerCase().replace(/^www\./, "");
   return [...s.items.values()]
     .filter((it) => it.type === "login" && (it.username || it.password))
-    .filter((it) => sameSite(domainOf(it.url || it.title), h))
+    .filter((it) => matchesSite(it.url || it.title, host))
     .sort(sortItems)
     .map((it) => ({ id: it.id, title: it.title, username: it.username || "" }));
 }

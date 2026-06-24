@@ -2,6 +2,8 @@
 // runs crypto or holds the vault key; it asks the worker for item metadata and
 // for a single secret only at the moment the user copies or fills it.
 
+import { domainOf, matchesSite } from "./lib/match.js";
+
 const app = document.getElementById("app");
 
 // ── tiny helpers ──
@@ -49,25 +51,6 @@ const ICON = {
   shield: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>',
 };
 const SHIELD = '<svg class="logo" viewBox="0 0 32 32" aria-hidden><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9a8cff"/><stop offset="1" stop-color="#5a47e6"/></linearGradient></defs><path fill="url(#bg)" d="M16 2l11 4v8.5c0 7-4.7 12.9-11 15.5C9.7 27.4 5 21.5 5 14.5V6l11-4z"/><circle cx="16" cy="14.5" r="3" fill="#0a0c12"/><path fill="#0a0c12" d="M14.6 15.5h2.8l1 5.5h-4.8z"/></svg>';
-
-// ── current-site matching ──
-function domainOf(value) {
-  const c = (value || "").trim();
-  if (!c.includes(".")) return null;
-  let host = c;
-  try {
-    host = /^https?:\/\//i.test(c) ? new URL(c).hostname : c.split("/")[0];
-  } catch {
-    host = c.split("/")[0];
-  }
-  host = host.toLowerCase().replace(/^www\./, "");
-  return /^[a-z0-9.-]+\.[a-z]{2,}$/.test(host) ? host : null;
-}
-
-function sameSite(a, b) {
-  if (!a || !b) return false;
-  return a === b || a.endsWith("." + b) || b.endsWith("." + a);
-}
 
 function avatarFor(it) {
   const domain = it.type === "card" ? it.cardBankDomain : domainOf(it.url || it.title);
@@ -146,7 +129,7 @@ function renderVault(query = "") {
   const filtered = allItems.filter(match);
   const onSite = q
     ? []
-    : filtered.filter((it) => it.type === "login" && sameSite(domainOf(it.url || it.title), currentHost));
+    : filtered.filter((it) => it.type === "login" && matchesSite(it.url || it.title, currentHost));
   const onSiteIds = new Set(onSite.map((i) => i.id));
   const rest = filtered.filter((it) => !onSiteIds.has(it.id));
 
