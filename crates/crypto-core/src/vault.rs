@@ -44,7 +44,15 @@ pub struct Registration {
     pub kdf: KdfParams,
     /// Clé de coffre enveloppée par la clé de wrap.
     pub wrapped_vault_key: EncryptedBlob,
-    /// Secret d'authentification (base64) — le serveur le re-hashera lentement.
+    /// Secret d'authentification (base64), présenté au serveur pour prouver
+    /// l'identité — il n'ouvre **aucun** coffre (indépendant de la clé de wrap).
+    ///
+    /// ⚠️ SÉCURITÉ SERVEUR (obligation) : bien que ce secret ait 256 bits
+    /// d'entropie, le serveur ne DOIT JAMAIS le stocker en clair ni avec un hash
+    /// rapide (SHA-256, bcrypt à faible coût…). Il DOIT le passer dans un hash
+    /// lent dédié (Argon2id de préférence) avant stockage, et le comparer en
+    /// temps constant via [`auth_secret_eq`]. Objectif : une fuite de la base ne
+    /// doit jamais permettre de rejouer l'authentification d'un utilisateur.
     pub auth_secret: String,
 }
 

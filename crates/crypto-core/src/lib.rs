@@ -34,4 +34,10 @@ pub mod kdf;
 pub mod secret;
 pub mod vault;
 
+// API publique recommandée : passez par `Vault`. Les primitives AEAD bas niveau
+// (`aead::encrypt`/`decrypt`) sont volontairement `pub(crate)` pour éviter les
+// pièges (nonce/AAD mal gérés, clair brut non effacé).
+pub use aead::EncryptedBlob;
 pub use error::{CryptoError, Result};
+pub use kdf::KdfParams;
+pub use vault::{Registration, Vault};

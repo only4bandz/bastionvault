@@ -34,7 +34,7 @@ pub struct EncryptedBlob {
 /// `aad` (additional authenticated data) est authentifié mais pas chiffré :
 /// utile pour lier le chiffré à un contexte (ex. l'id de l'item) et empêcher
 /// qu'un blob soit déplacé ailleurs. Passer `&[]` si inutile.
-pub fn encrypt(key: &SecretKey, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedBlob> {
+pub(crate) fn encrypt(key: &SecretKey, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedBlob> {
     let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ct = cipher
@@ -54,7 +54,7 @@ pub fn encrypt(key: &SecretKey, plaintext: &[u8], aad: &[u8]) -> Result<Encrypte
 
 /// Déchiffre une enveloppe. Échoue si la clé est fausse, le nonce/chiffré
 /// malformé, ou si le chiffré (ou l'`aad`) a été altéré.
-pub fn decrypt(key: &SecretKey, blob: &EncryptedBlob, aad: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn decrypt(key: &SecretKey, blob: &EncryptedBlob, aad: &[u8]) -> Result<Vec<u8>> {
     let nonce_bytes = B64
         .decode(&blob.nonce)
         .map_err(|_| CryptoError::Malformed)?;
