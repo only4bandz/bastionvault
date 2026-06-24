@@ -125,7 +125,11 @@ body {
 .dtop { display: flex; align-items: center; padding: 10px 12px 0; }
 .dtop .spacer { flex: 1; }
 .dhero { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 8px 20px 20px; }
-.dhero .ico { width: 64px; height: 64px; border-radius: 16px; font-size: 26px; }
+/* Pad the hero tile so the favicon is DOWN-scaled (sharp) rather than
+   up-scaled: some brands (e.g. google.com) only publish a 32px favicon, which
+   looks blurry blown up to 64px. */
+.dhero .ico { width: 64px; height: 64px; border-radius: 16px; font-size: 26px; padding: 13px; }
+.dhero .ico img { border-radius: 6px; }
 .dhero h2 { margin: 0; font-size: 19px; text-align: center; word-break: break-word; }
 .dscroll { flex: 1; overflow-y: auto; padding: 0 16px 18px; }
 .dscroll::-webkit-scrollbar { width: 8px; }
