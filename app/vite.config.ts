@@ -4,4 +4,15 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  server: {
+    // Proxy API calls to the zero-knowledge Axum server (cargo run -p server).
+    // Avoids cross-origin/CORS in dev; the app talks to a same-origin /api.
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:7777',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api/, ''),
+      },
+    },
+  },
 })

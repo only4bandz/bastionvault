@@ -23,12 +23,14 @@ const typeIcon = (t: ItemType, size = 18) =>
   t === "login" ? <IcKey size={size} /> : t === "note" ? <IcNote size={size} /> : <IcCard size={size} />;
 
 export function Vault({
+  email,
   items,
   onUpsert,
   onDelete,
   onLock,
   toast,
 }: {
+  email: string;
   items: VaultItem[];
   onUpsert: (i: VaultItem) => void;
   onDelete: (id: string) => void;
@@ -120,7 +122,8 @@ export function Vault({
           </div>
           <div className="topbar-right">
             <span className="pill">🔒 Zero-knowledge</span>
-            <div className="avatar">B</div>
+            <span className="faint" style={{ fontSize: 13 }}>{email}</span>
+            <div className="avatar" title={email}>{(email[0] || "B").toUpperCase()}</div>
           </div>
         </div>
 

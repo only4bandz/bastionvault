@@ -51,6 +51,11 @@ pub struct Account {
     vault: Option<Vault>,
     registration_json: String,
     secret: Option<AccountSecret>,
+    /// Server authentication secret (base64). Unlike the vault key / Secret Key,
+    /// this cannot decrypt anything — it only authenticates to the server (it is
+    /// re-hashed there with Argon2id). Held so the app can log in / re-login, and
+    /// dropped on [`Account::lock`].
+    auth_secret: Option<String>,
 }
 
 impl Account {
@@ -86,6 +91,15 @@ impl Account {
     pub fn lock(&mut self) {
         self.vault = None;
         self.secret = None;
+        self.auth_secret = None;
+    }
+
+    /// The server authentication secret (base64), or `""` if locked. Send this
+    /// to the server's `/sessions` endpoint to obtain a bearer token. It cannot
+    /// decrypt the vault.
+    #[wasm_bindgen(getter)]
+    pub fn auth_secret(&self) -> String {
+        self.auth_secret.clone().unwrap_or_default()
     }
 
     /// Reveals the Secret Key material **exactly once** (one-time display flow:
@@ -174,10 +188,12 @@ impl Account {
 pub fn register(master_password: &str) -> Result<Account, JsError> {
     let (vault, reg, secret) = Vault::register(master_password.as_bytes()).map_err(js_err)?;
     let registration_json = serde_json::to_string(&reg).map_err(js_err)?;
+    let auth_secret = Some(reg.auth_secret.expose_b64().to_string());
     Ok(Account {
         vault: Some(vault),
         registration_json,
         secret: Some(secret),
+        auth_secret,
     })
 }
 
@@ -198,10 +214,12 @@ pub fn register_with(
     let (vault, reg, secret) =
         Vault::register_with(master_password.as_bytes(), params).map_err(js_err)?;
     let registration_json = serde_json::to_string(&reg).map_err(js_err)?;
+    let auth_secret = Some(reg.auth_secret.expose_b64().to_string());
     Ok(Account {
         vault: Some(vault),
         registration_json,
         secret: Some(secret),
+        auth_secret,
     })
 }
 
@@ -215,7 +233,7 @@ pub fn unlock(
 ) -> Result<Account, JsError> {
     let reg: Registration = serde_json::from_str(registration_json).map_err(js_err)?;
     let secret = AccountSecret::parse(secret_key).map_err(js_err)?;
-    let (vault, _auth) = Vault::unlock(
+    let (vault, auth) = Vault::unlock(
         master_password.as_bytes(),
         &secret,
         &reg.salt,
@@ -225,10 +243,12 @@ pub fn unlock(
     .map_err(js_err)?;
     // The Secret Key is not retained after unlock: it is only a derivation
     // factor (HKDF salt), already consumed above. `secret: None` means
-    // `reveal_secret` correctly fails on an unlocked account.
+    // `reveal_secret` correctly fails on an unlocked account. The auth secret is
+    // kept (server credential only) so the app can establish a session.
     Ok(Account {
         vault: Some(vault),
         registration_json: registration_json.to_string(),
         secret: None,
+        auth_secret: Some(auth.expose_b64().to_string()),
     })
 }
