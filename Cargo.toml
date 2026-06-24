@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/crypto-core",
     "crates/crypto-wasm",
+    "crates/server",
 ]
 
 [workspace.package]
