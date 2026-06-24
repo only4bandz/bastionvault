@@ -1,15 +1,15 @@
 import { useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
-import { ensureWasm, register, type Account } from "../lib/wasm";
 import { strength } from "../lib/generator";
 
 export function Welcome({
-  onCreated,
+  onCreate,
   onHaveVault,
 }: {
-  onCreated: (a: Account) => void;
+  onCreate: (email: string, password: string) => Promise<void>;
   onHaveVault: () => void;
 }): JSX.Element {
+  const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
   const [busy, setBusy] = useState(false);
@@ -18,21 +18,13 @@ export function Welcome({
 
   async function create() {
     setErr("");
-    if (pw.length < 8) {
-      setErr("Use at least 8 characters for your master password.");
-      return;
-    }
-    if (pw !== pw2) {
-      setErr("Passwords do not match.");
-      return;
-    }
+    if (!/^\S+@\S+\.\S+$/.test(email)) return setErr("Enter a valid email address.");
+    if (pw.length < 8) return setErr("Use at least 8 characters for your master password.");
+    if (pw !== pw2) return setErr("Passwords do not match.");
     setBusy(true);
-    // Yield so the "Creating…" state paints before Argon2id blocks the thread.
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 30)); // let "Creating…" paint before Argon2id blocks
     try {
-      await ensureWasm();
-      const account = register(pw);
-      onCreated(account);
+      await onCreate(email, pw);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -51,15 +43,24 @@ export function Welcome({
         </p>
 
         <div className="field">
+          <label>Email</label>
+          <input
+            className="input"
+            type="email"
+            autoFocus
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="you@example.com"
+          />
+        </div>
+        <div className="field">
           <label>Master password</label>
           <input
             className="input"
             type="password"
-            autoFocus
             value={pw}
             onChange={(e) => setPw(e.target.value)}
             placeholder="A long, memorable passphrase"
-            onKeyDown={(e) => e.key === "Enter" && document.getElementById("pw2")?.focus()}
           />
           {pw && (
             <div className="strength" title={s.label}>
@@ -67,11 +68,9 @@ export function Welcome({
             </div>
           )}
         </div>
-
         <div className="field">
           <label>Confirm master password</label>
           <input
-            id="pw2"
             className="input"
             type="password"
             value={pw2}
@@ -88,7 +87,7 @@ export function Welcome({
         </button>
 
         <div className="auth-foot">
-          Already locked out?{" "}
+          Already have a vault?{" "}
           <button className="link-btn" onClick={onHaveVault}>
             Unlock an existing vault
           </button>
