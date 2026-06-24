@@ -3,15 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="color-scheme" content="dark" />
-    <link rel="stylesheet" href="popup.css" />
+    <link rel="stylesheet" href="options.css" />
     <title>Bastion — Settings</title>
-    <style>
-      body { width: auto; min-height: 0; max-height: none; }
-      .opt { max-width: 520px; margin: 40px auto; padding: 0 24px; }
-      .opt h2 { display: flex; align-items: center; gap: 10px; }
-      .opt .logo { width: 28px; height: 28px; }
-      .saved { color: var(--ok); font-size: 13px; }
-    </style>
   </head>
   <body>
     <div class="opt">
@@ -19,16 +12,18 @@
         <svg class="logo" viewBox="0 0 32 32"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9a8cff"/><stop offset="1" stop-color="#5a47e6"/></linearGradient></defs><path fill="url(#bg)" d="M16 2l11 4v8.5c0 7-4.7 12.9-11 15.5C9.7 27.4 5 21.5 5 14.5V6l11-4z"/><circle cx="16" cy="14.5" r="3" fill="#0a0c12"/><path fill="#0a0c12" d="M14.6 15.5h2.8l1 5.5h-4.8z"/></svg>
         Bastion settings
       </h2>
-      <p class="sub" style="color:var(--muted)">
+      <p class="sub">
         The address of your zero-knowledge sync server. Your vault is decrypted only
         in this browser; the server stores opaque encrypted blobs only.
       </p>
+
       <div class="field">
-        <label>Server URL</label>
+        <label for="server">Server URL</label>
         <input class="input" id="server" type="url" placeholder="http://127.0.0.1:7777" />
       </div>
-      <div class="field" style="margin-top:18px">
-        <label>Keep vault unlocked for</label>
+
+      <div class="field">
+        <label for="keep">Keep vault unlocked for</label>
         <select class="input" id="keep">
           <option value="15">15 minutes</option>
           <option value="30">30 minutes</option>
@@ -36,16 +31,18 @@
           <option value="240">4 hours</option>
           <option value="720">12 hours</option>
         </select>
-        <p class="sub" style="color:var(--muted);margin:4px 0 0">
+        <p class="hint">
           The vault auto-locks after this much inactivity. While unlocked, the
           vault key is kept in RAM only (never written to disk).
         </p>
       </div>
-      <div style="display:flex;align-items:center;gap:14px;margin-top:18px">
+
+      <div class="row">
         <button class="btn btn-primary" id="save">Save</button>
         <span class="saved" id="saved"></span>
       </div>
-      <p class="sub" id="permnote" style="color:var(--muted);margin-top:18px"></p>
+
+      <p class="note" id="permnote"></p>
     </div>
     <script type="module" src="options.js"></script>
   </body>
