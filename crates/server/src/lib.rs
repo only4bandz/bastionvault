@@ -35,9 +35,12 @@ const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// fixed-window rate limits (abuse controls — see docs/bastion-send-design.md §8).
 const MAX_SEND_BLOB: usize = 256 * 1024;
 const MAX_INBOX: i64 = 500;
+const MAX_INBOX_PAGE: i64 = 100; // cap a single inbox fetch (paginate by deleting)
 const RATE_WINDOW: Duration = Duration::from_secs(60);
-const MAX_SENDS_PER_MIN: u32 = 60;
+const MAX_SENDS_PER_MIN: u32 = 60; // per sender
+const MAX_INBOUND_PER_MIN: u32 = 120; // per recipient (anti inbox-flood)
 const MAX_LOOKUPS_PER_MIN: u32 = 120;
+const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
 
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -189,8 +192,9 @@ impl Db {
                email TEXT PRIMARY KEY, bastion_id TEXT UNIQUE NOT NULL,
                public TEXT NOT NULL, created_at INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS send_inbox(
-               message_id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL,
-               blob TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER);
+               recipient_id TEXT NOT NULL, message_id TEXT NOT NULL,
+               blob TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER,
+               PRIMARY KEY(recipient_id, message_id));
              CREATE INDEX IF NOT EXISTS idx_inbox_recipient ON send_inbox(recipient_id);",
         )
         .expect("init schema");
@@ -704,6 +708,13 @@ fn rate_limit(st: &AppState, email: &str, bucket: &str, max: u32) -> Result<(), 
     let key = format!("{email}:{bucket}");
     let mut inner = st.write();
     let now = Instant::now();
+    // Bound the map: when large, drop entries whose window has elapsed
+    // (anti memory-DoS via many accounts).
+    if inner.rate.len() > MAX_RATE_ENTRIES {
+        inner
+            .rate
+            .retain(|_, v| now.duration_since(v.window_start) <= RATE_WINDOW);
+    }
     let e = inner.rate.entry(key).or_insert(RateState {
         window_start: now,
         count: 0,
@@ -730,13 +741,33 @@ impl Db {
                 |r| r.get(0),
             )
             .optional()?;
-        let bastion_id = existing.unwrap_or_else(new_bastion_id);
-        conn.execute(
-            "INSERT INTO send_directory(email, bastion_id, public, created_at) VALUES(?1,?2,?3,?4)
-             ON CONFLICT(email) DO UPDATE SET public=excluded.public",
-            params![email, bastion_id, public_json, now_secs()],
-        )?;
-        Ok(bastion_id)
+        if let Some(id) = existing {
+            // Rotation: keep the stable bastion_id, just replace the public part.
+            conn.execute(
+                "UPDATE send_directory SET public=?2 WHERE email=?1",
+                params![email, public_json],
+            )?;
+            return Ok(id);
+        }
+        // New account: retry generation on the (astronomically rare) id collision.
+        for _ in 0..8 {
+            let id = new_bastion_id();
+            match conn.execute(
+                "INSERT INTO send_directory(email, bastion_id, public, created_at) VALUES(?1,?2,?3,?4)",
+                params![email, id, public_json, now_secs()],
+            ) {
+                Ok(_) => return Ok(id),
+                Err(rusqlite::Error::SqliteFailure(e, _))
+                    if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    continue
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        // 8 consecutive 128-bit collisions is statistically impossible; surface
+        // a generic error (the handler maps it to 500).
+        Err(rusqlite::Error::QueryReturnedNoRows)
     }
 
     fn whoami(&self, email: &str) -> rusqlite::Result<Option<(String, String)>> {
@@ -781,28 +812,35 @@ impl Db {
             .is_some())
     }
 
-    fn inbox_count(&self, recipient_id: &str) -> rusqlite::Result<i64> {
-        self.lock().query_row(
-            "SELECT COUNT(*) FROM send_inbox WHERE recipient_id=?1",
-            [recipient_id],
-            |r| r.get(0),
-        )
-    }
-
-    /// Insert a blob; returns false if the message_id already exists (dedupe).
+    /// Atomically enforce the quota and insert (one lock hold → no count/insert
+    /// TOCTOU). Dedupe is per-recipient (PK is `(recipient_id, message_id)`).
     fn insert_inbox(
         &self,
         message_id: &str,
         recipient_id: &str,
         blob: &str,
         expires_at: Option<i64>,
-    ) -> rusqlite::Result<bool> {
-        let n = self.lock().execute(
+        max: i64,
+    ) -> rusqlite::Result<InboxInsert> {
+        let conn = self.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM send_inbox WHERE recipient_id=?1",
+            [recipient_id],
+            |r| r.get(0),
+        )?;
+        if count >= max {
+            return Ok(InboxInsert::Full);
+        }
+        let n = conn.execute(
             "INSERT OR IGNORE INTO send_inbox(message_id, recipient_id, blob, created_at, expires_at)
              VALUES(?1,?2,?3,?4,?5)",
             params![message_id, recipient_id, blob, now_secs(), expires_at],
         )?;
-        Ok(n > 0)
+        Ok(if n > 0 {
+            InboxInsert::Inserted
+        } else {
+            InboxInsert::Duplicate
+        })
     }
 
     fn purge_expired(&self, now: i64) {
@@ -817,9 +855,9 @@ impl Db {
         let mut stmt = conn.prepare(
             "SELECT message_id, blob, created_at, expires_at FROM send_inbox
              WHERE recipient_id=?1 AND (expires_at IS NULL OR expires_at >= ?2)
-             ORDER BY created_at ASC",
+             ORDER BY created_at ASC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![recipient_id, now], |r| {
+        let rows = stmt.query_map(params![recipient_id, now, MAX_INBOX_PAGE], |r| {
             Ok(InboxItem {
                 message_id: r.get(0)?,
                 blob: serde_json::from_str(&r.get::<_, String>(1)?)
@@ -828,7 +866,12 @@ impl Db {
                 expires_at: r.get(3)?,
             })
         })?;
-        Ok(rows.flatten().collect())
+        // Propagate DB row errors instead of silently dropping them.
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     /// Delete a message only if it belongs to `recipient_id` (read-once).
@@ -865,6 +908,13 @@ struct InboxItem {
     blob: serde_json::Value,
     created_at: i64,
     expires_at: Option<i64>,
+}
+
+/// Outcome of an atomic inbox insert (quota + dedupe checked under one lock).
+enum InboxInsert {
+    Inserted,
+    Duplicate,
+    Full,
 }
 
 /// Publish (or rotate) the caller's Send identity. Body = the PublicIdentity
@@ -954,31 +1004,28 @@ async fn send_post(
     {
         return Err(ApiError(StatusCode::NOT_FOUND, "unknown recipient"));
     }
+    // Per-recipient throttle (anti inbox-flood), on top of the per-sender cap.
+    rate_limit(&st, &body.recipient_id, "inbound", MAX_INBOUND_PER_MIN)?;
     st.db.purge_expired(now_secs());
-    if st
-        .db
-        .inbox_count(&body.recipient_id)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
-        >= MAX_INBOX
-    {
-        return Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "recipient inbox full",
-        ));
-    }
-    let stored = st
+    // Atomic quota + dedupe (single lock → no TOCTOU).
+    match st
         .db
         .insert_inbox(
             &body.message_id,
             &body.recipient_id,
             &blob_str,
             body.expires_at,
+            MAX_INBOX,
         )
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
-    if !stored {
-        return Err(ApiError(StatusCode::CONFLICT, "duplicate message")); // replay/dedupe
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+    {
+        InboxInsert::Inserted => Ok(StatusCode::NO_CONTENT),
+        InboxInsert::Duplicate => Err(ApiError(StatusCode::CONFLICT, "duplicate message")),
+        InboxInsert::Full => Err(ApiError(
+            StatusCode::TOO_MANY_REQUESTS,
+            "recipient inbox full",
+        )),
     }
-    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Pull the caller's inbox (blobs addressed to their Bastion ID).
