@@ -1,0 +1,10 @@
+# GitHub Linguist hints — keep the language stats representative of the code we
+# actually write, not generated data or build artifacts.
+
+# The Public Suffix List, generated from publicsuffix.org (data, not logic).
+extension/lib/psl-data.js linguist-generated=true
+
+# wasm-bindgen glue is generated (also gitignored, but be explicit).
+extension/pkg/** linguist-generated=true
+app/src/pkg/** linguist-generated=true
+web/pkg/** linguist-generated=true
