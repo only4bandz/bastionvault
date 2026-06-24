@@ -2,12 +2,14 @@ import { useMemo, useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
 import { Generator } from "../components/Generator";
 import { ItemEditor } from "../components/ItemEditor";
+import { ImportModal } from "../components/ImportModal";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
-  IcLock, IcMask, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcVault, IcX,
+  IcLock, IcMask, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { itemColor, TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { strength } from "../lib/generator";
+import type { ImportResult } from "../lib/import";
 
 type Nav = "vault" | "generator" | "health" | "soon";
 
@@ -27,6 +29,7 @@ export function Vault({
   items,
   onUpsert,
   onDelete,
+  onImport,
   onLock,
   toast,
 }: {
@@ -34,6 +37,7 @@ export function Vault({
   items: VaultItem[];
   onUpsert: (i: VaultItem) => void;
   onDelete: (id: string) => void;
+  onImport: (r: ImportResult) => void;
   onLock: () => void;
   toast: (m: string) => void;
 }): JSX.Element {
@@ -43,6 +47,7 @@ export function Vault({
   const [tab, setTab] = useState<"all" | ItemType>("all");
   const [editor, setEditor] = useState<null | "new" | VaultItem>(null);
   const [detail, setDetail] = useState<VaultItem | null>(null);
+  const [importing, setImporting] = useState(false);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -132,7 +137,10 @@ export function Vault({
             <>
               <div className="page-head">
                 <h2>Vault</h2>
-                <div className="right">
+                <div className="right" style={{ display: "flex", gap: 8 }}>
+                  <button className="btn" onClick={() => setImporting(true)}>
+                    <IcUpload size={16} /> Import
+                  </button>
                   <button className="btn btn-primary" onClick={() => setEditor("new")}>
                     <IcPlus size={16} /> Create item
                   </button>
@@ -219,6 +227,13 @@ export function Vault({
           onEdit={() => { setEditor(detail); setDetail(null); }}
           onDelete={() => { onDelete(detail.id); setDetail(null); toast("Item deleted"); }}
           copy={copy}
+        />
+      )}
+
+      {importing && (
+        <ImportModal
+          onClose={() => setImporting(false)}
+          onImport={(r) => { onImport(r); setImporting(false); setNav("vault"); setTab("all"); }}
         />
       )}
     </div>
