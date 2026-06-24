@@ -18,9 +18,10 @@
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::aead::EncryptedBlob;
+use crate::error::{CryptoError, Result};
 
 /// Domaine de hachage du digest d'un item (séparation cryptographique).
 const ITEM_DIGEST_DOMAIN: &[u8] = b"pm:v1:item-digest";
@@ -97,6 +98,18 @@ impl Manifest {
         }
     }
 
+    /// Vérifie l'invariant interne : entrées **triées par id et sans doublon**.
+    /// Appelé à l'ouverture d'un manifest scellé — défense contre un manifest
+    /// corrompu/mal formé dont des ids dupliqués masqueraient des items.
+    pub fn validate(&self) -> Result<()> {
+        for pair in self.entries.windows(2) {
+            if pair[0].id >= pair[1].id {
+                return Err(CryptoError::Malformed);
+            }
+        }
+        Ok(())
+    }
+
     /// Confronte le manifest à l'ensemble d'items réellement servis par le
     /// serveur. Renvoie un rapport listant les écarts.
     ///
@@ -111,6 +124,16 @@ impl Manifest {
             .iter()
             .map(|(id, blob)| (*id, item_digest(blob)))
             .collect();
+
+        // IDs servis en double : le serveur tente peut-être de masquer un item
+        // derrière un homonyme. On les signale au lieu de les fusionner.
+        let mut seen = BTreeSet::new();
+        let mut duplicates = Vec::new();
+        for (id, _) in present {
+            if !seen.insert(*id) && !duplicates.iter().any(|d: &String| d == id) {
+                duplicates.push((*id).to_string());
+            }
+        }
 
         let mut missing = Vec::new();
         let mut corrupted = Vec::new();
@@ -131,6 +154,7 @@ impl Manifest {
             missing,
             unexpected,
             corrupted,
+            duplicates,
         }
     }
 }
@@ -145,11 +169,16 @@ pub struct IntegrityReport {
     /// Items présents des deux côtés mais au digest différent → altération,
     /// substitution ou rollback d'un item.
     pub corrupted: Vec<String>,
+    /// IDs servis plusieurs fois par le serveur → réponse mal formée/hostile.
+    pub duplicates: Vec<String>,
 }
 
 impl IntegrityReport {
     /// `true` si aucun écart : le coffre servi correspond exactement au manifest.
     pub fn is_intact(&self) -> bool {
-        self.missing.is_empty() && self.unexpected.is_empty() && self.corrupted.is_empty()
+        self.missing.is_empty()
+            && self.unexpected.is_empty()
+            && self.corrupted.is_empty()
+            && self.duplicates.is_empty()
     }
 }

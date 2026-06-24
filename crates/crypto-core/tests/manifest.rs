@@ -1,7 +1,7 @@
 //! Tests d'intégration du manifest d'intégrité du coffre.
 
 use crypto_core::kdf::KdfParams;
-use crypto_core::{CryptoError, EncryptedBlob, Manifest, Vault};
+use crypto_core::{CryptoError, EncryptedBlob, Manifest, ManifestEntry, Vault};
 
 fn fast_kdf() -> KdfParams {
     KdfParams {
@@ -111,6 +111,62 @@ fn manifest_from_another_vault_cannot_be_opened() {
     let sealed = v1.seal_manifest(&manifest).unwrap();
     // Un autre coffre ne peut pas déchiffrer le manifest.
     assert!(matches!(v2.open_manifest(&sealed), Err(CryptoError::Aead)));
+}
+
+#[test]
+fn open_manifest_checked_rejects_rollback() {
+    let vault = fresh_vault();
+    let mut manifest = Manifest::new();
+    let blob = vault.encrypt_item(b"x", "a").unwrap();
+    manifest.set("a", &blob); // seq = 1
+    manifest.set("a", &blob); // seq = 2
+    let sealed = vault.seal_manifest(&manifest).unwrap();
+
+    // Le client a vu seq=2 ; resservir seq=2 est accepté.
+    assert!(vault.open_manifest_checked(&sealed, 2).is_ok());
+    // S'il a déjà vu seq=5, un manifest seq=2 est un rollback.
+    assert!(matches!(
+        vault.open_manifest_checked(&sealed, 5),
+        Err(CryptoError::StaleManifest)
+    ));
+}
+
+#[test]
+fn check_detects_duplicate_ids() {
+    let vault = fresh_vault();
+    let (manifest, blobs) = build(&vault, &[("a", b"1")]);
+    // Le serveur sert deux fois le même id.
+    let served = vec![
+        (blobs[0].0.as_str(), &blobs[0].1),
+        (blobs[0].0.as_str(), &blobs[0].1),
+    ];
+    let report = manifest.check(&served);
+    assert_eq!(report.duplicates, vec!["a".to_string()]);
+    assert!(!report.is_intact());
+}
+
+#[test]
+fn open_manifest_rejects_duplicate_entries() {
+    let vault = fresh_vault();
+    // Manifest mal formé : deux entrées avec le même id.
+    let bogus = Manifest {
+        seq: 1,
+        entries: vec![
+            ManifestEntry {
+                id: "a".into(),
+                digest: "x".into(),
+            },
+            ManifestEntry {
+                id: "a".into(),
+                digest: "y".into(),
+            },
+        ],
+    };
+    let sealed = vault.seal_manifest(&bogus).unwrap();
+    assert!(matches!(
+        vault.open_manifest(&sealed),
+        Err(CryptoError::Malformed)
+    ));
 }
 
 #[test]
