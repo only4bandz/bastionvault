@@ -312,8 +312,9 @@ fn transcript(
     sender_id: &str,
     sender_sig_pub: &[u8; 32],
     plaintext: &[u8],
-) -> Vec<u8> {
-    let mut t = Vec::new();
+) -> Zeroizing<Vec<u8>> {
+    // Contains the plaintext → wiped on drop.
+    let mut t = Zeroizing::new(Vec::new());
     put(&mut t, D_SIG);
     t.push(SEND_V);
     put(&mut t, message_id);
@@ -384,6 +385,7 @@ pub fn seal(
     }
     let inner_bytes =
         Zeroizing::new(serde_json::to_vec(&inner).map_err(|_| CryptoError::Malformed)?);
+    inner.plaintext.zeroize(); // wipe the lingering base64-plaintext String
     let body_aad = header_aad(
         D_BODY,
         &message_id,
@@ -447,7 +449,9 @@ pub fn seal(
 
 /// Open a Send blob with the recipient's identity (must match the blob's
 /// `recipient_key_version`). If `verify_sender` is given and the blob is signed,
-/// the signature is checked with `verify_strict`; `verified` reflects the result.
+/// the signature is checked with `verify_strict` and a failure is a hard reject;
+/// the returned [`Sender`] reflects the trust state (Anonymous / Unverified /
+/// Verified).
 pub fn open(
     blob: &SendBlob,
     recipient_keys: &IdentityKeys,
@@ -537,8 +541,10 @@ pub fn open(
     );
     let padded = Zeroizing::new(aead::decrypt(&cek, &blob.body, &body_aad)?);
     let inner_bytes = unpad(&padded)?;
-    let inner: Inner = serde_json::from_slice(&inner_bytes).map_err(|_| CryptoError::Malformed)?;
+    let mut inner: Inner =
+        serde_json::from_slice(&inner_bytes).map_err(|_| CryptoError::Malformed)?;
     let plaintext = Zeroizing::new(unb64(&inner.plaintext)?);
+    inner.plaintext.zeroize(); // wipe the lingering base64-plaintext String
 
     // ── determine sender trust state ──
     let sender = match (&inner.sender_id, &inner.sig) {
