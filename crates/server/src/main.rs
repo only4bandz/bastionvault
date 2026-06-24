@@ -1,4 +1,4 @@
-//! Point d'entrée du serveur de synchronisation zero-knowledge.
+//! Entry point for the zero-knowledge sync server.
 
 #[tokio::main]
 async fn main() {
@@ -6,7 +6,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("bind address");
-    println!("🔐 zero-knowledge server écoute sur http://{addr}");
+    println!("🔐 zero-knowledge server listening on http://{addr}");
     axum::serve(listener, server::app())
         .await
         .expect("server run");

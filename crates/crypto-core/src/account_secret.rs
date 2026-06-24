@@ -1,16 +1,14 @@
-//! Clé secrète de compte (« Secret Key », modèle 1Password) : un secret
-//! aléatoire de 128 bits détenu **uniquement** par l'utilisateur et JAMAIS
-//! envoyé au serveur.
+//! Account secret key ("Secret Key", 1Password model): a random 128-bit secret
+//! held **only** by the user and NEVER sent to the server.
 //!
-//! Elle entre dans la dérivation de clé comme **sel HKDF** (cf. [`crate::kdf`]),
-//! ce qui la mélange à *toutes* les sous-clés (wrap + auth). Conséquence : un
-//! attaquant qui vole l'intégralité des données côté serveur (sel, coffre
-//! enveloppé, secret d'auth) ne peut **rien** dériver sans cette Secret Key —
-//! le brute-force hors-ligne devient infaisable même avec un mot de passe
-//! maître faible.
+//! It enters key derivation as the **HKDF salt** (see [`crate::kdf`]), which
+//! mixes it into *every* sub-key (wrap + auth). As a result: an attacker who
+//! steals all server-side data (salt, wrapped vault, auth secret) can derive
+//! **nothing** without this Secret Key — offline brute-force becomes infeasible
+//! even with a weak master password.
 //!
-//! Elle est montrée une seule fois (Emergency Kit) et ressaisie/scannée sur
-//! chaque nouvel appareil.
+//! It is shown only once (Emergency Kit) and re-entered/scanned on each new
+//! device.
 
 use data_encoding::BASE32_NOPAD;
 use rand_core::{OsRng, RngCore};
@@ -19,21 +17,22 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::error::{CryptoError, Result};
 
-/// Longueur de la Secret Key (128 bits — sweet spot sécurité/ergonomie, aligné
-/// sur 1Password ; combinée au mot de passe, 128 bits suffisent largement).
+/// Length of the Secret Key (128 bits — the sweet spot for security/usability,
+/// aligned with 1Password; combined with the password, 128 bits are more than
+/// enough).
 pub const ACCOUNT_SECRET_LEN: usize = 16;
 
-/// Longueur du checksum encodé avec la clé (16 bits → ~1/65536 de laisser
-/// passer une faute de frappe).
+/// Length of the checksum encoded with the key (16 bits → ~1/65536 chance of
+/// letting a typo through).
 const CHECKSUM_LEN: usize = 2;
 
-/// Préfixe de version du format encodé, pour faire évoluer le schéma plus tard.
-/// Le « 1 » n'appartient pas à l'alphabet base32 (A-Z2-7) : aucune collision
-/// possible avec le corps encodé.
+/// Version prefix of the encoded format, so the scheme can evolve later.
+/// The "1" is not part of the base32 alphabet (A-Z2-7): no collision with the
+/// encoded body is possible.
 const VERSION_TAG: &str = "A1";
 
-/// Checksum tronqué (16 bits) de la clé, pour détecter une saisie erronée
-/// **localement**, avant toute dérivation Argon2id coûteuse.
+/// Truncated (16-bit) checksum of the key, to detect a mistyped entry
+/// **locally**, before any expensive Argon2id derivation.
 fn checksum(secret: &[u8; ACCOUNT_SECRET_LEN]) -> [u8; CHECKSUM_LEN] {
     let mut h = Sha256::new();
     h.update(b"pm:v1:secret-key-checksum");
@@ -42,15 +41,15 @@ fn checksum(secret: &[u8; ACCOUNT_SECRET_LEN]) -> [u8; CHECKSUM_LEN] {
     [digest[0], digest[1]]
 }
 
-/// Secret de compte de 128 bits, effacé de la mémoire au drop.
+/// 128-bit account secret, wiped from memory on drop.
 ///
-/// Ne dérive pas `Clone`/`Debug`/`Serialize` : ce secret ne doit jamais être
-/// copié, journalisé, ni sérialisé par accident (il ne quitte pas l'appareil).
+/// Does not derive `Clone`/`Debug`/`Serialize`: this secret must never be
+/// copied, logged, or serialized by accident (it does not leave the device).
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct AccountSecret([u8; ACCOUNT_SECRET_LEN]);
 
 impl AccountSecret {
-    /// Génère une nouvelle Secret Key via le CSPRNG du système.
+    /// Generates a new Secret Key via the system CSPRNG.
     pub fn generate() -> Self {
         let mut bytes = [0u8; ACCOUNT_SECRET_LEN];
         OsRng.fill_bytes(&mut bytes);
@@ -59,16 +58,16 @@ impl AccountSecret {
         secret
     }
 
-    /// Octets bruts — usage interne (sel HKDF).
+    /// Raw bytes — internal use (HKDF salt).
     pub(crate) fn as_bytes(&self) -> &[u8; ACCOUNT_SECRET_LEN] {
         &self.0
     }
 
-    /// Représentation lisible pour l'humain : `A1-XXXXX-XXXXX-…` (base32
-    /// majuscule, groupée par 5, checksum 16 bits inclus). À conserver dans
-    /// l'Emergency Kit / QR.
+    /// Human-readable representation: `A1-XXXXX-XXXXX-…` (uppercase base32,
+    /// grouped in fives, 16-bit checksum included). To be stored in the
+    /// Emergency Kit / QR code.
     pub fn to_formatted(&self) -> String {
-        // Charge utile = secret ‖ checksum, dans un tampon effacé au drop.
+        // Payload = secret ‖ checksum, in a buffer wiped on drop.
         let mut payload = Zeroizing::new(Vec::with_capacity(ACCOUNT_SECRET_LEN + CHECKSUM_LEN));
         payload.extend_from_slice(&self.0);
         payload.extend_from_slice(&checksum(&self.0));
@@ -84,9 +83,9 @@ impl AccountSecret {
         out
     }
 
-    /// Parse une Secret Key saisie ou scannée. Tolérant : ignore tirets, espaces
-    /// et casse, accepte avec ou sans le préfixe de version. Le checksum permet
-    /// de **rejeter une faute de frappe immédiatement** (sans Argon2id).
+    /// Parses a typed or scanned Secret Key. Tolerant: ignores dashes, spaces,
+    /// and case, accepts the value with or without the version prefix. The
+    /// checksum allows **rejecting a typo immediately** (without Argon2id).
     pub fn parse(input: &str) -> Result<Self> {
         let cleaned: String = input
             .chars()
@@ -113,23 +112,23 @@ impl AccountSecret {
         Ok(out)
     }
 
-    /// Texte « Emergency Kit » à imprimer et conserver hors-ligne.
+    /// "Emergency Kit" text to print and keep offline.
     ///
-    /// Contient la Secret Key (récupérable nulle part ailleurs) et un
-    /// emplacement pour noter le mot de passe maître à la main.
+    /// Contains the Secret Key (recoverable nowhere else) and a space to write
+    /// down the master password by hand.
     pub fn emergency_kit(&self, account_label: &str) -> String {
         format!(
-            "================ EMERGENCY KIT — COFFRE ================\n\
+            "================ EMERGENCY KIT — VAULT ================\n\
              \n\
-             Compte     : {account_label}\n\
-             Secret Key : {secret}\n\
+             Account     : {account_label}\n\
+             Secret Key  : {secret}\n\
              \n\
-             Mot de passe maître : ______________________________\n\
+             Master password : ______________________________\n\
              \n\
-             - Conservez ce document hors-ligne, en lieu sûr.\n\
-             - Sans la Secret Key ET le mot de passe maître, le coffre est\n\
-             \x20 DÉFINITIVEMENT irrécupérable : personne, pas même le serveur,\n\
-             \x20 ne peut les retrouver.\n\
+             - Keep this document offline, in a safe place.\n\
+             - Without both the Secret Key AND the master password, the vault is\n\
+             \x20 PERMANENTLY unrecoverable: no one, not even the server,\n\
+             \x20 can recover them.\n\
              =======================================================\n",
             account_label = account_label,
             secret = self.to_formatted(),

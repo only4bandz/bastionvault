@@ -1,13 +1,13 @@
-//! Tests d'intégration du flux complet de chiffrement zero-knowledge.
+//! Integration tests for the full zero-knowledge encryption flow.
 
 use crypto_core::aead::EncryptedBlob;
 use crypto_core::kdf::KdfParams;
 use crypto_core::vault::{auth_secret_eq, Vault};
 use crypto_core::{AccountSecret, CryptoError};
 
-/// Paramètres KDF pour les tests : exactement le plancher de la politique
-/// (sécurité minimale acceptable), pour rester rapide tout en passant la
-/// validation `validate_for_new_vault`.
+/// KDF parameters for the tests: exactly the policy floor (the minimum
+/// acceptable security level), to stay fast while still passing the
+/// `validate_for_new_vault` validation.
 fn fast_kdf() -> KdfParams {
     KdfParams {
         mem_kib: KdfParams::MIN_MEM_KIB,
@@ -23,7 +23,7 @@ fn register_then_unlock_roundtrip() {
 
     let blob = vault.encrypt_item(b"hunter2", "login-1").unwrap();
 
-    // Déverrouillage avec mot de passe + Secret Key + données « serveur ».
+    // Unlock with password + Secret Key + "server" data.
     let (vault2, _auth) =
         Vault::unlock(pw, &sk, &reg.salt, reg.kdf, &reg.wrapped_vault_key).unwrap();
     let plain = vault2.decrypt_item(&blob, "login-1").unwrap();
@@ -40,17 +40,14 @@ fn wrong_password_cannot_unlock() {
         reg.kdf,
         &reg.wrapped_vault_key,
     );
-    assert!(
-        result.is_err(),
-        "un mauvais mot de passe ne doit pas déverrouiller"
-    );
+    assert!(result.is_err(), "a wrong password must not unlock");
 }
 
 #[test]
 fn wrong_account_secret_cannot_unlock() {
     let pw = b"correct horse battery staple";
     let (_, reg, _sk) = Vault::register_with(pw, fast_kdf()).unwrap();
-    // Bon mot de passe mais MAUVAISE Secret Key → déballage impossible.
+    // Correct password but WRONG Secret Key -> unwrapping is impossible.
     let other = AccountSecret::generate();
     assert!(matches!(
         Vault::unlock(pw, &other, &reg.salt, reg.kdf, &reg.wrapped_vault_key),
@@ -62,7 +59,7 @@ fn wrong_account_secret_cannot_unlock() {
 fn item_id_is_authenticated_aad() {
     let (vault, _, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let blob = vault.encrypt_item(b"secret", "item-A").unwrap();
-    // Déchiffrer sous un autre id doit échouer (le blob est lié à son item).
+    // Decrypting under a different id must fail (the blob is bound to its item).
     assert!(vault.decrypt_item(&blob, "item-B").is_err());
     assert!(vault.decrypt_item(&blob, "item-A").is_ok());
 }
@@ -71,7 +68,7 @@ fn item_id_is_authenticated_aad() {
 fn tampered_ciphertext_is_rejected() {
     let (vault, _, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let mut blob = vault.encrypt_item(b"secret", "x").unwrap();
-    // On altère un octet du chiffré → le tag Poly1305 doit faire échouer.
+    // We tamper with one byte of the ciphertext -> the Poly1305 tag must cause a failure.
     let mut raw = base64_decode(&blob.ct);
     raw[0] ^= 0x01;
     blob.ct = base64_encode(&raw);
@@ -82,9 +79,9 @@ fn tampered_ciphertext_is_rejected() {
 fn tampered_wrapped_vault_key_is_rejected() {
     let pw = b"master pw";
     let (_, mut reg, sk) = Vault::register_with(pw, fast_kdf()).unwrap();
-    // On altère un octet de la clé de coffre enveloppée fournie par le serveur.
-    // Le tag AEAD doit faire échouer le déballage — pas de déverrouillage
-    // silencieux sur une clé corrompue ou substituée par un serveur malveillant.
+    // We tamper with one byte of the wrapped vault key supplied by the server.
+    // The AEAD tag must cause the unwrapping to fail -- no silent unlock on a
+    // key that has been corrupted or substituted by a malicious server.
     let mut raw = base64_decode(&reg.wrapped_vault_key.ct);
     raw[0] ^= 0x01;
     reg.wrapped_vault_key.ct = base64_encode(&raw);
@@ -98,14 +95,14 @@ fn tampered_wrapped_vault_key_is_rejected() {
 fn auth_secret_is_stable_and_secret() {
     let pw = b"my master password";
     let (_, reg1, sk) = Vault::register_with(pw, fast_kdf()).unwrap();
-    // Re-déverrouiller redonne le MÊME secret d'auth (déterministe par sel/pw/sk).
+    // Re-unlocking yields the SAME auth secret (deterministic from salt/pw/sk).
     let (_, auth_a) =
         Vault::unlock(pw, &sk, &reg1.salt, reg1.kdf, &reg1.wrapped_vault_key).unwrap();
     let (_, auth_b) =
         Vault::unlock(pw, &sk, &reg1.salt, reg1.kdf, &reg1.wrapped_vault_key).unwrap();
-    // Comparaisons en temps constant (le newtype n'expose pas PartialEq).
+    // Constant-time comparisons (the newtype does not expose PartialEq).
     assert!(auth_a.ct_eq(&auth_b));
-    // Et il doit égaler le secret enregistré au signup.
+    // And it must equal the secret recorded at signup.
     assert!(auth_a.ct_eq(&reg1.auth_secret));
     assert!(auth_secret_eq(
         auth_a.as_bytes(),
@@ -117,11 +114,11 @@ fn auth_secret_is_stable_and_secret() {
 fn auth_secret_debug_is_redacted() {
     let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let secret = reg.auth_secret.expose_b64().to_string();
-    // Le Debug du secret ne doit pas révéler sa valeur.
+    // The secret's Debug output must not reveal its value.
     let dbg = format!("{:?}", reg.auth_secret);
     assert!(dbg.contains("redacted"));
     assert!(!dbg.contains(&secret));
-    // Le Debug de Registration ne doit pas non plus fuiter le secret.
+    // Registration's Debug output must not leak the secret either.
     assert!(!format!("{:?}", reg).contains(&secret));
 }
 
@@ -129,7 +126,7 @@ fn auth_secret_debug_is_redacted() {
 fn unknown_blob_version_is_rejected() {
     let (vault, _, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let mut blob = vault.encrypt_item(b"x", "i").unwrap();
-    blob.v = 2; // version inconnue
+    blob.v = 2; // unknown version
     assert!(matches!(
         vault.decrypt_item(&blob, "i"),
         Err(CryptoError::Malformed)
@@ -140,7 +137,7 @@ fn unknown_blob_version_is_rejected() {
 fn oversized_ciphertext_is_rejected_before_decode() {
     let (vault, _, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let mut blob = vault.encrypt_item(b"x", "i").unwrap();
-    // ~12 Mio encodés > plafond 8 Mio → rejet sans allouer le déchiffrement.
+    // ~12 MiB encoded > 8 MiB cap -> rejected without allocating for decryption.
     blob.ct = base64_encode(&vec![0u8; 9 * 1024 * 1024]);
     assert!(matches!(
         vault.decrypt_item(&blob, "i"),
@@ -151,7 +148,7 @@ fn oversized_ciphertext_is_rejected_before_decode() {
 #[test]
 fn oversized_salt_is_rejected_before_decode() {
     let (_, reg, sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
-    let huge_salt = "A".repeat(100); // > 64 caractères
+    let huge_salt = "A".repeat(100); // > 64 characters
     assert!(matches!(
         Vault::unlock(b"pw", &sk, &huge_salt, reg.kdf, &reg.wrapped_vault_key),
         Err(CryptoError::Malformed)
@@ -163,7 +160,7 @@ fn rotate_master_password_keeps_items_readable() {
     let (vault, _reg, sk) = Vault::register_with(b"old pw", fast_kdf()).unwrap();
     let blob = vault.encrypt_item(b"data", "i1").unwrap();
 
-    // La Secret Key est inchangée à la rotation du mot de passe.
+    // The Secret Key is unchanged when the password is rotated.
     let new_reg = vault
         .rotate_master_password(b"new pw", &sk, fast_kdf())
         .unwrap();
@@ -183,18 +180,18 @@ fn rotate_master_password_keeps_items_readable() {
 
 #[test]
 fn empty_master_password_is_rejected() {
-    // À l'inscription.
+    // At signup.
     assert!(matches!(
         Vault::register_with(b"", fast_kdf()),
         Err(CryptoError::EmptyPassword)
     ));
-    // Au déverrouillage.
+    // At unlock.
     let (_, reg, sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     assert!(matches!(
         Vault::unlock(b"", &sk, &reg.salt, reg.kdf, &reg.wrapped_vault_key),
         Err(CryptoError::EmptyPassword)
     ));
-    // À la rotation.
+    // At rotation.
     let (vault, _, sk2) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     assert!(matches!(
         vault.rotate_master_password(b"", &sk2, fast_kdf()),
@@ -205,14 +202,14 @@ fn empty_master_password_is_rejected() {
 #[test]
 fn rotation_preserves_supplied_kdf_params() {
     let (vault, _, sk) = Vault::register_with(b"old", fast_kdf()).unwrap();
-    // Params valides distincts du défaut (dans les bornes de la politique).
+    // Valid params distinct from the default (within the policy bounds).
     let custom = KdfParams {
         mem_kib: 24 * 1024,
         iterations: 3,
         parallelism: 2,
     };
     let reg = vault.rotate_master_password(b"new", &sk, custom).unwrap();
-    // Les params demandés sont conservés, pas réinitialisés au défaut.
+    // The requested params are preserved, not reset to the default.
     assert_eq!(reg.kdf, custom);
     assert!(Vault::unlock(b"new", &sk, &reg.salt, reg.kdf, &reg.wrapped_vault_key).is_ok());
 }
@@ -220,7 +217,7 @@ fn rotation_preserves_supplied_kdf_params() {
 #[test]
 fn weak_kdf_rejected_for_new_vault() {
     let weak = KdfParams {
-        mem_kib: 1024, // 1 Mio, bien sous le plancher
+        mem_kib: 1024, // 1 MiB, well below the floor
         iterations: 1,
         parallelism: 1,
     };
@@ -259,8 +256,8 @@ fn rotation_enforces_kdf_floor() {
 
 #[test]
 fn unlock_caps_excessive_kdf_params() {
-    // Plafond anti-DoS : des params absurdes au unlock sont rejetés AVANT toute
-    // dérivation coûteuse, sans verrouiller les coffres legacy faibles.
+    // Anti-DoS cap: absurd params at unlock are rejected BEFORE any costly
+    // derivation, without locking out weak legacy vaults.
     let (_, reg, sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let huge = KdfParams {
         mem_kib: KdfParams::MAX_MEM_KIB + 1,
@@ -281,14 +278,14 @@ fn encrypted_blob_serializes_to_json() {
     assert_eq!(blob, back);
 }
 
-// ─── Secret Key (encodage, parsing, Emergency Kit) ───
+// ─── Secret Key (encoding, parsing, Emergency Kit) ───
 
 #[test]
 fn account_secret_format_roundtrip() {
     let s = AccountSecret::generate();
     let formatted = s.to_formatted();
     assert!(formatted.starts_with("A1-"));
-    // Reparser la forme affichée redonne la même clé (comparée via le format).
+    // Re-parsing the displayed form yields the same key (compared via the format).
     let parsed = AccountSecret::parse(&formatted).unwrap();
     assert_eq!(parsed.to_formatted(), formatted);
 }
@@ -297,7 +294,7 @@ fn account_secret_format_roundtrip() {
 fn account_secret_parse_is_tolerant() {
     let s = AccountSecret::generate();
     let formatted = s.to_formatted();
-    // Casse mélangée + espaces + tirets supprimés : doit redonner la même clé.
+    // Mixed case + spaces + dashes removed: must yield the same key.
     let messy = format!("  {}  ", formatted.to_lowercase().replace('-', " "));
     let parsed = AccountSecret::parse(&messy).unwrap();
     assert_eq!(parsed.to_formatted(), formatted);
@@ -307,7 +304,7 @@ fn account_secret_parse_is_tolerant() {
 fn account_secret_rejects_typo() {
     let s = AccountSecret::generate();
     let formatted = s.to_formatted();
-    // Modifie deux caractères du corps (zones secret + checksum) → checksum KO.
+    // Modify two characters of the body (secret + checksum zones) -> checksum fails.
     let mut bytes = formatted.into_bytes(); // ASCII
     bytes[3] = if bytes[3] == b'A' { b'B' } else { b'A' };
     let last = bytes.len() - 1;
@@ -321,7 +318,7 @@ fn account_secret_rejects_typo() {
 
 #[test]
 fn account_secret_parse_rejects_invalid() {
-    // Trop court / vide après nettoyage → longueur incorrecte.
+    // Too short / empty after cleanup -> incorrect length.
     assert!(matches!(
         AccountSecret::parse("A1"),
         Err(CryptoError::Malformed)
@@ -337,7 +334,7 @@ fn emergency_kit_contains_secret_and_label() {
     assert!(kit.contains("alice@example.com"));
 }
 
-// Petits utilitaires base64 pour les tests.
+// Small base64 helpers for the tests.
 fn base64_decode(s: &str) -> Vec<u8> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     STANDARD.decode(s).unwrap()

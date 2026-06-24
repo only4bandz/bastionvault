@@ -1,4 +1,4 @@
-//! Tests d'intégration de l'API du serveur (via `tower::oneshot`, sans réseau).
+//! Integration tests for the server API (via `tower::oneshot`, no network).
 
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
@@ -18,7 +18,7 @@ fn fast_kdf() -> KdfParams {
     }
 }
 
-/// Envoie une requête et renvoie (statut, corps JSON éventuel).
+/// Sends a request and returns (status, optional JSON body).
 async fn send(
     app: &Router,
     method: &str,
@@ -56,7 +56,7 @@ async fn full_account_and_vault_flow() {
     let reg_value = serde_json::to_value(&reg).unwrap();
     let email = "alice@example.com";
 
-    // Inscription.
+    // Signup.
     let (s, _) = send(
         &app,
         "POST",
@@ -67,7 +67,7 @@ async fn full_account_and_vault_flow() {
     .await;
     assert_eq!(s, StatusCode::CREATED);
 
-    // Doublon → conflit.
+    // Duplicate -> conflict.
     let (s, _) = send(
         &app,
         "POST",
@@ -78,7 +78,7 @@ async fn full_account_and_vault_flow() {
     .await;
     assert_eq!(s, StatusCode::CONFLICT);
 
-    // Prelogin : renvoie le sel public, pas de secret.
+    // Prelogin: returns the public salt, no secret.
     let (s, body) = send(
         &app,
         "GET",
@@ -92,7 +92,7 @@ async fn full_account_and_vault_flow() {
     assert!(body.get("auth_secret").is_none());
     assert!(body.get("auth_hash").is_none());
 
-    // Login avec mauvais secret → 401.
+    // Login with a wrong secret -> 401.
     let (s, _) = send(
         &app,
         "POST",
@@ -103,7 +103,7 @@ async fn full_account_and_vault_flow() {
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 
-    // Login correct → jeton.
+    // Correct login -> token.
     let (s, body) = send(
         &app,
         "POST",
@@ -115,11 +115,11 @@ async fn full_account_and_vault_flow() {
     assert_eq!(s, StatusCode::OK);
     let token = body["token"].as_str().unwrap().to_string();
 
-    // Accès au coffre sans jeton → 401.
+    // Vault access without a token -> 401.
     let (s, _) = send(&app, "GET", "/vault", None, None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 
-    // Stockage d'un item chiffré.
+    // Storing an encrypted item.
     let blob = serde_json::to_value(vault.encrypt_item(b"hunter2", "github.com").unwrap()).unwrap();
     let (s, _) = send(
         &app,
@@ -131,7 +131,7 @@ async fn full_account_and_vault_flow() {
     .await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 
-    // Récupération : l'item chiffré est là, et déchiffrable côté client.
+    // Retrieval: the encrypted item is there, and decryptable on the client side.
     let (s, body) = send(&app, "GET", "/vault", Some(&token), None).await;
     assert_eq!(s, StatusCode::OK);
     let stored: crypto_core::EncryptedBlob =
@@ -139,7 +139,7 @@ async fn full_account_and_vault_flow() {
     let plain = vault.decrypt_item(&stored, "github.com").unwrap();
     assert_eq!(plain.as_slice(), b"hunter2");
 
-    // Suppression.
+    // Deletion.
     let (s, _) = send(
         &app,
         "DELETE",
@@ -153,7 +153,7 @@ async fn full_account_and_vault_flow() {
     assert!(body["items"].get("github.com").is_none());
 }
 
-/// Inscrit un compte et renvoie (app, token de session valide).
+/// Registers an account and returns a valid session token.
 async fn registered_session(app: &Router, email: &str) -> String {
     let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let auth_secret = reg.auth_secret.expose_b64().to_string();
@@ -182,22 +182,22 @@ async fn logout_revokes_token() {
     let app = server::app();
     let token = registered_session(&app, "bob@example.com").await;
 
-    // Jeton valide.
+    // Valid token.
     let (s, _) = send(&app, "GET", "/vault", Some(&token), None).await;
     assert_eq!(s, StatusCode::OK);
 
-    // Déconnexion.
+    // Logout.
     let (s, _) = send(&app, "DELETE", "/sessions", Some(&token), None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 
-    // Jeton désormais révoqué.
+    // Token now revoked.
     let (s, _) = send(&app, "GET", "/vault", Some(&token), None).await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn expired_token_is_rejected() {
-    // TTL nulle → le jeton est expiré dès la requête suivante.
+    // Zero TTL -> the token is expired by the next request.
     let app = server::app_with_ttl(std::time::Duration::ZERO);
     let token = registered_session(&app, "carol@example.com").await;
     let (s, _) = send(&app, "GET", "/vault", Some(&token), None).await;

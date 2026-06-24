@@ -1,25 +1,25 @@
-//! Matériel secret de 32 octets, effacé de la mémoire au drop.
+//! 32-byte secret material, wiped from memory on drop.
 
 use rand_core::{OsRng, RngCore};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-/// Longueur d'une clé symétrique (256 bits).
+/// Length of a symmetric key (256 bits).
 pub const KEY_LEN: usize = 32;
 
-/// Une clé/secret de 256 bits qui s'auto-efface de la mémoire au drop.
+/// A 256-bit key/secret that wipes itself from memory on drop.
 ///
-/// Ne dérive PAS `Clone`/`Debug`/`Serialize` volontairement : un secret ne doit
-/// pas être copié ou journalisé par accident.
+/// Deliberately does NOT derive `Clone`/`Debug`/`Serialize`: a secret must not
+/// be copied or logged by accident.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SecretKey([u8; KEY_LEN]);
 
 impl SecretKey {
-    /// Construit à partir d'octets bruts.
+    /// Builds from raw bytes.
     pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
         Self(bytes)
     }
 
-    /// Génère une clé aléatoire via le CSPRNG du système.
+    /// Generates a random key via the system CSPRNG.
     pub fn generate() -> Self {
         let mut bytes = [0u8; KEY_LEN];
         OsRng.fill_bytes(&mut bytes);
@@ -28,7 +28,7 @@ impl SecretKey {
         key
     }
 
-    /// Accès en lecture seule aux octets bruts (pour le chiffrement).
+    /// Read-only access to the raw bytes (for encryption).
     pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
         &self.0
     }

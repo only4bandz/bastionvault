@@ -10,23 +10,23 @@ description = "Zero-knowledge cryptographic core for the password manager (nativ
 workspace = true
 
 [dependencies]
-# KDF : dérivation lente et mémoire-dure du mot de passe maître.
+# KDF: slow, memory-hard derivation of the master password.
 argon2 = "0.5"
-# AEAD : chiffrement authentifié, nonce 192 bits (random-safe).
+# AEAD: authenticated encryption, 192-bit nonce (random-safe).
 chacha20poly1305 = "0.10"
-# Dérivation de sous-clés.
+# Sub-key derivation.
 hkdf = "0.12"
 sha2 = "0.10"
-# Aléa cryptographique (CSPRNG OS ; feature "js" ajoutée côté WASM).
+# Cryptographic randomness (OS CSPRNG; "js" feature added on the WASM side).
 rand_core = { version = "0.6", features = ["getrandom"] }
-# Efface les secrets de la mémoire au drop.
+# Wipes secrets from memory on drop.
 zeroize = { version = "1", features = ["derive"] }
-# Comparaisons en temps constant.
+# Constant-time comparisons.
 subtle = "2"
-# Sérialisation des enveloppes chiffrées + du manifest.
+# Serialization of the encrypted envelopes + the manifest.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
-# Encodage base32 lisible de la Secret Key (Emergency Kit).
+# Human-readable base32 encoding of the Secret Key (Emergency Kit).
 data-encoding = "2"
 thiserror = "2"

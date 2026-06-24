@@ -1,49 +1,49 @@
-//! Types d'erreur du cœur crypto.
+//! Error types of the crypto core.
 //!
-//! Règle de sécurité : les messages d'erreur ne révèlent JAMAIS de secret ni
-//! ne distinguent « mauvais mot de passe » de « données corrompues » côté
-//! attaquant — un échec de déchiffrement reste un échec de déchiffrement.
+//! Security rule: error messages NEVER reveal a secret, nor do they distinguish
+//! "wrong password" from "corrupted data" to an attacker — a decryption failure
+//! stays a decryption failure.
 
 use thiserror::Error;
 
-/// Résultat standard du crate.
+/// Standard result of the crate.
 pub type Result<T> = core::result::Result<T, CryptoError>;
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
-    /// La dérivation Argon2id a échoué (paramètres invalides, OOM…).
+    /// Argon2id derivation failed (invalid parameters, OOM, etc.).
     #[error("key derivation failed")]
     KeyDerivation,
 
-    /// Échec d'un chiffrement/déchiffrement AEAD.
+    /// An AEAD encryption/decryption failure.
     ///
-    /// Volontairement opaque : couvre aussi bien un mauvais mot de passe
-    /// qu'une altération du chiffré (tag invalide).
+    /// Deliberately opaque: it covers both a wrong password and a tampered
+    /// ciphertext (invalid tag).
     #[error("decryption failed or data was tampered with")]
     Aead,
 
-    /// Donnée encodée (base64, longueur de clé/nonce) invalide.
+    /// Invalid encoded data (base64, key/nonce length).
     #[error("malformed encrypted data")]
     Malformed,
 
-    /// Mot de passe maître vide — rejeté à la frontière crypto.
+    /// Empty master password — rejected at the crypto boundary.
     ///
-    /// La politique de mot de passe complète (longueur, entropie) reste de la
-    /// responsabilité de l'appelant ; on refuse seulement le cas dégénéré vide.
+    /// The full password policy (length, entropy) remains the caller's
+    /// responsibility; we only reject the degenerate empty case.
     #[error("master password must not be empty")]
     EmptyPassword,
 
-    /// Paramètres KDF hors de la politique autorisée.
+    /// KDF parameters outside the allowed policy.
     ///
-    /// Soit trop faibles pour un nouveau coffre (plancher de sécurité), soit
-    /// déraisonnablement élevés (plafond anti-déni-de-service côté client).
+    /// Either too weak for a new vault (security floor), or unreasonably high
+    /// (client-side anti-denial-of-service ceiling).
     #[error("KDF parameters are outside the allowed policy")]
     KdfPolicy,
 
-    /// Manifest plus ancien que la dernière version connue → rollback détecté.
+    /// Manifest older than the last known version → rollback detected.
     ///
-    /// Un serveur malveillant a resservi un manifest périmé pour masquer un
-    /// changement (suppression/ajout d'item).
+    /// A malicious server re-served a stale manifest to hide a change (item
+    /// deletion/addition).
     #[error("stale manifest: possible rollback detected")]
     StaleManifest,
 }

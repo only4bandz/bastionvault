@@ -15,9 +15,9 @@ axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Hash lent du secret d'authentification côté serveur (obligation ZK).
+# Slow hash of the authentication secret on the server side (ZK requirement).
 argon2 = "0.5"
-# Encodage hex des jetons de session.
+# Hex encoding of session tokens.
 data-encoding = "2"
 
 [dev-dependencies]

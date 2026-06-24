@@ -1,10 +1,10 @@
-# Démo navigateur — coffre zero-knowledge en WASM
+# Browser demo — zero-knowledge vault in WASM
 
-Petite page qui fait tourner le cœur cryptographique (`crypto-core`) **dans le
-navigateur**, compilé en WebAssembly via `crypto-wasm`. Tout le chiffrement est
-côté client ; le panneau « Serveur » ne montre que des blobs opaques.
+A small page that runs the cryptographic core (`crypto-core`) **in the
+browser**, compiled to WebAssembly via `crypto-wasm`. All encryption happens
+client-side; the "Server" panel only shows opaque blobs.
 
-## Lancer
+## Run
 
 ```bash
 # 1. Pré-requis (une fois)
@@ -19,13 +19,13 @@ cd web && python3 -m http.server 8080
 # → ouvrir http://localhost:8080
 ```
 
-## Ce que la démo montre
+## What the demo shows
 
-1. **Créer le coffre** depuis un mot de passe maître → la **Secret Key** s'affiche
-   (montrée une fois) + l'Emergency Kit.
-2. **Chiffrer des items** : ils partent au « serveur » uniquement sous forme
-   chiffrée — visible dans le panneau de droite.
-3. **Déverrouiller** sur un « autre appareil » : il faut le mot de passe maître
-   **ET** la Secret Key. Sans les deux, le coffre est illisible.
+1. **Create the vault** from a master password → the **Secret Key** is displayed
+   (shown once) + the Emergency Kit.
+2. **Encrypt items**: they go to the "server" only in encrypted form — visible in
+   the right-hand panel.
+3. **Unlock** on "another device": you need both the master password **AND** the
+   Secret Key. Without both, the vault is unreadable.
 
-Le même `crypto-core` alimentera l'app web complète et l'extension Chrome.
+The same `crypto-core` will power the full web app and the Chrome extension.

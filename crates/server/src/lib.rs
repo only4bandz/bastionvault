@@ -1,13 +1,13 @@
-//! Serveur de synchronisation **zero-knowledge**.
+//! **Zero-knowledge** sync server.
 //!
-//! Il ne voit jamais le mot de passe maître, la Secret Key, ni un item en clair.
-//! Il stocke uniquement :
-//! - les données d'inscription publiques (`salt`, `kdf`, clé de coffre enveloppée) ;
-//! - un **hash lent Argon2id** du secret d'authentification (jamais le secret nu) ;
-//! - les items et le manifest, sous forme de [`EncryptedBlob`] opaques.
+//! It never sees the master password, the Secret Key, or any item in cleartext.
+//! It stores only:
+//! - the public registration data (`salt`, `kdf`, wrapped vault key);
+//! - a **slow Argon2id hash** of the authentication secret (never the raw secret);
+//! - the items and the manifest, as opaque [`EncryptedBlob`]s.
 //!
-//! Le stockage est en mémoire (MVP) ; une couche persistante (SQLite…) pourra
-//! s'y substituer sans changer l'API HTTP.
+//! Storage is in memory (MVP); a persistent layer (SQLite…) can be
+//! substituted for it without changing the HTTP API.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -25,21 +25,21 @@ use serde::{Deserialize, Serialize};
 
 use crypto_core::{EncryptedBlob, KdfParams, Registration};
 
-/// Durée de vie d'un jeton de session par défaut (30 min).
+/// Default session token lifetime (30 min).
 const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
-/// Taille maximale d'un corps de requête (1 Mio) — garde-fou anti-DoS mémoire.
+/// Maximum request body size (1 MiB) — guardrail against memory DoS.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 
-/// Construit le routeur avec la TTL de session par défaut.
+/// Builds the router with the default session TTL.
 ///
-/// ⚠️ NON-PRODUCTION : ce serveur MVP n'a PAS de TLS, CORS, rate-limiting,
-/// quotas de stockage, ni persistance. Ces contrôles doivent être ajoutés
-/// (et testés) avant tout déploiement réel.
+/// ⚠️ NON-PRODUCTION: this MVP server has NO TLS, CORS, rate limiting,
+/// storage quotas, or persistence. These controls must be added
+/// (and tested) before any real deployment.
 pub fn app() -> Router {
     app_with_ttl(DEFAULT_TOKEN_TTL)
 }
 
-/// Variante avec TTL explicite (utile pour tester l'expiration des jetons).
+/// Variant with an explicit TTL (useful for testing token expiration).
 pub fn app_with_ttl(token_ttl: Duration) -> Router {
     let state = AppState::new(token_ttl);
     Router::new()
@@ -54,7 +54,7 @@ pub fn app_with_ttl(token_ttl: Duration) -> Router {
         .with_state(state)
 }
 
-// ─── État partagé ───
+// ─── Shared state ───
 
 #[derive(Clone)]
 struct AppState {
@@ -64,22 +64,22 @@ struct AppState {
 
 #[derive(Default)]
 struct Inner {
-    accounts: HashMap<String, AccountRecord>, // email -> compte
-    sessions: HashMap<String, Session>,       // jeton -> session
+    accounts: HashMap<String, AccountRecord>, // email -> account
+    sessions: HashMap<String, Session>,       // token -> session
 }
 
-/// Session active : propriétaire du jeton et instant d'expiration.
+/// Active session: the token's owner and its expiration instant.
 struct Session {
     email: String,
     expires_at: Instant,
 }
 
-/// Tout ce que le serveur retient d'un compte. Rien ici n'est déchiffrable.
+/// Everything the server keeps about an account. Nothing here is decryptable.
 struct AccountRecord {
     salt: String,
     kdf: KdfParams,
     wrapped_vault_key: EncryptedBlob,
-    /// Hash Argon2id (PHC) du secret d'authentification.
+    /// Argon2id hash (PHC) of the authentication secret.
     auth_hash: String,
     items: HashMap<String, EncryptedBlob>,
     manifest: Option<EncryptedBlob>,
@@ -93,19 +93,19 @@ impl AppState {
         }
     }
 
-    /// Verrou en lecture, en **récupérant** un éventuel empoisonnement : le
-    /// panic d'un autre handler ne doit pas mettre tout le serveur en DoS.
+    /// Read lock, **recovering** from any poisoning: a panic in another
+    /// handler must not bring the whole server into a DoS.
     fn read(&self) -> RwLockReadGuard<'_, Inner> {
         self.inner.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Idem en écriture.
+    /// Same for writing.
     fn write(&self) -> RwLockWriteGuard<'_, Inner> {
         self.inner.write().unwrap_or_else(|e| e.into_inner())
     }
 }
 
-// ─── Erreurs HTTP (messages volontairement avares) ───
+// ─── HTTP errors (deliberately terse messages) ───
 
 struct ApiError(StatusCode, &'static str);
 
@@ -133,7 +133,7 @@ struct Prelogin {
 #[derive(Deserialize)]
 struct LoginRequest {
     email: String,
-    /// Secret d'authentification base64 dérivé côté client.
+    /// Base64 authentication secret derived on the client side.
     auth_secret: String,
 }
 
@@ -163,7 +163,7 @@ async fn create_account(
     State(st): State<AppState>,
     Json(req): Json<CreateAccount>,
 ) -> Result<StatusCode, ApiError> {
-    // Hash lent sur un thread bloquant dédié (pas de starvation du runtime async).
+    // Slow hash on a dedicated blocking thread (no starvation of the async runtime).
     let secret = req.registration.auth_secret.expose_b64().to_string();
     let auth_hash = tokio::task::spawn_blocking(move || hash_secret(&secret))
         .await
@@ -208,13 +208,13 @@ async fn create_session(
     State(st): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    // On copie le hash puis on relâche le verrou avant la vérification lente.
+    // We copy the hash, then release the lock before the slow verification.
     let phc = st
         .read()
         .accounts
         .get(&req.email)
         .map(|a| a.auth_hash.clone());
-    // Même réponse pour « compte inconnu » et « mauvais secret ».
+    // Same response for "unknown account" and "wrong secret".
     let phc = phc.ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"))?;
     let secret = req.auth_secret.clone();
     let ok = tokio::task::spawn_blocking(move || verify_secret(&secret, &phc))
@@ -299,7 +299,7 @@ async fn put_manifest(
 
 // ─── Helpers ───
 
-/// Révoque la session courante (déconnexion).
+/// Revokes the current session (logout).
 async fn delete_session(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -309,7 +309,7 @@ async fn delete_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Extrait le jeton « Authorization: Bearer … ».
+/// Extracts the "Authorization: Bearer …" token.
 fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
     headers
         .get(header::AUTHORIZATION)
@@ -318,14 +318,14 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "missing bearer token"))
 }
 
-/// Valide le jeton (existence + non-expiration) et renvoie l'email. Évince un
-/// jeton expiré au passage.
+/// Validates the token (existence + non-expiration) and returns the email.
+/// Evicts an expired token along the way.
 fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     let token = bearer_token(headers)?.to_string();
     let mut inner = st.write();
     let email = match inner.sessions.get(&token) {
         Some(s) if Instant::now() < s.expires_at => Some(s.email.clone()),
-        Some(_) => None, // expiré
+        Some(_) => None, // expired
         None => return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
     };
     match email {
@@ -337,7 +337,7 @@ fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> 
     }
 }
 
-/// Hash lent Argon2id (PHC) du secret d'authentification.
+/// Slow Argon2id hash (PHC) of the authentication secret.
 fn hash_secret(secret: &str) -> Result<String, ()> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
@@ -346,7 +346,7 @@ fn hash_secret(secret: &str) -> Result<String, ()> {
         .map_err(|_| ())
 }
 
-/// Vérifie un secret contre un hash PHC, en temps constant (via `argon2`).
+/// Verifies a secret against a PHC hash, in constant time (via `argon2`).
 fn verify_secret(secret: &str, phc: &str) -> bool {
     match PasswordHash::new(phc) {
         Ok(parsed) => Argon2::default()
@@ -356,7 +356,7 @@ fn verify_secret(secret: &str, phc: &str) -> bool {
     }
 }
 
-/// Jeton de session aléatoire de 256 bits, encodé hex.
+/// Random 256-bit session token, hex-encoded.
 fn new_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
