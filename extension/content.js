@@ -148,16 +148,19 @@
     },
     true
   );
+  // Dismiss on an explicit click outside the overlay and the field — NOT on
+  // focusout/scroll, which fire spuriously on scripted login pages (Microsoft,
+  // Google) and made the dropdown flicker out instantly. The overlay is
+  // absolutely positioned in document space, so it tracks the field on scroll.
   document.addEventListener(
-    "focusout",
-    () => {
-      activeField = null;
-      setTimeout(removeOverlay, 200); // allow a row mousedown to win the race
+    "mousedown",
+    (e) => {
+      if (!overlay) return;
+      const path = e.composedPath ? e.composedPath() : [];
+      if (path.includes(overlay) || e.target === activeField) return;
+      removeOverlay();
     },
     true
   );
-  // Reposition is hard across layouts; just dismiss on scroll/resize/Escape.
-  window.addEventListener("scroll", removeOverlay, true);
-  window.addEventListener("resize", removeOverlay, true);
   document.addEventListener("keydown", (e) => e.key === "Escape" && removeOverlay(), true);
 })();
