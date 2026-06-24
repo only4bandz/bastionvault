@@ -69,9 +69,11 @@ function avatarFor(it) {
   const letter = esc((it.title || "?")[0].toUpperCase());
   const color = colorFor(it.title || "");
   if (domain) {
-    // The <img> error fallback is wired in JS (wireRows) — inline onerror= is
-    // forbidden by the extension-page CSP.
-    return `<div class="ico" style="background:${color}" data-letter="${letter}"><img src="https://icons.duckduckgo.com/ip3/${esc(domain)}.ico" alt="" /></div>`;
+    // Real favicons sit on a clean white tile (like NordPass) so transparent
+    // logos don't bleed our accent color. The <img> error fallback is wired in
+    // JS (wireRows) — inline onerror= is forbidden by the extension-page CSP.
+    // We stash the fallback color on the tile so wireRows can restore it.
+    return `<div class="ico ico-img" style="background:#fff" data-letter="${letter}" data-color="${color}"><img src="https://icons.duckduckgo.com/ip3/${esc(domain)}.ico" alt="" /></div>`;
   }
   return `<div class="ico" style="background:${color}">${letter}</div>`;
 }
@@ -92,6 +94,7 @@ function subtitleFor(it) {
 // ── rendering ──
 let allItems = [];
 let currentHost = null;
+let currentServer = "";
 
 function rowHtml(it) {
   const fill = it.type === "login" && (it.username || it.hasPassword)
@@ -141,6 +144,8 @@ function wireRows() {
     img.addEventListener("error", () => {
       const tile = img.parentElement;
       tile.textContent = tile.dataset.letter || "?";
+      tile.style.background = tile.dataset.color || "#232838"; // restore the letter-tile color
+      tile.classList.remove("ico-img");
     });
   });
   document.querySelectorAll(".iconbtn[data-act]").forEach((btn) => {
@@ -149,17 +154,27 @@ function wireRows() {
       const id = btn.dataset.id;
       const act = btn.dataset.act;
       const item = allItems.find((i) => i.id === id);
+      const relocked = (r) => {
+        if (r.locked || r.error === "locked") {
+          showUnlock({ server: currentServer });
+          return true;
+        }
+        return false;
+      };
       if (act === "user") return copyText(item.username, "Username");
       if (act === "pass") {
         const r = await send({ type: "REVEAL", id, field: "password" });
+        if (relocked(r)) return;
         return r.ok ? copyText(r.value, "Password") : toast(r.error || "Error");
       }
       if (act === "card") {
         const r = await send({ type: "REVEAL", id, field: "cardNumber" });
+        if (relocked(r)) return;
         return r.ok ? copyText(r.value, "Card number") : toast(r.error || "Error");
       }
       if (act === "fill") {
         const r = await send({ type: "FILL", id });
+        if (relocked(r)) return;
         if (r.ok && r.filled) window.close();
         else toast(r.ok ? "No login field found on this page" : r.error || "Error");
       }
@@ -168,6 +183,7 @@ function wireRows() {
 }
 
 async function showVault(state) {
+  currentServer = state.server || currentServer;
   const initial = esc((state.email || "?")[0].toUpperCase());
   app.innerHTML = `
     <div class="hdr">${SHIELD}<h1>Bastion</h1><div class="acct" title="${esc(state.email || "")}">${initial}</div></div>
@@ -201,6 +217,7 @@ async function showVault(state) {
 }
 
 function showUnlock(state) {
+  currentServer = state.server || currentServer;
   app.innerHTML = `
     <div class="auth">
       <div class="brand">${SHIELD}<b>BASTION</b></div>
