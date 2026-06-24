@@ -13,8 +13,11 @@ export interface BinSeed {
 
 // Verified BIN prefixes. Longest-prefix wins, so 8-digit entries override 6-digit.
 export const CA_BINS: BinSeed[] = [
-  { bin: "450644", bank: "cibc", type: "debit", scheme: "visa" }, // verified
-  // ── add the user's cards here (6-digit BIN · bank · debit/credit) ──
+  { bin: "450644", bank: "cibc", type: "debit", scheme: "visa" },
+  { bin: "452088", bank: "td", type: "credit", scheme: "visa" },
+  { bin: "545756", bank: "capitalone", type: "credit", scheme: "mastercard" },
+  { bin: "543446", bank: "walmart", type: "credit", scheme: "mastercard" },
+  // ── add more verified cards here (6-digit BIN · bank · debit/credit) ──
 ];
 
 export interface LocalBin {

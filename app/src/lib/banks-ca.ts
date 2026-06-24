@@ -21,6 +21,7 @@ export const BANKS: Record<string, Bank> = {
   laurentian: { id: "laurentian", name: "Laurentian Bank", domain: "laurentianbank.ca" },
   amex: { id: "amex", name: "American Express", domain: "americanexpress.com" },
   capitalone: { id: "capitalone", name: "Capital One", domain: "capitalone.ca" },
+  walmart: { id: "walmart", name: "Walmart", domain: "walmart.ca" },
   mbna: { id: "mbna", name: "MBNA", domain: "mbna.ca" },
   wealthsimple: { id: "wealthsimple", name: "Wealthsimple", domain: "wealthsimple.com" },
   koho: { id: "koho", name: "KOHO", domain: "koho.ca" },
