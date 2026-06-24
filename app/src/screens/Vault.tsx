@@ -1,4 +1,4 @@
-import { useMemo, useState, type JSX } from "react";
+import { useEffect, useMemo, useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
 import { Generator } from "../components/Generator";
 import { ItemEditor } from "../components/ItemEditor";
@@ -10,7 +10,28 @@ import {
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { strength } from "../lib/generator";
+import { lookupBin } from "../lib/bin";
 import type { ImportResult } from "../lib/import";
+
+/** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
+function CardSubtitle({ item }: { item: VaultItem }): JSX.Element {
+  const bin = (item.cardNumber || "").replace(/\D/g, "").slice(0, 8);
+  const [type, setType] = useState<string | undefined>(item.cardType);
+  useEffect(() => {
+    if (item.cardType) {
+      setType(item.cardType);
+      return;
+    }
+    if (bin.length < 6) return;
+    let active = true;
+    lookupBin(bin).then((r) => active && r?.cardType && setType(r.cardType));
+    return () => {
+      active = false;
+    };
+  }, [bin, item.cardType]);
+  const label = type ? `${type[0].toUpperCase()}${type.slice(1)} Card` : "Card";
+  return <>{label}</>;
+}
 
 type Nav = "vault" | "generator" | "health" | "soon";
 
@@ -173,7 +194,15 @@ export function Vault({
                         <Favicon item={i} size={36} />
                         <div style={{ minWidth: 0 }}>
                           <div className="ttl">{i.title}</div>
-                          <div className="sub">{i.type === "login" ? i.username || i.url || "—" : TYPE_LABEL[i.type]}</div>
+                          <div className="sub">
+                            {i.type === "login" ? (
+                              i.username || i.url || "—"
+                            ) : i.type === "card" ? (
+                              <CardSubtitle item={i} />
+                            ) : (
+                              TYPE_LABEL[i.type]
+                            )}
+                          </div>
                         </div>
                       </div>
                       <div className="when">{timeAgo(i.updatedAt)}</div>

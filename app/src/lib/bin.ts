@@ -15,9 +15,11 @@ export interface BinInfo {
   scheme?: Scheme;
   bankName?: string;
   bankDomain?: string;
+  cardType?: string; // "debit" | "credit"
 }
 
 const cache = new Map<string, BinInfo | null>();
+const inflight = new Map<string, Promise<BinInfo | null>>();
 
 // Map common issuers (Canada-
 // focused, since that's the primary use) to a domain so we can show their logo.
@@ -63,19 +65,29 @@ export async function lookupBin(bin: string): Promise<BinInfo | null> {
   const key = bin.replace(/\D/g, "").slice(0, 8);
   if (key.length < 6) return null;
   if (cache.has(key)) return cache.get(key) ?? null;
-  try {
-    const res = await fetch(`/api/bin/${key}`);
-    if (!res.ok) return null;
-    const j = (await res.json()) as { scheme?: string; bank_name?: string };
-    if (!j.scheme && !j.bank_name) return null; // upstream miss — retry later (cheap, hits server cache)
-    const info: BinInfo = {
-      scheme: (j.scheme as Scheme) || undefined,
-      bankName: j.bank_name || undefined,
-      bankDomain: domainForBankName(j.bank_name),
-    };
-    cache.set(key, info);
-    return info;
-  } catch {
-    return null;
-  }
+  const pending = inflight.get(key);
+  if (pending) return pending;
+
+  const p = (async () => {
+    try {
+      const res = await fetch(`/api/bin/${key}`);
+      if (!res.ok) return null;
+      const j = (await res.json()) as { scheme?: string; bank_name?: string; card_type?: string };
+      if (!j.scheme && !j.bank_name && !j.card_type) return null; // upstream miss — retry later
+      const info: BinInfo = {
+        scheme: (j.scheme as Scheme) || undefined,
+        bankName: j.bank_name || undefined,
+        bankDomain: domainForBankName(j.bank_name),
+        cardType: j.card_type || undefined,
+      };
+      cache.set(key, info);
+      return info;
+    } catch {
+      return null;
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+  inflight.set(key, p);
+  return p;
 }
