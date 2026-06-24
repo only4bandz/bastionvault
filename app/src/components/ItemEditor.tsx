@@ -37,8 +37,13 @@ export function ItemEditor({
     if (bin.length < 6) return;
     const t = setTimeout(() => {
       lookupBin(bin).then((r) => {
-        if (r && (r.bankDomain || r.bankName)) {
-          setItem((p) => ({ ...p, cardBank: r.bankName, cardBankDomain: r.bankDomain }));
+        if (r && (r.bankDomain || r.bankName || r.cardType)) {
+          setItem((p) => ({
+            ...p,
+            cardBank: r.bankName ?? p.cardBank,
+            cardBankDomain: r.bankDomain ?? p.cardBankDomain,
+            cardType: r.cardType ?? p.cardType,
+          }));
         }
       });
     }, 400);
@@ -105,10 +110,11 @@ export function ItemEditor({
               <div className="field">
                 <label>Card number</label>
                 <input className="input mono" value={item.cardNumber ?? ""} onChange={(e) => set("cardNumber", e.target.value)} placeholder="•••• •••• •••• ••••" />
-                {(item.cardBank || item.cardBrand) && (
+                {(item.cardBank || item.cardBrand || item.cardType) && (
                   <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>
                     Detected: {item.cardBank ? `${item.cardBank} · ` : ""}
                     {(item.cardBrand || "").toUpperCase()}
+                    {item.cardType ? ` · ${item.cardType}` : ""}
                   </div>
                 )}
               </div>

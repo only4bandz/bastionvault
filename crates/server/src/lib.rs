@@ -153,6 +153,8 @@ impl Db {
                bin TEXT PRIMARY KEY, scheme TEXT, bank_name TEXT);",
         )
         .expect("init schema");
+        // Add the debit/credit column to pre-existing bin caches (no-op if present).
+        let _ = conn.execute("ALTER TABLE bins ADD COLUMN card_type TEXT", []);
         Self {
             conn: Arc::new(Mutex::new(conn)),
         }
@@ -205,12 +207,13 @@ impl Db {
     fn get_bin(&self, bin: &str) -> Option<BinInfo> {
         self.lock()
             .query_row(
-                "SELECT scheme,bank_name FROM bins WHERE bin=?1",
+                "SELECT scheme,bank_name,card_type FROM bins WHERE bin=?1",
                 params![bin],
                 |r| {
                     Ok(BinInfo {
                         scheme: r.get::<_, Option<String>>(0)?,
                         bank_name: r.get::<_, Option<String>>(1)?,
+                        card_type: r.get::<_, Option<String>>(2)?,
                     })
                 },
             )
@@ -221,8 +224,8 @@ impl Db {
 
     fn put_bin(&self, bin: &str, info: &BinInfo) -> rusqlite::Result<()> {
         self.lock().execute(
-            "INSERT OR REPLACE INTO bins(bin,scheme,bank_name) VALUES(?1,?2,?3)",
-            params![bin, info.scheme, info.bank_name],
+            "INSERT OR REPLACE INTO bins(bin,scheme,bank_name,card_type) VALUES(?1,?2,?3,?4)",
+            params![bin, info.scheme, info.bank_name, info.card_type],
         )?;
         Ok(())
     }
@@ -355,11 +358,13 @@ struct BlobBody {
     blob: EncryptedBlob,
 }
 
-/// Issuing-bank info for a card BIN (network + bank name). Never the full card.
+/// Issuing-bank info for a card BIN (network + bank name + debit/credit).
+/// Never the full card.
 #[derive(Serialize, Clone, Default)]
 struct BinInfo {
     scheme: Option<String>,
     bank_name: Option<String>,
+    card_type: Option<String>, // "debit" | "credit"
 }
 
 // ─── Handlers ───
@@ -570,6 +575,7 @@ async fn fetch_binlist(bin: &str) -> Option<BinInfo> {
             .and_then(|b| b.get("name"))
             .and_then(|v| v.as_str())
             .map(String::from),
+        card_type: j.get("type").and_then(|v| v.as_str()).map(String::from),
     })
 }
 
