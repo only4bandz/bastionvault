@@ -158,6 +158,33 @@ export default function App(): JSX.Element {
     [token, toast]
   );
 
+  // ── bulk import (CSV): add locally, then encrypt + sync with bounded concurrency ──
+  const importItems = useCallback(
+    async ({ items: imported }: { items: VaultItem[] }) => {
+      if (imported.length === 0) return;
+      setItems((prev) => [...imported, ...prev]);
+      if (!account || !token) return;
+      toast(`Importing ${imported.length} items…`);
+      const queue = imported.slice();
+      let ok = 0;
+      const worker = async () => {
+        while (queue.length) {
+          const it = queue.shift()!;
+          try {
+            const blob = JSON.parse(account.encrypt_item(JSON.stringify(it), it.id)) as Blob;
+            await api.putItem(token, it.id, blob);
+            ok++;
+          } catch {
+            /* keep going; report total at the end */
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: 8 }, worker));
+      toast(ok === imported.length ? `Imported ${ok} items` : `Imported ${ok}/${imported.length} (some failed to sync)`);
+    },
+    [account, token, toast]
+  );
+
   return (
     <>
       {phase === "welcome" && <Welcome onCreate={onCreate} onHaveVault={() => setPhase("unlock")} />}
@@ -171,6 +198,7 @@ export default function App(): JSX.Element {
           items={items}
           onUpsert={upsert}
           onDelete={remove}
+          onImport={importItems}
           onLock={lock}
           toast={toast}
         />

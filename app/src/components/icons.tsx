@@ -70,3 +70,6 @@ export const IcX = ({ size }: P): JSX.Element => (
 export const IcRefresh = ({ size }: P): JSX.Element => (
   <svg {...S(size)}><path d="M20 11a8 8 0 1 0-1.5 5" /><path d="M20 5v6h-6" /></svg>
 );
+export const IcUpload = ({ size }: P): JSX.Element => (
+  <svg {...S(size)}><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /><path d="M12 16V4M7 9l5-5 5 5" /></svg>
+);
