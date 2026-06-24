@@ -30,3 +30,6 @@ base64 = "0.22"
 # Human-readable base32 encoding of the Secret Key (Emergency Kit).
 data-encoding = "2"
 thiserror = "2"
+# Bastion Send: X25519 sealed box (recipient encryption) + Ed25519 signatures.
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }

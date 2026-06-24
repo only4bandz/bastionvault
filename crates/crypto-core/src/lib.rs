@@ -48,6 +48,7 @@ pub mod error;
 pub mod kdf;
 pub mod manifest;
 pub mod secret;
+pub mod send;
 pub mod vault;
 
 // Recommended public API: go through `Vault`. The low-level AEAD primitives
@@ -58,4 +59,8 @@ pub use aead::EncryptedBlob;
 pub use error::{CryptoError, Result};
 pub use kdf::KdfParams;
 pub use manifest::{IntegrityReport, Manifest, ManifestEntry};
+pub use send::{
+    open as send_open, safety_number, seal as send_seal, IdentityKeys, OpenedMessage,
+    PublicIdentity, SendBlob, Sender,
+};
 pub use vault::{AuthSecret, Registration, Vault};
