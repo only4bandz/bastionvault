@@ -1,16 +1,18 @@
 //! Tests d'intégration du flux complet de chiffrement zero-knowledge.
 
-use crypto_core::aead::{self, EncryptedBlob};
+use crypto_core::aead::EncryptedBlob;
 use crypto_core::kdf::KdfParams;
 use crypto_core::vault::{auth_secret_eq, Vault};
 use crypto_core::CryptoError;
 
-/// Paramètres KDF rapides pour les tests (sinon Argon2id ralentit la suite).
+/// Paramètres KDF pour les tests : exactement le plancher de la politique
+/// (sécurité minimale acceptable), pour rester rapide tout en passant la
+/// validation `validate_for_new_vault`.
 fn fast_kdf() -> KdfParams {
     KdfParams {
-        mem_kib: 8 * 1024,
-        iterations: 1,
-        parallelism: 1,
+        mem_kib: KdfParams::MIN_MEM_KIB,
+        iterations: KdfParams::MIN_ITERATIONS,
+        parallelism: KdfParams::MIN_PARALLELISM,
     }
 }
 
@@ -58,18 +60,80 @@ fn tampered_ciphertext_is_rejected() {
 }
 
 #[test]
+fn tampered_wrapped_vault_key_is_rejected() {
+    let pw = b"master pw";
+    let (_, mut reg) = Vault::register_with(pw, fast_kdf()).unwrap();
+    // On altère un octet de la clé de coffre enveloppée fournie par le serveur.
+    // Le tag AEAD doit faire échouer le déballage — pas de déverrouillage
+    // silencieux sur une clé corrompue ou substituée par un serveur malveillant.
+    let mut raw = base64_decode(&reg.wrapped_vault_key.ct);
+    raw[0] ^= 0x01;
+    reg.wrapped_vault_key.ct = base64_encode(&raw);
+    assert!(matches!(
+        Vault::unlock(pw, &reg.salt, reg.kdf, &reg.wrapped_vault_key),
+        Err(CryptoError::Aead)
+    ));
+}
+
+#[test]
 fn auth_secret_is_stable_and_secret() {
     let pw = b"my master password";
     let (_, reg1) = Vault::register_with(pw, fast_kdf()).unwrap();
     // Re-déverrouiller redonne le MÊME secret d'auth (déterministe par sel/pw).
     let (_, auth_a) = Vault::unlock(pw, &reg1.salt, reg1.kdf, &reg1.wrapped_vault_key).unwrap();
     let (_, auth_b) = Vault::unlock(pw, &reg1.salt, reg1.kdf, &reg1.wrapped_vault_key).unwrap();
-    assert_eq!(auth_a, auth_b);
-    // Mais il diffère du secret enregistré au signup ? Non : il doit l'égaler.
-    assert_eq!(auth_a, reg1.auth_secret);
+    // Comparaisons en temps constant (le newtype n'expose pas PartialEq).
+    assert!(auth_a.ct_eq(&auth_b));
+    // Et il doit égaler le secret enregistré au signup.
+    assert!(auth_a.ct_eq(&reg1.auth_secret));
     assert!(auth_secret_eq(
         auth_a.as_bytes(),
         reg1.auth_secret.as_bytes()
+    ));
+}
+
+#[test]
+fn auth_secret_debug_is_redacted() {
+    let (_, reg) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let secret = reg.auth_secret.expose_b64().to_string();
+    // Le Debug du secret ne doit pas révéler sa valeur.
+    let dbg = format!("{:?}", reg.auth_secret);
+    assert!(dbg.contains("redacted"));
+    assert!(!dbg.contains(&secret));
+    // Le Debug de Registration ne doit pas non plus fuiter le secret.
+    assert!(!format!("{:?}", reg).contains(&secret));
+}
+
+#[test]
+fn unknown_blob_version_is_rejected() {
+    let (vault, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let mut blob = vault.encrypt_item(b"x", "i").unwrap();
+    blob.v = 2; // version inconnue
+    assert!(matches!(
+        vault.decrypt_item(&blob, "i"),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
+fn oversized_ciphertext_is_rejected_before_decode() {
+    let (vault, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let mut blob = vault.encrypt_item(b"x", "i").unwrap();
+    // ~12 Mio encodés > plafond 8 Mio → rejet sans allouer le déchiffrement.
+    blob.ct = base64_encode(&vec![0u8; 9 * 1024 * 1024]);
+    assert!(matches!(
+        vault.decrypt_item(&blob, "i"),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
+fn oversized_salt_is_rejected_before_decode() {
+    let (_, reg) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let huge_salt = "A".repeat(100); // > 64 caractères
+    assert!(matches!(
+        Vault::unlock(b"pw", &huge_salt, reg.kdf, &reg.wrapped_vault_key),
+        Err(CryptoError::Malformed)
     ));
 }
 
@@ -117,15 +181,71 @@ fn empty_master_password_is_rejected() {
 #[test]
 fn rotation_preserves_supplied_kdf_params() {
     let (vault, _) = Vault::register_with(b"old", fast_kdf()).unwrap();
+    // Params valides distincts du défaut (dans les bornes de la politique).
     let custom = KdfParams {
-        mem_kib: 16 * 1024,
-        iterations: 2,
-        parallelism: 1,
+        mem_kib: 24 * 1024,
+        iterations: 3,
+        parallelism: 2,
     };
     let reg = vault.rotate_master_password(b"new", custom).unwrap();
     // Les params demandés sont conservés, pas réinitialisés au défaut.
     assert_eq!(reg.kdf, custom);
     assert!(Vault::unlock(b"new", &reg.salt, reg.kdf, &reg.wrapped_vault_key).is_ok());
+}
+
+#[test]
+fn weak_kdf_rejected_for_new_vault() {
+    let weak = KdfParams {
+        mem_kib: 1024, // 1 Mio, bien sous le plancher
+        iterations: 1,
+        parallelism: 1,
+    };
+    assert!(matches!(
+        Vault::register_with(b"pw", weak),
+        Err(CryptoError::KdfPolicy)
+    ));
+}
+
+#[test]
+fn excessive_kdf_rejected_for_new_vault() {
+    let huge = KdfParams {
+        mem_kib: KdfParams::MAX_MEM_KIB + 1,
+        iterations: 3,
+        parallelism: 1,
+    };
+    assert!(matches!(
+        Vault::register_with(b"pw", huge),
+        Err(CryptoError::KdfPolicy)
+    ));
+}
+
+#[test]
+fn rotation_enforces_kdf_floor() {
+    let (vault, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let weak = KdfParams {
+        mem_kib: 1024,
+        iterations: 1,
+        parallelism: 1,
+    };
+    assert!(matches!(
+        vault.rotate_master_password(b"new", weak),
+        Err(CryptoError::KdfPolicy)
+    ));
+}
+
+#[test]
+fn unlock_caps_excessive_kdf_params() {
+    // Plafond anti-DoS : des params absurdes au unlock sont rejetés AVANT toute
+    // dérivation coûteuse, sans verrouiller les coffres legacy faibles.
+    let (_, reg) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let huge = KdfParams {
+        mem_kib: KdfParams::MAX_MEM_KIB + 1,
+        ..reg.kdf
+    };
+    assert!(matches!(
+        Vault::unlock(b"pw", &reg.salt, huge, &reg.wrapped_vault_key),
+        Err(CryptoError::KdfPolicy)
+    ));
 }
 
 #[test]
@@ -152,11 +272,4 @@ fn base64_decode(s: &str) -> Vec<u8> {
 fn base64_encode(b: &[u8]) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
     STANDARD.encode(b)
-}
-
-// Garde une référence à `aead` pour éviter un warning d'import inutilisé si les
-// tests ci-dessus évoluent.
-#[allow(dead_code)]
-fn _uses_aead(k: &crypto_core::secret::SecretKey) -> Option<EncryptedBlob> {
-    aead::encrypt(k, b"", b"").ok()
 }

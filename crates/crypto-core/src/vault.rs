@@ -21,6 +21,8 @@
 //! Avantage : changer de mot de passe maître ne ré-enveloppe que la clé de
 //! coffre — pas besoin de re-chiffrer tous les items.
 
+use core::fmt;
+
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -34,18 +36,74 @@ use crate::secret::{SecretKey, KEY_LEN};
 /// AAD liant la clé de coffre enveloppée à son rôle.
 const AAD_VAULT_KEY: &[u8] = b"pm:v1:wrapped-vault-key";
 
+/// Borne sur le sel encodé reçu (non fiable), vérifiée avant décodage.
+/// Le sel fait 16 octets → ~24 caractères base64 ; 64 laisse de la marge.
+const MAX_ENCODED_SALT_LEN: usize = 64;
+
+/// Secret d'authentification présenté au serveur. Type dédié plutôt qu'une
+/// `String` nue pour éviter les fuites : `Debug` est **masqué**, il n'est pas
+/// `Clone`, et la comparaison se fait en **temps constant**.
+///
+/// Sérialise/désérialise de façon transparente comme la chaîne base64 sous-
+/// jacente (format réseau inchangé).
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AuthSecret(String);
+
+impl AuthSecret {
+    fn from_b64(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Expose la valeur base64 — à n'envoyer **qu'au serveur**, jamais à logger.
+    pub fn expose_b64(&self) -> &str {
+        &self.0
+    }
+
+    /// Octets (base64) pour transmission/comparaison contrôlée.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+
+    /// Égalité en temps constant avec un autre secret d'authentification.
+    pub fn ct_eq(&self, other: &AuthSecret) -> bool {
+        auth_secret_eq(self.0.as_bytes(), other.0.as_bytes())
+    }
+}
+
+impl fmt::Debug for AuthSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AuthSecret(<redacted>)")
+    }
+}
+
 /// Données à publier au serveur lors de l'inscription. Aucune n'est secrète
 /// au sens où le serveur ne peut rien déchiffrer avec.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Pas de `Clone` : `auth_secret` est un credential, on évite les copies
+/// silencieuses.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Registration {
+    /// Version du format d'enregistrement, pour migrer le schéma sans casser
+    /// les comptes existants.
+    pub version: u8,
     /// Sel Argon2 (base64). Public par nature.
     pub salt: String,
     /// Paramètres KDF à réutiliser au login.
     pub kdf: KdfParams,
     /// Clé de coffre enveloppée par la clé de wrap.
     pub wrapped_vault_key: EncryptedBlob,
-    /// Secret d'authentification (base64) — le serveur le re-hashera lentement.
-    pub auth_secret: String,
+    /// Secret d'authentification (base64), présenté au serveur pour prouver
+    /// l'identité — il n'ouvre **aucun** coffre (indépendant de la clé de wrap).
+    ///
+    /// ⚠️ SÉCURITÉ SERVEUR (obligation) : bien que ce secret ait 256 bits
+    /// d'entropie, le serveur ne DOIT JAMAIS le stocker en clair ni avec un hash
+    /// rapide (SHA-256, bcrypt à faible coût…). Il DOIT le passer dans un hash
+    /// lent dédié (Argon2id de préférence) avant stockage, et le comparer en
+    /// temps constant via [`AuthSecret::ct_eq`] / [`auth_secret_eq`]. Objectif :
+    /// une fuite de la base ne doit jamais permettre de rejouer
+    /// l'authentification d'un utilisateur.
+    pub auth_secret: AuthSecret,
 }
 
 /// Un coffre déverrouillé : détient la clé de coffre en clair (en mémoire,
@@ -82,10 +140,11 @@ impl Vault {
         let wrapped_vault_key = aead::encrypt(&wrap_key, vault_key.as_bytes(), AAD_VAULT_KEY)?;
 
         let registration = Registration {
+            version: aead::FORMAT_VERSION,
             salt: B64.encode(salt),
             kdf: kdf_params,
             wrapped_vault_key,
-            auth_secret: B64.encode(auth_secret.as_bytes()),
+            auth_secret: AuthSecret::from_b64(B64.encode(auth_secret.as_bytes())),
         };
         Ok((Self { vault_key }, registration))
     }
@@ -103,7 +162,7 @@ impl Vault {
         salt: &str,
         kdf_params: KdfParams,
         wrapped_vault_key: &EncryptedBlob,
-    ) -> Result<(Self, String)> {
+    ) -> Result<(Self, AuthSecret)> {
         if master_password.is_empty() {
             return Err(CryptoError::EmptyPassword);
         }
@@ -111,6 +170,10 @@ impl Vault {
         // verrouillerait l'utilisateur), mais on refuse des params absurdes
         // qui épuiseraient la mémoire avant tout déchiffrement utile.
         kdf_params.validate_for_unlock()?;
+        // Borne sur le sel non fiable avant décodage (anti-allocation).
+        if salt.len() > MAX_ENCODED_SALT_LEN {
+            return Err(CryptoError::Malformed);
+        }
         let salt_bytes = B64.decode(salt).map_err(|_| CryptoError::Malformed)?;
         let salt_arr: [u8; kdf::SALT_LEN] =
             salt_bytes.try_into().map_err(|_| CryptoError::Malformed)?;
@@ -131,7 +194,10 @@ impl Vault {
         let vault_key = SecretKey::from_bytes(key_arr);
         key_arr.zeroize();
 
-        Ok((Self { vault_key }, B64.encode(auth_secret.as_bytes())))
+        Ok((
+            Self { vault_key },
+            AuthSecret::from_b64(B64.encode(auth_secret.as_bytes())),
+        ))
     }
 
     /// Chiffre le contenu d'un item. `item_id` est authentifié (AAD) pour
@@ -176,10 +242,11 @@ impl Vault {
         let auth_secret = kdf::derive_auth_secret(&master);
         let wrapped_vault_key = aead::encrypt(&wrap_key, self.vault_key.as_bytes(), AAD_VAULT_KEY)?;
         Ok(Registration {
+            version: aead::FORMAT_VERSION,
             salt: B64.encode(salt),
             kdf: kdf_params,
             wrapped_vault_key,
-            auth_secret: B64.encode(auth_secret.as_bytes()),
+            auth_secret: AuthSecret::from_b64(B64.encode(auth_secret.as_bytes())),
         })
     }
 }
