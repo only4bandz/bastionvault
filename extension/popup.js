@@ -3,6 +3,7 @@
 // for a single secret only at the moment the user copies or fills it.
 
 import { domainOf, matchesSite } from "./lib/match.js";
+import { generatePassword } from "./lib/generator.js";
 
 const app = document.getElementById("app");
 
@@ -49,6 +50,8 @@ const ICON = {
   eyeOff: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3l18 18"/><path d="M10.6 10.6a3 3 0 0 0 4.2 4.2"/><path d="M9.4 5.2A10 10 0 0 1 22 12a13 13 0 0 1-2.4 3.2M6.3 6.3A13 13 0 0 0 2 12s3.5 7 10 7a10 10 0 0 0 3-.5"/></svg>',
   link: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/></svg>',
   shield: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>',
+  regen: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>',
+  key: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 8.15-8.15"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>',
 };
 const SHIELD = '<svg class="logo" viewBox="0 0 32 32" aria-hidden><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9a8cff"/><stop offset="1" stop-color="#5a47e6"/></linearGradient></defs><path fill="url(#bg)" d="M16 2l11 4v8.5c0 7-4.7 12.9-11 15.5C9.7 27.4 5 21.5 5 14.5V6l11-4z"/><circle cx="16" cy="14.5" r="3" fill="#0a0c12"/><path fill="#0a0c12" d="M14.6 15.5h2.8l1 5.5h-4.8z"/></svg>';
 
@@ -213,6 +216,7 @@ async function showVault(state) {
     <div class="scroll"></div>
     <div class="bar">
       <button class="iconbtn" id="settings" title="Settings">${ICON.gear}</button>
+      <button class="iconbtn" id="gen" title="Password generator">${ICON.key}</button>
       <div class="spacer"></div>
       <button class="iconbtn" id="lock" title="Lock vault">${ICON.lock}</button>
     </div>`;
@@ -222,6 +226,7 @@ async function showVault(state) {
     showUnlock({ server: state.server });
   });
   document.getElementById("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
+  document.getElementById("gen").addEventListener("click", () => showGenerator());
   document.getElementById("q").addEventListener("input", (e) => renderVault(e.target.value));
 
   // current tab host (activeTab grants the URL while the popup is open)
@@ -236,6 +241,50 @@ async function showVault(state) {
   if (!list.ok) return showUnlock({ server: state.server });
   allItems = list.items;
   renderVault();
+}
+
+function showGenerator() {
+  const opts = { length: 20, lower: true, upper: true, digits: true, symbols: true };
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><div class="spacer"></div></div>
+      <div class="dhero" style="padding-bottom:8px">${SHIELD}<h2>Password generator</h2></div>
+      <div class="dscroll">
+        <div class="genbox">
+          <span class="genpw mono" id="pw"></span>
+          <button class="iconbtn" id="regen" title="Regenerate">${ICON.regen}</button>
+          <button class="iconbtn" id="copy" title="Copy">${ICON.copy}</button>
+        </div>
+        <div class="dfield">
+          <div class="dlabel">Length: <b id="lenval">${opts.length}</b></div>
+          <input type="range" id="len" min="8" max="64" value="${opts.length}" class="range" />
+        </div>
+        <label class="opt"><input type="checkbox" id="upper" checked /> Uppercase (A–Z)</label>
+        <label class="opt"><input type="checkbox" id="lower" checked /> Lowercase (a–z)</label>
+        <label class="opt"><input type="checkbox" id="digits" checked /> Digits (2–9)</label>
+        <label class="opt"><input type="checkbox" id="symbols" checked /> Symbols (!@#…)</label>
+      </div>
+    </div>`;
+
+  const pwEl = document.getElementById("pw");
+  const regen = () => {
+    opts.length = Number(document.getElementById("len").value);
+    opts.upper = document.getElementById("upper").checked;
+    opts.lower = document.getElementById("lower").checked;
+    opts.digits = document.getElementById("digits").checked;
+    opts.symbols = document.getElementById("symbols").checked;
+    document.getElementById("lenval").textContent = String(opts.length);
+    pwEl.textContent = generatePassword(opts);
+  };
+  regen();
+
+  document.getElementById("back").addEventListener("click", () => showVault(vaultState));
+  document.getElementById("regen").addEventListener("click", regen);
+  document.getElementById("copy").addEventListener("click", () => copyText(pwEl.textContent, "Password"));
+  document.getElementById("len").addEventListener("input", regen);
+  ["upper", "lower", "digits", "symbols"].forEach((id) =>
+    document.getElementById(id).addEventListener("change", regen)
+  );
 }
 
 async function showDetail(id) {
