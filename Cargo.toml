@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/crypto-core",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.91"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

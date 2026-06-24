@@ -1,0 +1,32 @@
+[package]
+name = "crypto-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Zero-knowledge cryptographic core for the password manager (native + WASM)."
+
+[lints]
+workspace = true
+
+[dependencies]
+# KDF : dérivation lente et mémoire-dure du mot de passe maître.
+argon2 = "0.5"
+# AEAD : chiffrement authentifié, nonce 192 bits (random-safe).
+chacha20poly1305 = "0.10"
+# Dérivation de sous-clés.
+hkdf = "0.12"
+sha2 = "0.10"
+# Aléa cryptographique (CSPRNG OS ; feature "js" ajoutée côté WASM).
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Efface les secrets de la mémoire au drop.
+zeroize = { version = "1", features = ["derive"] }
+# Comparaisons en temps constant.
+subtle = "2"
+# Sérialisation des enveloppes chiffrées.
+serde = { version = "1", features = ["derive"] }
+base64 = "0.22"
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
