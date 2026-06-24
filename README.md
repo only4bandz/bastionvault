@@ -42,7 +42,25 @@ mot de passe maître ──Argon2id(sel, 64Mio)──► clé maître
 crates/crypto-core/   ✅ Cœur crypto, Rust pur, 32 tests. Compile natif + WASM.
 crates/crypto-wasm/   ✅ Liaisons wasm-bindgen + test wasm32 (entropie validée).
 web/                  ✅ Démo navigateur (chiffre/déchiffre en WASM). Voir web/README.md
-crates/server/        ⬜ API Axum, stockage de blobs chiffrés (à venir)
+crates/server/        ✅ API Axum zero-knowledge : comptes + blobs chiffrés (en mémoire, MVP)
+```
+
+### Serveur — endpoints
+
+Zero-knowledge : ne stocke que des blobs opaques + un **hash Argon2id** du
+secret d'auth (jamais le secret nu). Réutilise les types de `crypto-core`.
+
+| Méthode | Route | Rôle |
+|---|---|---|
+| `POST` | `/accounts` | Crée un compte (stocke `salt`, `kdf`, clé enveloppée, hash du secret) |
+| `GET` | `/accounts/:email/prelogin` | Renvoie `salt`+`kdf`+clé enveloppée (pour dériver côté client) |
+| `POST` | `/sessions` | Vérifie le secret d'auth (Argon2id) → jeton bearer |
+| `GET` | `/vault` | Items chiffrés + manifest (auth) |
+| `PUT`/`DELETE` | `/vault/items/:id` | Upsert / suppression d'un item chiffré (auth) |
+| `PUT` | `/vault/manifest` | Stocke le manifest d'intégrité (auth) |
+
+```bash
+cargo run -p server          # écoute sur http://127.0.0.1:7777
 ```
 
 ## Feuille de route
@@ -53,8 +71,8 @@ crates/server/        ⬜ API Axum, stockage de blobs chiffrés (à venir)
 | 2 | Secret Key (deux-secrets) + Emergency Kit | ✅ Fait |
 | 3 | Manifest d'intégrité du coffre | ✅ Fait |
 | 4 | Liaisons WASM + démo navigateur (entropie validée) | ✅ Fait |
-| 5 | API serveur Axum (comptes, stockage chiffré) | ⬜ |
-| 6 | Interface web complète | ⬜ |
+| 5 | API serveur Axum (comptes, stockage chiffré) — MVP en mémoire | ✅ Fait |
+| 6 | Persistance serveur (SQLite) + interface web complète | ⬜ |
 | 7 | 2FA TOTP (authenticator) | ⬜ |
 | 8 | Clés FIDO2 / WebAuthn (YubiKey, Trustkey) | ⬜ |
 | 9 | Vérification SMS | ⬜ |
