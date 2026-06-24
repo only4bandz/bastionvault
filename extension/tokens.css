@@ -1,0 +1,119 @@
+/* ─────────────────────────────────────────────────────────────────────────
+   Bastion design tokens — THE single source of truth for the extension
+   (popup, options) and mirrored into the web app (app/src/index.css) and the
+   inline content overlay. Edit here; keep the others in sync.
+
+   Self-hosted fonts (no CDN — privacy). Dark is default; [data-theme="light"]
+   is a full second theme. Includes global focus-visible + reduced-motion.
+   ───────────────────────────────────────────────────────────────────────── */
+
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+  font-style: normal;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: swap;
+  font-style: normal;
+}
+
+:root {
+  /* elevation ramp (dark, default) */
+  --bg: #0a0c12;
+  --surface-1: #11151f;
+  --surface-2: #161b28;
+  --surface-3: #1b2230;
+  --line: #232b3b;
+  --line-strong: #2f3648;
+
+  /* text */
+  --text: #f0f2f8;
+  --text-2: #9aa3b7; /* AA on surfaces */
+  --text-3: #6f778f; /* tertiary / labels */
+
+  /* accent + semantic */
+  --accent: #7c6cff;
+  --accent-2: #9a8cff;     /* light stop / links / icon-on-active */
+  --accent-press: #5a47e6; /* deep stop / pressed */
+  --accent-soft: rgba(124, 108, 255, 0.14);
+  --ok: #3ad29f;
+  --warn: #f6c65b;
+  --danger: #ff5d6c;
+  --info: #47b5ff;
+  --on-accent: #0a0c12; /* dark text on the bright accent button (more legible/premium) */
+  --focus: rgba(124, 108, 255, 0.5);
+
+  /* radii / spacing / shadow */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 8px 24px -10px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 16px 44px -14px rgba(0, 0, 0, 0.6);
+
+  /* motion */
+  --ease: cubic-bezier(0.22, 0.8, 0.36, 1);
+
+  /* type */
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* back-compat aliases (older CSS used these names) — keep until fully migrated */
+  --panel: var(--surface-1);
+  --panel-2: var(--surface-2);
+  --muted: var(--text-2);
+}
+
+[data-theme="light"] {
+  --bg: #f7f8fc;
+  --surface-1: #ffffff;
+  --surface-2: #f1f2f8;
+  --surface-3: #e9ebf3;
+  --line: #e5e7f0;
+  --line-strong: #d4d8e4;
+  --text: #1a1d27;
+  --text-2: #5b6478;
+  --text-3: #858da0;
+  --accent: #6a5af0; /* darker for AA on white */
+  --accent-2: #7c6cff;
+  --accent-press: #5546d6;
+  --accent-soft: rgba(106, 90, 240, 0.1);
+  --ok: #12a37a;
+  --warn: #c98a16;
+  --danger: #e23950;
+  --info: #2f7fd1;
+  --on-accent: #ffffff;
+  --focus: rgba(106, 90, 240, 0.4);
+  --shadow-1: 0 1px 2px rgba(20, 24, 40, 0.08);
+  --shadow-2: 0 8px 24px -10px rgba(20, 24, 40, 0.18);
+  --shadow-pop: 0 16px 44px -14px rgba(20, 24, 40, 0.22);
+}
+
+/* mono numerals never confuse 0/O or 1/l in codes & passwords */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums slashed-zero;
+  letter-spacing: 0.2px;
+}
+
+/* visible focus on every interactive element (keyboard a11y) */
+:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus);
+  border-radius: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

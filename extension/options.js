@@ -2,10 +2,13 @@
 // may live in chrome.storage. For a non-localhost server we also request the
 // matching host permission (declared as optional) so the worker can reach it.
 
+import { initTheme, applyTheme } from "./lib/theme.js";
+
 const DEFAULT_SERVER = "http://127.0.0.1:7777";
 const input = document.getElementById("server");
 const saved = document.getElementById("saved");
 const permnote = document.getElementById("permnote");
+const theme = document.getElementById("theme");
 
 function originPattern(url) {
   try {
@@ -29,10 +32,15 @@ const keep = document.getElementById("keep");
 const DEFAULT_KEEP_MINUTES = 60;
 
 (async () => {
+  const current = await initTheme();
+  theme.value = current;
   const { serverUrl, keepUnlockMinutes } = await chrome.storage.local.get(["serverUrl", "keepUnlockMinutes"]);
   input.value = serverUrl || DEFAULT_SERVER;
   keep.value = String(keepUnlockMinutes || DEFAULT_KEEP_MINUTES);
 })();
+
+// Live preview while choosing (persisted on Save).
+theme.addEventListener("change", () => applyTheme(theme.value));
 
 document.getElementById("save").addEventListener("click", async () => {
   saved.textContent = "";
@@ -56,7 +64,8 @@ document.getElementById("save").addEventListener("click", async () => {
     }
   }
 
-  await chrome.storage.local.set({ serverUrl: url, keepUnlockMinutes: Number(keep.value) });
+  await chrome.storage.local.set({ serverUrl: url, keepUnlockMinutes: Number(keep.value), theme: theme.value });
+  applyTheme(theme.value);
   saved.textContent = "Saved ✓";
   permnote.style.color = "var(--muted)";
   const label = keep.selectedOptions[0]?.textContent || `${keep.value} min`;

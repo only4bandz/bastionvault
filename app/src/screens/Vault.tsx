@@ -35,6 +35,21 @@ function CardSubtitle({ item }: { item: VaultItem }): JSX.Element {
 
 type Nav = "vault" | "generator" | "health" | "soon";
 
+const PAGE_SIZE = 50;
+
+/** Page numbers to show, with "…" gaps for long ranges (e.g. 1 … 4 5 6 … 12). */
+function pageNumbers(cur: number, total: number): (number | "…")[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const out: (number | "…")[] = [1];
+  const start = Math.max(2, cur - 1);
+  const end = Math.min(total - 1, cur + 1);
+  if (start > 2) out.push("…");
+  for (let p = start; p <= end; p++) out.push(p);
+  if (end < total - 1) out.push("…");
+  out.push(total);
+  return out;
+}
+
 function timeAgo(ts: number): string {
   const d = Math.floor((Date.now() - ts) / 1000);
   if (d < 60) return "just now";
@@ -70,6 +85,7 @@ export function Vault({
   const [editor, setEditor] = useState<null | "new" | VaultItem>(null);
   const [detail, setDetail] = useState<VaultItem | null>(null);
   const [importing, setImporting] = useState(false);
+  const [page, setPage] = useState(1);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -78,6 +94,12 @@ export function Vault({
       .filter((i) => !q || i.title.toLowerCase().includes(q) || (i.username ?? "").toLowerCase().includes(q) || (i.url ?? "").toLowerCase().includes(q))
       .sort((a, b) => b.updatedAt - a.updatedAt);
   }, [items, tab, query]);
+
+  // Paginate so a 270-item vault doesn't scroll forever.
+  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount);
+  const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+  useEffect(() => { setPage(1); }, [query, tab]); // reset to first page on filter change
 
   function copy(text: string, what: string) {
     navigator.clipboard?.writeText(text);
@@ -188,7 +210,7 @@ export function Vault({
               ) : (
                 <div className="list">
                   <div className="list-head"><span>Title</span><span>Last updated</span><span style={{ textAlign: "right" }}>Type</span></div>
-                  {filtered.map((i) => (
+                  {paged.map((i) => (
                     <div className="row" key={i.id} onClick={() => setDetail(i)}>
                       <div className="title">
                         <Favicon item={i} size={36} />
@@ -218,6 +240,25 @@ export function Vault({
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {pageCount > 1 && (
+                <div className="pager">
+                  <span className="pager-info">
+                    {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length}
+                  </span>
+                  <div className="pager-btns">
+                    <button className="pg" disabled={safePage === 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button>
+                    {pageNumbers(safePage, pageCount).map((p, idx) =>
+                      p === "…" ? (
+                        <span key={`e${idx}`} className="pg-gap">…</span>
+                      ) : (
+                        <button key={p} className={`pg${p === safePage ? " active" : ""}`} onClick={() => setPage(p)}>{p}</button>
+                      )
+                    )}
+                    <button className="pg" disabled={safePage === pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button>
+                  </div>
                 </div>
               )}
             </>

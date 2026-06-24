@@ -2,7 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="dark light" />
+    <link rel="stylesheet" href="tokens.css" />
     <link rel="stylesheet" href="options.css" />
     <title>Bastion — Settings</title>
   </head>
@@ -20,6 +21,15 @@
       <div class="field">
         <label for="server">Server URL</label>
         <input class="input" id="server" type="url" placeholder="http://127.0.0.1:7777" />
+      </div>
+
+      <div class="field">
+        <label for="theme">Appearance</label>
+        <select class="input" id="theme">
+          <option value="system">System</option>
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+        </select>
       </div>
 
       <div class="field">

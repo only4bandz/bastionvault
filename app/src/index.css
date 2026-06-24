@@ -1,4 +1,17 @@
 /* ─── Bastion — design system ─────────────────────────────────────────── */
+/* Self-hosted fonts (no CDN — privacy). Served from app/public/fonts. */
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/Inter.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono.woff2") format("woff2");
+  font-weight: 100 800;
+  font-display: swap;
+}
 :root {
   --bg: #0a0c12;
   --bg-2: #0d1019;
@@ -74,7 +87,22 @@ a { color: var(--accent-2); }
 .input-row .input { flex: 1; }
 
 .pill { display: inline-block; font-size: 10px; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--line-2); color: var(--text-dim); letter-spacing: .03em; }
-.mono { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace; }
+.mono { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace; font-variant-numeric: tabular-nums slashed-zero; }
+
+/* ── pagination ── */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 2px 4px; flex-wrap: wrap; }
+.pager-info { color: var(--text-faint); font-size: 12.5px; }
+.pager-btns { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.pg {
+  min-width: 32px; height: 32px; padding: 0 8px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line); background: var(--surface); color: var(--text-dim);
+  font: 600 13px/1 inherit; font-variant-numeric: tabular-nums; cursor: pointer;
+  transition: background-color .12s ease, color .12s ease, border-color .12s ease;
+}
+.pg:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.pg.active { background: var(--accent); border-color: var(--accent); color: #0a0c12; }
+.pg:disabled { opacity: .4; cursor: default; }
+.pg-gap { min-width: 20px; text-align: center; color: var(--text-faint); }
 .muted { color: var(--text-dim); }
 .faint { color: var(--text-faint); }
 
