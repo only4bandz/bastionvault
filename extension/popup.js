@@ -77,6 +77,9 @@ const ICON = {
   regen: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>',
   key: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 8.15-8.15"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>',
   send: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg>',
+  plus: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
+  trash: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>',
+  contacts: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.5 3-5.5 6-5.5s6 2 6 5.5"/><path d="M16 4a3.5 3.5 0 0 1 0 7"/><path d="M18.5 14.5c2 .8 3.5 2.4 3.5 5"/></svg>',
 };
 const SHIELD = '<svg class="logo" viewBox="0 0 32 32" aria-hidden><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9a8cff"/><stop offset="1" stop-color="#5a47e6"/></linearGradient></defs><path fill="url(#bg)" d="M16 2l11 4v8.5c0 7-4.7 12.9-11 15.5C9.7 27.4 5 21.5 5 14.5V6l11-4z"/><circle cx="16" cy="14.5" r="3" fill="#0a0c12"/><path fill="#0a0c12" d="M14.6 15.5h2.8l1 5.5h-4.8z"/></svg>';
 
@@ -390,12 +393,120 @@ function renderSendHome(body, bastionId) {
       <button class="iconbtn" id="copyid" title="Copy address">${ICON.copy}</button>
     </div>
     <p class="sub">Share this address so other Bastion users can send you
-    encrypted notes. Compose &amp; inbox arrive in the next update.</p>`;
+    encrypted notes.</p>
+    <button class="btn btn-block" id="contacts" style="margin-top:8px;display:flex;gap:10px;justify-content:flex-start">${ICON.contacts} Contacts</button>`;
   const c = document.getElementById("copyid");
   c?.addEventListener("click", () => {
     copyText(bastionId, "Bastion address");
     flashCheck(c);
   });
+  document.getElementById("contacts").addEventListener("click", () => showContacts());
+}
+
+// ── contacts ──
+function trustBadge(c) {
+  return c.verified
+    ? `<span class="badge ok">${ICON.shield} Verified</span>`
+    : `<span class="badge warn">Unverified</span>`;
+}
+
+function contactRow(c) {
+  return `<div class="contact" data-id="${esc(c.bastion_id)}">
+    <div class="ico" style="background:${colorFor(c.display || c.bastion_id)}">${esc((c.display || "?")[0].toUpperCase())}</div>
+    <div class="meta"><div class="t">${esc(c.display)}</div><div class="s mono">${esc(c.bastion_id)}</div></div>
+    ${trustBadge(c)}
+    <button class="iconbtn" data-del title="Remove">${ICON.trash}</button>
+  </div>`;
+}
+
+async function showContacts() {
+  const r = await send({ type: "CONTACTS_LIST" });
+  if (!r.ok || r.locked) return showUnlock({ server: currentServer });
+  const list = r.contacts || [];
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop">
+        <button class="iconbtn" id="back" title="Back">${ICON.back}</button>
+        <b style="flex:1;text-align:center;font-size:15px">Contacts</b>
+        <button class="iconbtn" id="add" title="Add contact">${ICON.plus}</button>
+      </div>
+      <div class="dscroll" id="c-body"></div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showSend());
+  document.getElementById("add").addEventListener("click", () => showAddContact());
+  const body = document.getElementById("c-body");
+  if (!list.length) {
+    body.innerHTML = `<div class="empty">No contacts yet.<br/>Add someone by their Bastion address.</div>`;
+    return;
+  }
+  body.innerHTML = list.map(contactRow).join("");
+  body.querySelectorAll(".contact[data-id]").forEach((row) => {
+    row.querySelector("[data-del]")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await send({ type: "CONTACTS_DELETE", bastionId: row.dataset.id });
+      showContacts();
+    });
+  });
+}
+
+function showAddContact() {
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Add contact</b><span style="width:30px"></span></div>
+      <div class="dscroll">
+        <div class="field"><label>Bastion address</label><input class="input mono" id="addr" placeholder="XEDU0BHFS74J4XCVVENVE2WGHY" autofocus /></div>
+        <div id="add-msg"></div>
+        <button class="btn btn-primary btn-block" id="find">Find</button>
+      </div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showContacts());
+  const find = document.getElementById("find");
+  const go = async () => {
+    const addr = document.getElementById("addr").value.trim();
+    find.disabled = true;
+    find.textContent = "Finding…";
+    const r = await send({ type: "CONTACTS_RESOLVE", bastionId: addr });
+    if (r.ok) return showVerify(r);
+    document.getElementById("add-msg").innerHTML = `<div class="callout">${esc(r.error || "Not found.")}</div>`;
+    find.disabled = false;
+    find.textContent = "Find";
+  };
+  find.addEventListener("click", go);
+  document.getElementById("addr").addEventListener("keydown", (e) => e.key === "Enter" && go());
+}
+
+function showVerify(r) {
+  const grouped = String(r.safety_number || "").replace(/(\d{5})(?=\d)/g, "$1 ");
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Verify contact</b><span style="width:30px"></span></div>
+      <div class="dscroll">
+        <div class="field"><label>Name (optional)</label><input class="input" id="name" placeholder="${esc(r.bastionId)}" /></div>
+        <div class="dlabel" style="margin-top:8px">Safety number</div>
+        <div class="safety mono">${esc(grouped)}</div>
+        <p class="sub">Compare these 60 digits with the owner of <span class="mono">${esc(r.bastionId)}</span> over a separate, trusted channel (in person, a call). If they match, the connection is genuinely end-to-end — a malicious server can't impersonate them.</p>
+        <button class="btn btn-primary btn-block" id="verify">Numbers match — verify &amp; save</button>
+        <button class="btn btn-block" id="saveunv" style="margin-top:6px">Save without verifying</button>
+        <div id="v-msg" style="margin-top:8px"></div>
+      </div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showAddContact());
+  const save = async (verified) => {
+    const display = document.getElementById("name").value.trim();
+    const rr = await send({
+      type: "CONTACTS_SAVE",
+      bastionId: r.bastionId,
+      public: r.public,
+      pinFp: r.pinFp,
+      safety_number: r.safety_number,
+      display,
+      verified,
+    });
+    if (rr.ok) return showContacts();
+    document.getElementById("v-msg").innerHTML = `<div class="callout">${esc(rr.error || "Could not save.")}</div>`;
+  };
+  document.getElementById("verify").addEventListener("click", () => save(true));
+  document.getElementById("saveunv").addEventListener("click", () => save(false));
 }
 
 async function showDetail(id) {
