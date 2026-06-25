@@ -25,6 +25,19 @@ export interface VaultData {
   manifest: Blob | null;
 }
 
+/** A published Send identity (opaque to the server; routing/crypto only). */
+export interface SendPublic {
+  enc_pub: number[];
+  sig_pub: number[];
+  key_version: number;
+}
+export interface InboxItem {
+  message_id: string;
+  blob: unknown;
+  created_at: number;
+  expires_at: number | null;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(status: number, message: string) {
@@ -63,4 +76,16 @@ export const api = {
     req<void>("PUT", `/vault/items/${encodeURIComponent(id)}`, token, { blob }),
   deleteItem: (token: string, id: string) =>
     req<void>("DELETE", `/vault/items/${encodeURIComponent(id)}`, token),
+
+  // ── Bastion Send ──
+  publishIdentity: (token: string, pub: SendPublic) =>
+    req<{ bastion_id: string }>("PUT", "/send/identity", token, pub),
+  whoami: (token: string) => req<{ bastion_id: string; public: SendPublic }>("GET", "/send/whoami", token),
+  directory: (token: string, bastionId: string) =>
+    req<SendPublic>("GET", `/send/directory/${encodeURIComponent(bastionId)}`, token),
+  sendBlob: (token: string, body: { recipient_id: string; message_id: string; blob: unknown; expires_at?: number | null }) =>
+    req<void>("POST", "/send", token, body),
+  inbox: (token: string) => req<InboxItem[]>("GET", "/send/inbox", token),
+  inboxDelete: (token: string, messageId: string) =>
+    req<void>("DELETE", `/send/inbox/${encodeURIComponent(messageId)}`, token),
 };

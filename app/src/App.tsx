@@ -5,6 +5,7 @@ import { Unlock } from "./screens/Unlock";
 import { Vault } from "./screens/Vault";
 import { ensureWasm, register, unlock, type Account } from "./lib/wasm";
 import { api, ApiError, type Blob, type Registration } from "./lib/api";
+import { SEND_IDENTITY_ID } from "./lib/send";
 import type { VaultItem } from "./lib/types";
 
 type Phase = "welcome" | "reveal" | "unlock" | "vault";
@@ -126,6 +127,16 @@ export default function App(): JSX.Element {
     }
     const tok = await api.login(em, acc.auth_secret);
     const vault = await api.getVault(tok);
+    // Load the Send identity (if enabled) so has_send_identity works; it's a
+    // reserved item, kept out of the vault list by loadItems.
+    const idItem = vault.items[SEND_IDENTITY_ID];
+    if (idItem) {
+      try {
+        acc.load_send_identity(JSON.stringify(idItem));
+      } catch {
+        /* malformed reserved item */
+      }
+    }
     setAccount(acc);
     setEmail(em);
     setToken(tok);
@@ -201,6 +212,8 @@ export default function App(): JSX.Element {
         <Vault
           email={email}
           items={items}
+          account={account}
+          token={token}
           onUpsert={upsert}
           onDelete={remove}
           onImport={importItems}

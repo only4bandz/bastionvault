@@ -12,6 +12,8 @@ import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { strength } from "../lib/generator";
 import { lookupBin } from "../lib/bin";
 import type { ImportResult } from "../lib/import";
+import type { Account } from "../lib/wasm";
+import { Send } from "./Send";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
 function CardSubtitle({ item }: { item: VaultItem }): JSX.Element {
@@ -33,7 +35,7 @@ function CardSubtitle({ item }: { item: VaultItem }): JSX.Element {
   return <>{label}</>;
 }
 
-type Nav = "vault" | "generator" | "health" | "soon";
+type Nav = "vault" | "generator" | "health" | "send" | "soon";
 
 const PAGE_SIZE = 50;
 
@@ -64,6 +66,8 @@ const typeIcon = (t: ItemType, size = 18) =>
 export function Vault({
   email,
   items,
+  account,
+  token,
   onUpsert,
   onDelete,
   onImport,
@@ -72,6 +76,8 @@ export function Vault({
 }: {
   email: string;
   items: VaultItem[];
+  account: Account | null;
+  token: string | null;
   onUpsert: (i: VaultItem) => void;
   onDelete: (id: string) => void;
   onImport: (r: ImportResult) => void;
@@ -126,8 +132,8 @@ export function Vault({
         <button className={`nav-item${nav === "vault" ? " active" : ""}`} onClick={() => go("vault")}>
           <span className="ico"><IcVault /></span> Vault
         </button>
-        <button className="nav-item" onClick={() => go("soon", "Shared items")}>
-          <span className="ico"><IcShared /></span> Shared
+        <button className={`nav-item${nav === "send" ? " active" : ""}`} onClick={() => go("send")}>
+          <span className="ico"><IcShared /></span> Send
         </button>
         <button className="nav-item" onClick={() => go("soon", "Trash")}>
           <span className="ico"><IcTrash /></span> Trash
@@ -272,6 +278,8 @@ export function Vault({
           )}
 
           {nav === "health" && <Health items={items} onOpen={(i) => setDetail(i)} />}
+
+          {nav === "send" && account && token && <Send account={account} token={token} toast={toast} />}
 
           {nav === "soon" && (
             <div className="empty">
