@@ -508,11 +508,13 @@ function showMessage(m) {
       document.getElementById("mp").addEventListener("keydown", (e) => e.key === "Enter" && go());
       return;
     }
+    // Reply only makes sense when we know who sent it (not anonymous).
+    const canReply = !!data.sender?.id;
     body.innerHTML = `
       ${banner}
       <div class="notebody">${esc(data.plaintext || "")}</div>
-      <button class="btn btn-block" id="reply" style="margin-top:10px;display:flex;gap:10px;justify-content:center">${ICON.send} Reply</button>`;
-    document.getElementById("reply").addEventListener("click", () => showCompose(data.sender?.id));
+      ${canReply ? `<button class="btn btn-block" id="reply" style="margin-top:10px;display:flex;gap:10px;justify-content:center">${ICON.send} Reply</button>` : ""}`;
+    if (canReply) document.getElementById("reply").addEventListener("click", () => showCompose(data.sender.id));
   };
   render(m);
 }
