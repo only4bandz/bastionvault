@@ -33,14 +33,23 @@
 use wasm_bindgen::prelude::*;
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use crypto_core::pinlock::{self, LockedRecord};
 use crypto_core::send::{self, IdentityKeys as SendIdentity, PublicIdentity, Sender};
-use crypto_core::{AccountSecret, EncryptedBlob, KdfParams, Manifest, Registration, Vault};
+use crypto_core::{kdf, AccountSecret, EncryptedBlob, KdfParams, Manifest, Registration, Vault};
 use std::collections::HashMap;
 use zeroize::Zeroize;
 
 /// Converts a displayable error into a `JsError` (opaque message, no secret).
 fn js_err<E: core::fmt::Display>(e: E) -> JsError {
     JsError::new(&e.to_string())
+}
+
+/// Decode a 16-byte lock salt from base64.
+fn decode_salt(b64: &str) -> Result<[u8; kdf::SALT_LEN], JsError> {
+    B64.decode(b64)
+        .map_err(js_err)?
+        .try_into()
+        .map_err(|_| JsError::new("bad lock salt length"))
 }
 
 /// Reserved vault-item id under which the Bastion Send identity is stored
@@ -51,6 +60,56 @@ const SEND_IDENTITY_ITEM_ID: &str = "bastion:send-identity";
 #[wasm_bindgen]
 pub fn send_identity_item_id() -> String {
     SEND_IDENTITY_ITEM_ID.to_string()
+}
+
+/// Reserved-item prefix for a lock-phrase-protected (re-encrypted) message.
+const SEND_LOCKED_ITEM_PREFIX: &str = "bastion:send-locked:";
+
+/// The reserved vault-item id for a locked record. **P1 contract:** the id is
+/// derived from the record's random `local_id`, NEVER the server-visible
+/// `message_id` — so the sync server can't correlate a deleted inbox message
+/// with a stored locked item (design §7).
+#[wasm_bindgen]
+pub fn send_locked_item_id(local_id: &str) -> String {
+    format!("{SEND_LOCKED_ITEM_PREFIX}{local_id}")
+}
+
+/// Mint fresh lock-phrase params for a contact: a random 16-byte salt + the
+/// WASM-safe default Argon2id params. Returns JSON `{ "salt": "<b64>", "kdf":
+/// { mem_kib, iterations, parallelism } }` to store on the contact.
+#[wasm_bindgen]
+pub fn send_lock_new_params() -> Result<String, JsError> {
+    let salt = kdf::generate_salt();
+    let out = serde_json::json!({
+        "salt": B64.encode(salt),
+        "kdf": pinlock::default_lock_kdf(),
+    });
+    serde_json::to_string(&out).map_err(js_err)
+}
+
+/// Open a locked record with the lock phrase + the contact's salt/params.
+/// Returns JSON `{ "plaintext": "...", "sender": { "state": ..., "id": ... } }`.
+/// A wrong phrase fails closed (opaque error). Pure: needs no vault/identity.
+#[wasm_bindgen]
+pub fn send_lock_open(
+    record_json: &str,
+    lock_phrase: &str,
+    lock_salt_b64: &str,
+    lock_kdf_json: &str,
+) -> Result<String, JsError> {
+    let record: LockedRecord = serde_json::from_str(record_json).map_err(js_err)?;
+    let salt = decode_salt(lock_salt_b64)?;
+    let kdf_params: KdfParams = serde_json::from_str(lock_kdf_json).map_err(js_err)?;
+    let opened =
+        pinlock::lock_open(&record, lock_phrase.as_bytes(), &salt, kdf_params).map_err(js_err)?;
+    let plaintext = String::from_utf8(opened.plaintext.to_vec()).map_err(js_err)?;
+    let (state, id) = match opened.sender {
+        Sender::Anonymous => ("anonymous", None),
+        Sender::Unverified(id) => ("unverified", Some(id)),
+        Sender::Verified(id) => ("verified", Some(id)),
+    };
+    let out = serde_json::json!({ "plaintext": plaintext, "sender": { "state": state, "id": id } });
+    serde_json::to_string(&out).map_err(js_err)
 }
 
 /// Safety number to compare out-of-band with a contact — binds both Bastion
@@ -302,6 +361,50 @@ impl Account {
             "sender": { "state": state, "id": id },
         });
         serde_json::to_string(&out).map_err(js_err)
+    }
+
+    /// Open a received `SendBlob` with this identity and **immediately**
+    /// re-encrypt the note under a contact's lock phrase, returning the
+    /// `LockedRecord` JSON. The identity-decrypted plaintext never crosses into
+    /// JS (the whole step runs in WASM) — see the lock-phrase design §5. The app
+    /// then stores the record as a vault item id [`send_locked_item_id`] (from
+    /// the record's `local_id`) and read-once-deletes the inbox blob.
+    ///
+    /// `verify_sender_json` (the pinned contact's `PublicIdentity`) records a
+    /// Verified trust state at lock time; `send_passphrase` is forwarded to the
+    /// underlying open if the message also carried a sender passphrase.
+    #[allow(clippy::too_many_arguments)]
+    pub fn send_lock_finalize(
+        &self,
+        blob_json: &str,
+        contact_id: &str,
+        created_at: f64,
+        send_passphrase: Option<String>,
+        verify_sender_json: Option<String>,
+        lock_phrase: &str,
+        lock_salt_b64: &str,
+        lock_kdf_json: &str,
+    ) -> Result<String, JsError> {
+        let blob: send::SendBlob = serde_json::from_str(blob_json).map_err(js_err)?;
+        let verifier: Option<PublicIdentity> = match &verify_sender_json {
+            Some(j) => Some(serde_json::from_str(j).map_err(js_err)?),
+            None => None,
+        };
+        let salt = decode_salt(lock_salt_b64)?;
+        let kdf_params: KdfParams = serde_json::from_str(lock_kdf_json).map_err(js_err)?;
+        let record = pinlock::lock_finalize(
+            &blob,
+            self.identity()?,
+            send_passphrase.as_deref().map(str::as_bytes),
+            verifier.as_ref(),
+            contact_id,
+            created_at as i64,
+            lock_phrase.as_bytes(),
+            &salt,
+            kdf_params,
+        )
+        .map_err(js_err)?;
+        serde_json::to_string(&record).map_err(js_err)
     }
 
     // ─── Integrity manifest (verification on the Rust/WASM side, not in JS) ───
