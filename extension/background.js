@@ -22,6 +22,10 @@ const DEFAULT_SERVER = "http://127.0.0.1:7777";
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
 const SESSION_KEY = "session"; // key in chrome.storage.session
+
+// Vault items under this prefix hold Bastion Send state (identity, contacts) —
+// never user entries; they must never surface in the vault list.
+const isReservedItem = (id) => id.startsWith("bastion:send-");
 const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
 
 // chrome.storage.session is TRUSTED_CONTEXTS by default (NOT readable by content
@@ -167,6 +171,7 @@ async function ensureSession() {
     const vault = await api.getVault(token);
     const items = new Map();
     for (const [id, blob] of Object.entries(vault.items || {})) {
+      if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
       try {
         items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
       } catch {
@@ -222,6 +227,7 @@ async function doUnlock(email, password, secretKey) {
 
   const items = new Map();
   for (const [id, blob] of Object.entries(vault.items || {})) {
+    if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
     try {
       items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
     } catch {

@@ -12,9 +12,14 @@ type Phase = "welcome" | "reveal" | "unlock" | "vault";
 const AUTO_LOCK_MS = 10 * 60 * 1000; // lock after 10 minutes of inactivity
 const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
 
+/** Vault items under this prefix hold Bastion Send state (identity, contacts),
+ * not user entries — never surface them in the vault list. */
+const isReservedItem = (id: string): boolean => id.startsWith("bastion:send-");
+
 function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
   const out: VaultItem[] = [];
   for (const [id, blob] of Object.entries(items)) {
+    if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
     try {
       out.push(JSON.parse(account.decrypt_item(JSON.stringify(blob), id)) as VaultItem);
     } catch {
