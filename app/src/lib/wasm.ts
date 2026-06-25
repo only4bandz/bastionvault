@@ -5,6 +5,7 @@ import init, {
   register,
   register_with,
   unlock,
+  send_safety_number,
   type Account,
 } from "../pkg/crypto_wasm.js";
 
@@ -16,7 +17,7 @@ export function ensureWasm(): Promise<unknown> {
   return ready;
 }
 
-export { register, register_with, unlock };
+export { register, register_with, unlock, send_safety_number };
 export type { Account };
 
 /** Shape returned by `Account.reveal_secret` (one-shot). */

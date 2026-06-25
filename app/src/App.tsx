@@ -5,7 +5,7 @@ import { Unlock } from "./screens/Unlock";
 import { Vault } from "./screens/Vault";
 import { ensureWasm, register, unlock, type Account } from "./lib/wasm";
 import { api, ApiError, type Blob, type Registration } from "./lib/api";
-import { SEND_IDENTITY_ID } from "./lib/send";
+import { SEND_IDENTITY_ID, loadContacts, type Contact } from "./lib/send";
 import type { VaultItem } from "./lib/types";
 
 type Phase = "welcome" | "reveal" | "unlock" | "vault";
@@ -36,6 +36,7 @@ export default function App(): JSX.Element {
   const [email, setEmail] = useState("");
   const [token, setToken] = useState<string | null>(null);
   const [items, setItems] = useState<VaultItem[]>([]);
+  const [sendContacts, setSendContacts] = useState<Contact[]>([]);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
 
@@ -51,6 +52,7 @@ export default function App(): JSX.Element {
     setAccount(null);
     setToken(null);
     setItems([]); // plaintext cleared; reloaded from the server on next unlock
+    setSendContacts([]);
     setPhase("unlock");
   }, [account, token]);
 
@@ -141,6 +143,7 @@ export default function App(): JSX.Element {
     setEmail(em);
     setToken(tok);
     setItems(loadItems(acc, vault.items));
+    setSendContacts(loadContacts(acc, vault.items));
     setPhase("vault");
   }, []);
 
@@ -214,6 +217,8 @@ export default function App(): JSX.Element {
           items={items}
           account={account}
           token={token}
+          sendContacts={sendContacts}
+          setSendContacts={setSendContacts}
           onUpsert={upsert}
           onDelete={remove}
           onImport={importItems}

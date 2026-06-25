@@ -225,3 +225,19 @@ a { color: var(--accent-2); }
 .field-label { font-size: 12px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
 .id-card { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 14px; }
 .id-card code { flex: 1; min-width: 0; font-size: 15px; letter-spacing: .5px; word-break: break-all; color: var(--text); }
+.link-back { background: none; border: none; color: var(--accent); cursor: pointer; font-size: inherit; padding: 0; }
+.link-back:hover { text-decoration: underline; }
+.contact-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.contact-row:last-child { border-bottom: none; }
+.contact-meta { flex: 1; min-width: 0; }
+.contact-name { font-weight: 600; }
+.contact-meta code { font-size: 12px; word-break: break-all; }
+.badge { flex: none; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 999px; }
+.badge-ok { color: #6ee7b7; background: rgba(58, 210, 159, .12); }
+.badge-warn { color: #ffd9a3; background: rgba(255, 180, 84, .14); }
+.safety-num {
+  font-family: "JetBrains Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums slashed-zero;
+  font-size: 18px; letter-spacing: 1px; line-height: 1.7; text-align: center;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 16px 12px; margin: 6px 0 12px;
+}

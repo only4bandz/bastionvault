@@ -13,6 +13,7 @@ import { strength } from "../lib/generator";
 import { lookupBin } from "../lib/bin";
 import type { ImportResult } from "../lib/import";
 import type { Account } from "../lib/wasm";
+import type { Contact } from "../lib/send";
 import { Send } from "./Send";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
@@ -68,6 +69,8 @@ export function Vault({
   items,
   account,
   token,
+  sendContacts,
+  setSendContacts,
   onUpsert,
   onDelete,
   onImport,
@@ -78,6 +81,8 @@ export function Vault({
   items: VaultItem[];
   account: Account | null;
   token: string | null;
+  sendContacts: Contact[];
+  setSendContacts: (c: Contact[]) => void;
   onUpsert: (i: VaultItem) => void;
   onDelete: (id: string) => void;
   onImport: (r: ImportResult) => void;
@@ -279,7 +284,15 @@ export function Vault({
 
           {nav === "health" && <Health items={items} onOpen={(i) => setDetail(i)} />}
 
-          {nav === "send" && account && token && <Send account={account} token={token} toast={toast} />}
+          {nav === "send" && account && token && (
+            <Send
+              account={account}
+              token={token}
+              contacts={sendContacts}
+              setContacts={setSendContacts}
+              toast={toast}
+            />
+          )}
 
           {nav === "soon" && (
             <div className="empty">
