@@ -383,9 +383,9 @@ pub fn seal(
         inner.sender_id = Some(sender_id.to_string());
         inner.sig = Some(b64(&sig.to_bytes()));
     }
-    let inner_bytes =
-        Zeroizing::new(serde_json::to_vec(&inner).map_err(|_| CryptoError::Malformed)?);
-    inner.plaintext.zeroize(); // wipe the lingering base64-plaintext String
+    let ser = serde_json::to_vec(&inner);
+    inner.plaintext.zeroize(); // wipe the base64-plaintext String regardless of outcome
+    let inner_bytes = Zeroizing::new(ser.map_err(|_| CryptoError::Malformed)?);
     let body_aad = header_aad(
         D_BODY,
         &message_id,
@@ -543,8 +543,9 @@ pub fn open(
     let inner_bytes = unpad(&padded)?;
     let mut inner: Inner =
         serde_json::from_slice(&inner_bytes).map_err(|_| CryptoError::Malformed)?;
-    let plaintext = Zeroizing::new(unb64(&inner.plaintext)?);
-    inner.plaintext.zeroize(); // wipe the lingering base64-plaintext String
+    let decoded = unb64(&inner.plaintext);
+    inner.plaintext.zeroize(); // wipe the base64-plaintext String regardless of outcome
+    let plaintext = Zeroizing::new(decoded?);
 
     // ── determine sender trust state ──
     let sender = match (&inner.sender_id, &inner.sig) {

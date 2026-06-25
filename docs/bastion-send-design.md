@@ -29,6 +29,19 @@ Trust hinges on the recipient's **public key being authentic** — guaranteed on
 by out-of-band **safety-number** verification (§6). Unverified = TOFU with the
 server as a *trusted* key directory (lower assurance; must be visibly labeled).
 
+### No forward secrecy (accepted tradeoff)
+The seal uses an **ephemeral** sender key per message but the recipient's
+**static** X25519 identity key, so there is **no perfect forward secrecy** with
+respect to that key: an attacker who records the (server-held) blobs and *later*
+steals the recipient's `x_priv` can recompute `shared = DH(x_priv, eph_pub)` and
+decrypt the captured history. This is the standard sealed-box / Bitwarden-Send
+tradeoff — a Double Ratchet needs online, stateful sessions that don't fit async
+1→1 notes, so it's out of scope. Two things narrow the window in practice:
+**key rotation** (§11) cuts off future messages, and a **finalized lock phrase**
+([`bastion-pin-lock-design.md`](bastion-pin-lock-design.md)) re-encrypts a
+received note under a phrase-derived key and deletes the server original — so a
+future `x_priv` theft can no longer recover those messages.
+
 ## 3. Identity keys
 At first use, the client generates **two** keypairs:
 - **X25519** (`enc`) — encryption (sealed-box recipient key).

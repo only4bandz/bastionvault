@@ -47,6 +47,7 @@ pub mod aead;
 pub mod error;
 pub mod kdf;
 pub mod manifest;
+pub mod pinlock;
 pub mod secret;
 pub mod send;
 pub mod vault;
@@ -59,6 +60,7 @@ pub use aead::EncryptedBlob;
 pub use error::{CryptoError, Result};
 pub use kdf::KdfParams;
 pub use manifest::{IntegrityReport, Manifest, ManifestEntry};
+pub use pinlock::{default_lock_kdf, lock_finalize, lock_open, LockedOpened, LockedRecord};
 pub use send::{
     open as send_open, safety_number, seal as send_seal, IdentityKeys, OpenedMessage,
     PublicIdentity, SendBlob, Sender,
