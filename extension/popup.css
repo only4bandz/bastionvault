@@ -149,6 +149,17 @@ body {
 .opt { display: flex; align-items: center; gap: 10px; padding: 9px 2px; cursor: pointer; }
 .opt input { width: 16px; height: 16px; accent-color: var(--accent); }
 
+/* ── Bastion Send ── */
+.send-hero { text-align: center; padding: 18px 8px 16px; }
+.send-hero .logo { width: 48px; height: 48px; }
+.send-hero h2 { margin: 12px 0 6px; font-size: 18px; }
+#send-body .sub { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.idcard {
+  display: flex; align-items: center; gap: 8px; margin: 6px 0 12px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px;
+}
+.idtext { flex: 1; min-width: 0; font-size: 14px; word-break: break-all; letter-spacing: .5px; }
+
 /* ── toast ── */
 .toast {
   position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);
