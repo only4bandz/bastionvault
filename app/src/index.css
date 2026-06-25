@@ -216,3 +216,12 @@ a { color: var(--accent-2); }
 .row-copy:last-child { border-bottom: none; }
 .row-copy .k { width: 110px; font-size: 12px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; }
 .row-copy .v { flex: 1; font-size: 14px; word-break: break-all; }
+
+/* ── Bastion Send ── */
+.send-enable { text-align: center; }
+.send-hero { padding: 8px 4px 18px; color: var(--text-dim); }
+.send-hero h3 { margin: 12px 0 8px; color: var(--text); font-size: 17px; }
+.send-hero p { margin: 0 auto; max-width: 380px; line-height: 1.55; }
+.field-label { font-size: 12px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+.id-card { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 14px; }
+.id-card code { flex: 1; min-width: 0; font-size: 15px; letter-spacing: .5px; word-break: break-all; color: var(--text); }
