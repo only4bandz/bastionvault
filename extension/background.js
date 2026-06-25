@@ -553,8 +553,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             if (!(e instanceof ApiError && e.status === 404)) throw e; // 404 = not published yet
           }
           if (s.account.has_send_identity) {
-            s.sendBastionId = who?.bastion_id || s.sendBastionId || null;
-            sendResponse({ ok: true, bastionId: s.sendBastionId });
+            // Identity already created locally. Make sure it's published (this
+            // self-heals an earlier publish that failed, e.g. a stale server).
+            const bastionId =
+              who?.bastion_id ||
+              (await api.publishIdentity(s.token, JSON.parse(s.account.send_identity_public()))).bastion_id;
+            s.sendBastionId = bastionId;
+            sendResponse({ ok: true, bastionId });
             break;
           }
           if (who) {

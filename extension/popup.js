@@ -361,20 +361,40 @@ function renderEnableSend(body) {
 }
 
 function renderSendHome(body, bastionId) {
+  // Self-heal: Send is enabled locally but the address isn't published yet
+  // (e.g. an earlier publish failed). Offer to publish.
+  if (!bastionId) {
+    body.innerHTML = `
+      <div class="send-hero">${SHIELD}<h2>Almost there</h2>
+        <p class="sub">Send is enabled on this device, but your Bastion address
+        isn't published yet. Make sure your server is running, then publish.</p>
+      </div>
+      <button class="btn btn-primary btn-block" id="pub">Publish my address</button>
+      <div id="enable-msg" style="margin-top:10px"></div>`;
+    const btn = document.getElementById("pub");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "Publishing…";
+      const r = await send({ type: "SEND_ENABLE" });
+      if (r.ok && r.bastionId) return renderSendHome(body, r.bastionId);
+      document.getElementById("enable-msg").innerHTML = `<div class="callout">${esc(r.error || "Could not publish your address.")}</div>`;
+      btn.disabled = false;
+      btn.textContent = "Publish my address";
+    });
+    return;
+  }
   body.innerHTML = `
     <div class="dlabel" style="margin-top:10px">Your Bastion address</div>
     <div class="idcard">
-      <span class="idtext mono">${esc(bastionId || "—")}</span>
+      <span class="idtext mono">${esc(bastionId)}</span>
       <button class="iconbtn" id="copyid" title="Copy address">${ICON.copy}</button>
     </div>
     <p class="sub">Share this address so other Bastion users can send you
     encrypted notes. Compose &amp; inbox arrive in the next update.</p>`;
   const c = document.getElementById("copyid");
   c?.addEventListener("click", () => {
-    if (bastionId) {
-      copyText(bastionId, "Bastion address");
-      flashCheck(c);
-    }
+    copyText(bastionId, "Bastion address");
+    flashCheck(c);
   });
 }
 
