@@ -257,3 +257,6 @@ a { color: var(--accent-2); }
 .trust-warn { color: #ffd9a3; background: rgba(255, 180, 84, .1); border-color: rgba(255, 180, 84, .25); }
 .trust-danger { color: #fca5a5; background: rgba(255, 93, 110, .1); border-color: rgba(255, 93, 110, .3); }
 .note-body { white-space: pre-wrap; word-break: break-word; line-height: 1.6; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 14px 16px; }
+.contact-addr { cursor: pointer; }
+.contact-addr:hover { color: var(--text); text-decoration: underline; }
+.icon-btn-ok { color: #6ee7b7; font-size: 16px; font-weight: 700; }

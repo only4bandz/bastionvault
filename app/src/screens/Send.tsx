@@ -14,9 +14,15 @@ import {
   type Opened,
   type InboxItem,
 } from "../lib/send";
-import { IcCopy, IcShared, IcPlus, IcTrash } from "../components/icons";
+import { IcCopy, IcShared, IcPlus, IcTrash, IcEdit } from "../components/icons";
 
 type View = "home" | "contacts" | "add" | "verify" | "compose" | "inbox";
+
+/** Redact the middle of a long Bastion address: NXKXR2TT…VWY5RI. */
+const shortId = (id: string): string => (id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id);
+/** A contact's label: its name, or the redacted address when unnamed. */
+const contactLabel = (c: { display: string; bastion_id: string }): string =>
+  c.display === c.bastion_id ? shortId(c.bastion_id) : c.display;
 
 export function Send({
   account,
@@ -39,6 +45,8 @@ export function Send({
   const [view, setView] = useState<View>("home");
   const [resolved, setResolved] = useState<Resolved | null>(null);
   const [replyTo, setReplyTo] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -123,22 +131,69 @@ export function Send({
           {contacts.length === 0 ? (
             <div className="faint" style={{ padding: "8px 0" }}>No contacts yet. Add someone by their Bastion address.</div>
           ) : (
-            contacts.map((c) => (
-              <div className="contact-row" key={c.bastion_id}>
-                <div className="contact-meta">
-                  <div className="contact-name">{c.display}</div>
-                  {c.display !== c.bastion_id && <code className="faint">{c.bastion_id}</code>}
+            contacts.map((c) => {
+              const editing = editingId === c.bastion_id;
+              const saveName = () => {
+                const name = editName.trim() || c.bastion_id;
+                persist(contacts.map((x) => (x.bastion_id === c.bastion_id ? { ...x, display: name } : x)));
+                setEditingId(null);
+              };
+              return (
+                <div className="contact-row" key={c.bastion_id}>
+                  <div className="contact-meta">
+                    {editing ? (
+                      <input
+                        className="input"
+                        value={editName}
+                        autoFocus
+                        placeholder="Contact name"
+                        onChange={(e) => setEditName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") saveName();
+                          if (e.key === "Escape") setEditingId(null);
+                        }}
+                      />
+                    ) : (
+                      <>
+                        <div className="contact-name">{contactLabel(c)}</div>
+                        <code
+                          className="faint contact-addr"
+                          title="Copy full address"
+                          onClick={() => {
+                            navigator.clipboard?.writeText(c.bastion_id);
+                            toast("Bastion address copied");
+                          }}
+                        >
+                          {shortId(c.bastion_id)}
+                        </code>
+                      </>
+                    )}
+                  </div>
+                  <span className={`badge ${c.verified ? "badge-ok" : "badge-warn"}`}>{c.verified ? "Verified" : "Unverified"}</span>
+                  {editing ? (
+                    <button className="icon-btn icon-btn-ok" title="Save name" onClick={saveName}>✓</button>
+                  ) : (
+                    <button
+                      className="icon-btn"
+                      title="Rename"
+                      onClick={() => {
+                        setEditingId(c.bastion_id);
+                        setEditName(c.display === c.bastion_id ? "" : c.display);
+                      }}
+                    >
+                      <IcEdit size={16} />
+                    </button>
+                  )}
+                  <button
+                    className="icon-btn"
+                    title="Remove"
+                    onClick={() => persist(contacts.filter((x) => x.bastion_id !== c.bastion_id))}
+                  >
+                    <IcTrash size={16} />
+                  </button>
                 </div>
-                <span className={`badge ${c.verified ? "badge-ok" : "badge-warn"}`}>{c.verified ? "Verified" : "Unverified"}</span>
-                <button
-                  className="icon-btn"
-                  title="Remove"
-                  onClick={() => persist(contacts.filter((x) => x.bastion_id !== c.bastion_id))}
-                >
-                  <IcTrash size={16} />
-                </button>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </>
@@ -302,7 +357,7 @@ function Compose({
         <select className="input" value={to} onChange={(e) => setTo(e.target.value)}>
           {contacts.map((c) => (
             <option key={c.bastion_id} value={c.bastion_id}>
-              {c.display} {c.verified ? "✓" : "(unverified)"}
+              {contactLabel(c)} {c.verified ? "✓" : "(unverified)"}
             </option>
           ))}
         </select>
@@ -414,7 +469,7 @@ function VerifyContact({
 // ── inbox ──
 function senderName(o: Opened): string {
   if (o.sender?.state === "anonymous") return "Anonymous sender";
-  return o.display || o.sender?.id || "Unknown sender";
+  return o.display || (o.sender?.id ? shortId(o.sender.id) : "Unknown sender");
 }
 function senderChip(o: Opened): JSX.Element {
   if (o.keyChanged) return <span className="badge badge-danger">Key changed</span>;
@@ -535,11 +590,11 @@ function Message({
   const banner = data.keyChanged ? (
     <div className="trust trust-danger">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>
   ) : data.sender?.state === "verified" ? (
-    <div className="trust trust-ok">Verified — from {data.display || data.sender.id}</div>
+    <div className="trust trust-ok">Verified — from {data.display || shortId(data.sender.id!)}</div>
   ) : data.sender?.state === "anonymous" ? (
     <div className="trust">Anonymous sender — Bastion can't tell you who sent this.</div>
   ) : (
-    <div className="trust trust-warn">Unverified sender{data.sender?.id ? ` · ${data.sender.id}` : ""}. Add &amp; verify them to confirm their identity.</div>
+    <div className="trust trust-warn">Unverified sender{data.sender?.id ? ` · ${shortId(data.sender.id)}` : ""}. Add &amp; verify them to confirm their identity.</div>
   );
 
   return (
