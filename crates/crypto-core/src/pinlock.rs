@@ -186,7 +186,9 @@ pub fn lock_finalize(
     lock_salt: &[u8; SALT_LEN],
     lock_kdf: KdfParams,
 ) -> Result<LockedRecord> {
-    lock_kdf.validate_for_unlock()?; // ceiling check (anti-DoS)
+    // Create path: enforce the security FLOOR (not just the ceiling) so a
+    // corrupted/weakened contact pin_kdf can't silently produce a weak lock.
+    lock_kdf.validate_for_new_vault()?;
 
     // Identity-decrypt in-crate only.
     let opened = send::open(blob, identity, send_passphrase, verify_sender)?;
@@ -201,9 +203,9 @@ pub fn lock_finalize(
         sender_state: state,
         sender_id: sid,
     };
-    let inner_bytes =
-        Zeroizing::new(serde_json::to_vec(&inner).map_err(|_| CryptoError::Malformed)?);
-    inner.plaintext.zeroize(); // wipe the lingering base64-plaintext String
+    let ser = serde_json::to_vec(&inner);
+    inner.plaintext.zeroize(); // wipe the base64-plaintext String regardless of outcome
+    let inner_bytes = Zeroizing::new(ser.map_err(|_| CryptoError::Malformed)?);
 
     let aad = lock_aad(contact_id, &message_id, &lock_kdf, lock_salt);
     let body = aead::encrypt(&lock_key, &inner_bytes, &aad)?;
@@ -252,8 +254,9 @@ pub fn lock_open(
     let inner_bytes = Zeroizing::new(aead::decrypt(&lock_key, &record.body, &aad)?);
     let mut inner: LockedInner =
         serde_json::from_slice(&inner_bytes).map_err(|_| CryptoError::Malformed)?;
-    let plaintext = Zeroizing::new(unb64(&inner.plaintext)?);
-    inner.plaintext.zeroize();
+    let decoded = unb64(&inner.plaintext);
+    inner.plaintext.zeroize(); // wipe the base64-plaintext String regardless of outcome
+    let plaintext = Zeroizing::new(decoded?);
 
     let sender = match (inner.sender_state, inner.sender_id.take()) {
         (0, None) => Sender::Anonymous,
@@ -269,12 +272,13 @@ pub fn lock_open(
 mod tests {
     use super::*;
 
-    // Tiny KDF so the Argon2id in tests stays fast; the real default is 128 MiB.
+    // Smallest params that still clear the create-path floor (19 MiB / 2 / 1),
+    // so the Argon2id in tests stays cheap; the real default is 128 MiB.
     fn test_kdf() -> KdfParams {
         KdfParams {
-            mem_kib: 8 * 1024,
-            iterations: 1,
-            parallelism: 1,
+            mem_kib: KdfParams::MIN_MEM_KIB,
+            iterations: KdfParams::MIN_ITERATIONS,
+            parallelism: KdfParams::MIN_PARALLELISM,
         }
     }
     const SALT: [u8; SALT_LEN] = [7u8; SALT_LEN];
@@ -428,6 +432,67 @@ mod tests {
             parallelism: 1,
         };
         assert!(lock_open(&rec, b"phrase here", &SALT, other).is_err());
+    }
+
+    #[test]
+    fn body_swap_across_records_rejected() {
+        // Two records under the SAME phrase+salt (hence the same lock_key, so the
+        // commitment check passes) but different contact/message ids. Grafting one
+        // record's body onto the other must fail — proving the AEAD AAD binds the
+        // body to its (contact_id, message_id), not just to the key.
+        let (blob_a, recip_a, _s) = signed_blob(b"alpha");
+        let (blob_b, recip_b, _t) = signed_blob(b"bravo");
+        let rec_a = lock_finalize(
+            &blob_a,
+            &recip_a,
+            None,
+            None,
+            "CA",
+            0,
+            b"shared phrase",
+            &SALT,
+            test_kdf(),
+        )
+        .unwrap();
+        let mut rec_b = lock_finalize(
+            &blob_b,
+            &recip_b,
+            None,
+            None,
+            "CB",
+            0,
+            b"shared phrase",
+            &SALT,
+            test_kdf(),
+        )
+        .unwrap();
+        rec_b.body = rec_a.body.clone(); // graft A's body; B keeps its own ids
+        assert!(lock_open(&rec_b, b"shared phrase", &SALT, test_kdf()).is_err());
+    }
+
+    #[test]
+    fn create_floor_enforced() {
+        // lock_finalize rejects below-floor params even though lock_open accepts
+        // them (ceiling-only) for legacy openability.
+        let (blob, recipient, _s) = signed_blob(b"x");
+        let weak = KdfParams {
+            mem_kib: 8 * 1024,
+            iterations: 1,
+            parallelism: 1,
+        };
+        assert!(weak.is_below_policy_floor());
+        assert!(lock_finalize(
+            &blob,
+            &recipient,
+            None,
+            None,
+            "C",
+            0,
+            b"phrase here",
+            &SALT,
+            weak,
+        )
+        .is_err());
     }
 
     #[test]

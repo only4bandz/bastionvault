@@ -126,12 +126,15 @@ test asserting no collision with vault or other Send domains.
 ```
 lock_commit = HKDF-SHA256(lock_key, info = "pm:v1:send/pin-lock/commit")   // 32 B
 
-aad = LP("pm:v1:send/pin-lock") ‖ LP(u8 version) ‖ LP(contact_id)
+aad = LP("pm:v1:send/pin-lock") ‖ version(u8=1) ‖ LP(contact_id)
       ‖ LP(message_id) ‖ LP(serialize(lock_kdf)) ‖ LP(lock_salt)
-      // LP(x) = u32-LE length ‖ x  (length-prefixed framing, never raw concat)
+      // LP(x) = u32-BE length ‖ x  (big-endian, matching send.rs `put`);
+      // the version is a single raw byte (consistent with Send's header AAD).
+      // serialize(lock_kdf) = mem_kib(u32-BE) ‖ iters(u32-BE) ‖ par(u32-BE).
+      // created_at is a display-only field — deliberately NOT in the AAD/body.
 
 ct  = XChaCha20-Poly1305(key = lock_key, nonce = random 24B, aad,
-                         pt = canonical{ plaintext, sender_state, sender_id, created_at })
+                         pt = canonical{ plaintext, sender_state, sender_id })
 ```
 
 Open: derive `lock_key`, check `lock_commit` in **constant time** (`ct_eq`), then
@@ -142,13 +145,15 @@ field (there is no `wrap_key` here).
 
 **Locked record (the vault item value):**
 ```
-{ v:1, local_id, contact_id, lock_commit, nonce, ct, created_at }
+{ v:1, local_id, contact_id, message_id, lock_commit, body: EncryptedBlob, created_at }
+   // body (nonce + ct) is the XChaCha20-Poly1305 EncryptedBlob from §4.3
 ```
 - `local_id`: **fresh random 128-bit id**. The vault item key is
   `bastion:send-locked:<local_id>` — **never** the server-visible `message_id`
-  (see §7 leak). `message_id` lives only inside the AAD/plaintext.
+  (see §7 leak). `message_id` is stored here too, but only inside the
+  **vault-encrypted** record (not a server-visible position) and is AAD-bound.
 - **Single salt source**: the salt comes from the contact only; it is bound via
-  AAD but **not** duplicated as a separate mutable field.
+  AAD but **not** duplicated as a separate mutable field in the record.
 - `contact_id` must be **stable and unique**; a delete+re-add MUST mint a new
   `contact_id` so an old locked blob can never bind onto a new contact.
 
