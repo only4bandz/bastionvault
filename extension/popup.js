@@ -551,9 +551,12 @@ function showMessage(m) {
         <button class="btn btn-primary btn-block" id="open">Open</button>`;
       const btn = document.getElementById("open");
       const go = async () => {
+        const passphrase = document.getElementById("mp").value;
         btn.disabled = true;
         btn.textContent = "Opening…";
-        const rr = await send({ type: "SEND_OPEN", messageId: m.message_id, passphrase: document.getElementById("mp").value });
+        const rr = await send({ type: "SEND_OPEN", messageId: m.message_id, passphrase });
+        // Opening revealed a lock contact → never show plaintext; secure it.
+        if (rr.ok && rr.locked) return showLockSecure({ message_id: rr.message_id, contactId: rr.contactId, display: rr.display }, passphrase);
         if (rr.ok) return render(rr);
         document.getElementById("mp-msg").innerHTML = `<div class="callout">${esc(rr.error || "Could not open.")}</div>`;
         btn.disabled = false;
@@ -568,7 +571,7 @@ function showMessage(m) {
   render(m);
 }
 
-function showLockSecure(m) {
+function showLockSecure(m, sendPassphrase) {
   app.innerHTML = `
     <div class="detail">
       <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Secure message</b><span style="width:30px"></span></div>
@@ -594,7 +597,7 @@ function showLockSecure(m) {
     const btn = e.currentTarget;
     btn.disabled = true;
     btn.textContent = "Securing…";
-    const rr = await send({ type: "SEND_LOCK_FINALIZE", messageId: m.message_id, contactId: m.contactId, phrase });
+    const rr = await send({ type: "SEND_LOCK_FINALIZE", messageId: m.message_id, contactId: m.contactId, phrase, passphrase: sendPassphrase });
     if (rr.ok) return renderOpenedNote(rr, { type: "SEND_LOCK_DELETE", localId: rr.local_id }, rr.sender?.id || null);
     document.getElementById("ls-msg").innerHTML = `<div class="callout">${esc(rr.error || "Could not secure.")}</div>`;
     btn.disabled = false;

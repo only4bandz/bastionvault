@@ -739,8 +739,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               messages.push({ message_id: m.message_id, created_at: m.created_at, expires_at: m.expires_at, ...opened });
             }
           }
-          // Already-locked records (vault items) shown as locked rows.
+          // Already-locked records (vault items) shown as locked rows, deduped
+          // by message_id (concurrent dual-device finalizes mint distinct items).
+          const seenLocked = new Set();
           for (const r of s.lockedRecords || []) {
+            if (seenLocked.has(r.message_id)) continue;
+            seenLocked.add(r.message_id);
             const c = (s.contacts || []).find((x) => x.bastion_id === r.contact_id);
             messages.push({ local_id: r.local_id, created_at: r.created_at, locked: true, pending: false, contactId: r.contact_id, display: c?.display || r.contact_id });
           }
@@ -756,6 +760,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (!cached) return sendResponse({ ok: false, error: "Message is no longer available." });
           const opened = openMessage(s, cached.blob, msg.passphrase);
           if (opened.error) return sendResponse({ ok: false, error: opened.error, needsPass: opened.needsPass });
+          // NO-PERSIST guard at the trust boundary: if opening revealed a
+          // lock-enabled contact (e.g. a sender-passphrase'd message whose sender
+          // we couldn't see at list time), NEVER return the plaintext — route to
+          // the lock-phrase secure flow instead.
+          const lc = opened.sender?.id ? lockContactFor(s, opened.sender.id) : null;
+          if (lc) {
+            return sendResponse({ ok: true, locked: true, pending: true, message_id: msg.messageId, contactId: lc.bastion_id, display: lc.display });
+          }
           sendResponse({ ok: true, message_id: msg.messageId, ...opened });
           break;
         }
@@ -778,6 +790,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
           await touchSession();
+          if (!msg.phrase || msg.phrase.length < 8) {
+            return sendResponse({ ok: false, error: "Lock phrase must be at least 8 characters." });
+          }
           const cached = s.inboxCache?.get(msg.messageId);
           if (!cached) return sendResponse({ ok: false, error: "Message is no longer available." });
           const contact = lockContactFor(s, msg.contactId);
@@ -788,7 +803,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               JSON.stringify(cached.blob),
               contact.bastion_id,
               cached.created_at || 0,
-              undefined,
+              msg.passphrase || undefined, // sender passphrase, if the message had one
               contact.verified ? JSON.stringify(contact.public) : undefined,
               msg.phrase,
               contact.lock_salt,
@@ -898,11 +913,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
           await touchSession();
+          const gone = (s.contacts || []).find((c) => c.bastion_id === msg.bastionId);
           // Hard-delete the contact's locked messages (design §7): they become
           // permanently unreadable, honoring the lock-phrase warning.
           const orphaned = (s.lockedRecords || []).filter((r) => r.contact_id === msg.bastionId);
           for (const r of orphaned) {
             try { await makeApi(s.server).deleteItem(s.token, SEND_LOCKED_PREFIX + r.local_id); } catch { /* already gone */ }
+          }
+          // For a lock contact, also purge any STILL-PENDING (un-secured) inbox
+          // messages from them — otherwise they'd revert to readable once the
+          // contact (and its lock flag) is gone, contradicting the warning.
+          if (gone?.lock_enabled) {
+            try {
+              const list = await makeApi(s.server).inbox(s.token);
+              for (const m of list || []) {
+                const opened = openMessage(s, m.blob, undefined);
+                if (opened.sender?.id === msg.bastionId) {
+                  try { await makeApi(s.server).inboxDelete(s.token, m.message_id); } catch { /* best effort */ }
+                }
+              }
+            } catch { /* inbox unreachable; best effort */ }
           }
           s.lockedRecords = (s.lockedRecords || []).filter((r) => r.contact_id !== msg.bastionId);
           s.contacts = (s.contacts || []).filter((x) => x.bastion_id !== msg.bastionId);
