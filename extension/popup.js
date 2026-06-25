@@ -394,13 +394,79 @@ function renderSendHome(body, bastionId) {
     </div>
     <p class="sub">Share this address so other Bastion users can send you
     encrypted notes.</p>
-    <button class="btn btn-block" id="contacts" style="margin-top:8px;display:flex;gap:10px;justify-content:flex-start">${ICON.contacts} Contacts</button>`;
+    <button class="btn btn-primary btn-block" id="compose" style="margin-top:8px;display:flex;gap:10px">${ICON.send} Compose note</button>
+    <button class="btn btn-block" id="contacts" style="margin-top:6px;display:flex;gap:10px;justify-content:flex-start">${ICON.contacts} Contacts</button>`;
   const c = document.getElementById("copyid");
   c?.addEventListener("click", () => {
     copyText(bastionId, "Bastion address");
     flashCheck(c);
   });
+  document.getElementById("compose").addEventListener("click", () => showCompose());
   document.getElementById("contacts").addEventListener("click", () => showContacts());
+}
+
+// ── compose ──
+async function showCompose(preselectId) {
+  const r = await send({ type: "CONTACTS_LIST" });
+  if (!r.ok || r.locked) return showUnlock({ server: currentServer });
+  const contacts = r.contacts || [];
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Compose</b><span style="width:30px"></span></div>
+      <div class="dscroll" id="compose-body"></div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showSend());
+  const body = document.getElementById("compose-body");
+  if (!contacts.length) {
+    body.innerHTML = `<div class="empty">Add a contact first.</div>
+      <button class="btn btn-primary btn-block" id="toc">Go to Contacts</button>`;
+    document.getElementById("toc").addEventListener("click", () => showContacts());
+    return;
+  }
+  const opts = contacts
+    .map((c) => `<option value="${esc(c.bastion_id)}"${c.bastion_id === preselectId ? " selected" : ""}>${esc(c.display)}${c.verified ? " ✓" : " (unverified)"}</option>`)
+    .join("");
+  body.innerHTML = `
+    <div class="field"><label>To</label><select class="input" id="to">${opts}</select></div>
+    <div class="field"><label>Note</label><textarea class="input" id="note" rows="5" placeholder="Your encrypted note…" autofocus></textarea></div>
+    <label class="opt"><input type="checkbox" id="signed" checked /> Sign it (the recipient can verify it's from you)</label>
+    <div class="field" style="margin-top:8px"><label>Extra passphrase (optional)</label><input class="input" id="pass" type="password" placeholder="shared out-of-band" /></div>
+    <div class="field"><label>Expires</label>
+      <select class="input" id="exp">
+        <option value="0">Never</option>
+        <option value="3600">1 hour</option>
+        <option value="86400">1 day</option>
+        <option value="604800">7 days</option>
+      </select>
+    </div>
+    <div id="send-msg"></div>
+    <button class="btn btn-primary btn-block" id="dosend">Send encrypted note</button>`;
+  const btn = document.getElementById("dosend");
+  btn.addEventListener("click", async () => {
+    const recipientId = document.getElementById("to").value;
+    const plaintext = document.getElementById("note").value;
+    const signed = document.getElementById("signed").checked;
+    const pass = document.getElementById("pass").value;
+    const expSec = Number(document.getElementById("exp").value);
+    if (!plaintext.trim()) {
+      document.getElementById("send-msg").innerHTML = `<div class="callout">Write a note first.</div>`;
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    const expiresAt = expSec ? Math.floor(Date.now() / 1000) + expSec : null;
+    const rr = await send({ type: "SEND_COMPOSE", recipientId, plaintext, passphrase: pass || undefined, signed, expiresAt });
+    if (rr.ok) {
+      toast("Note sent");
+      return showSend();
+    }
+    const msg = rr.keyChanged
+      ? "This contact's key changed — re-verify them before sending."
+      : rr.error || "Could not send.";
+    document.getElementById("send-msg").innerHTML = `<div class="callout">${esc(msg)}</div>`;
+    btn.disabled = false;
+    btn.textContent = "Send encrypted note";
+  });
 }
 
 // ── contacts ──

@@ -610,6 +610,60 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true, contacts: s.contacts || [] });
           break;
         }
+        case "SEND_COMPOSE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          if (!s.account.has_send_identity) return sendResponse({ ok: false, error: "Enable Send first." });
+          const contact = (s.contacts || []).find((c) => c.bastion_id === msg.recipientId);
+          if (!contact) return sendResponse({ ok: false, error: "Unknown recipient." });
+          if (!msg.plaintext) return sendResponse({ ok: false, error: "Write a note first." });
+          // BR6: for a verified contact, refuse if the published key changed.
+          if (contact.verified) {
+            try {
+              const live = await makeApi(s.server).directory(s.token, contact.bastion_id);
+              if ((await sha256hex(canonPublic(live))) !== contact.pinFp) {
+                return sendResponse({ ok: false, error: "key-changed", keyChanged: true });
+              }
+            } catch {
+              /* directory unreachable → fall back to the pinned key (offline) */
+            }
+          }
+          let myId = s.sendBastionId;
+          if (msg.signed && !myId) {
+            try { myId = (await makeApi(s.server).whoami(s.token))?.bastion_id || null; s.sendBastionId = myId; } catch { /* unpublished */ }
+          }
+          // Seal to the PINNED public (BR6), not a fresh directory fetch.
+          const blob = JSON.parse(
+            s.account.send_seal(
+              msg.plaintext,
+              contact.bastion_id,
+              JSON.stringify(contact.public),
+              msg.passphrase || undefined,
+              msg.signed ? myId || undefined : undefined
+            )
+          );
+          try {
+            await makeApi(s.server).sendBlob(s.token, {
+              recipient_id: blob.recipient_id,
+              message_id: blob.message_id,
+              blob,
+              expires_at: msg.expiresAt || null,
+            });
+          } catch (e) {
+            const code = e instanceof ApiError ? e.status : 0;
+            const map = {
+              413: "Message is too large (256 KiB max).",
+              409: "This message was already sent.",
+              429: "Too many sends, or the recipient's inbox is full. Try again later.",
+              404: "Recipient not found — they may have disabled Send.",
+              0: "Server unreachable. Nothing was sent.",
+            };
+            return sendResponse({ ok: false, error: map[code] || e?.message || "Send failed." });
+          }
+          sendResponse({ ok: true });
+          break;
+        }
         case "CONTACTS_RESOLVE": {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
