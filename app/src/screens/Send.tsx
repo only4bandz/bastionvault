@@ -5,12 +5,13 @@ import {
   sendEnable,
   saveContacts,
   resolveContact,
+  composeNote,
   type Contact,
   type Resolved,
 } from "../lib/send";
 import { IcCopy, IcShared, IcPlus, IcTrash } from "../components/icons";
 
-type View = "home" | "contacts" | "add" | "verify";
+type View = "home" | "contacts" | "add" | "verify" | "compose";
 
 export function Send({
   account,
@@ -153,6 +154,28 @@ export function Send({
     return <AddContact busy={busy} error={error} onBack={() => setView("contacts")} onFind={find} />;
   }
 
+  // ── Compose ──
+  if (view === "compose") {
+    return (
+      <Compose
+        contacts={contacts}
+        onBack={() => setView("home")}
+        onSend={async (recipientId, plaintext, opts) => {
+          const c = contacts.find((x) => x.bastion_id === recipientId);
+          if (!c) return { error: "Unknown recipient." };
+          const r = await composeNote(account, token, c, plaintext, opts).catch((e) => ({
+            error: (e as Error)?.message || "Send failed.",
+          }));
+          if ("ok" in r) {
+            toast("Note sent");
+            setView("home");
+          }
+          return r;
+        }}
+      />
+    );
+  }
+
   // ── Verify (safety number) ──
   if (view === "verify" && resolved) {
     const save = async (display: string, verified: boolean): Promise<void> => {
@@ -194,8 +217,106 @@ export function Send({
         <p className="faint" style={{ margin: "10px 0 16px" }}>
           Share this address so other Bastion users can send you encrypted notes.
         </p>
-        <button className="btn" onClick={() => setView("contacts")}>
-          <IcShared size={16} /> Contacts {contacts.length > 0 && <span className="faint">{contacts.length}</span>}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-primary" onClick={() => { setError(null); setView("compose"); }}>
+            Compose note
+          </button>
+          <button className="btn" onClick={() => setView("contacts")}>
+            <IcShared size={16} /> Contacts {contacts.length > 0 && <span className="faint">{contacts.length}</span>}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function Compose({
+  contacts,
+  onBack,
+  onSend,
+}: {
+  contacts: Contact[];
+  onBack: () => void;
+  onSend: (
+    recipientId: string,
+    plaintext: string,
+    opts: { passphrase?: string; signed: boolean; expiresAt?: number | null }
+  ) => Promise<{ ok: true } | { error: string; keyChanged?: boolean }>;
+}): JSX.Element {
+  const [to, setTo] = useState(contacts[0]?.bastion_id ?? "");
+  const [note, setNote] = useState("");
+  const [signed, setSigned] = useState(true);
+  const [pass, setPass] = useState("");
+  const [exp, setExp] = useState("0");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (contacts.length === 0) {
+    return (
+      <>
+        <div className="page-head"><h2><button className="link-back" onClick={onBack}>Send</button> / Compose</h2></div>
+        <div className="card-section">
+          <div className="faint">Add a contact first, then come back to send them a note.</div>
+        </div>
+      </>
+    );
+  }
+
+  const submit = async (): Promise<void> => {
+    if (!note.trim()) {
+      setError("Write a note first.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const expiresAt = exp !== "0" ? Math.floor(Date.now() / 1000) + Number(exp) : null;
+    const r = await onSend(to, note, { passphrase: pass || undefined, signed, expiresAt });
+    setBusy(false);
+    if ("error" in r) setError(r.keyChanged ? "This contact's key changed — re-verify them before sending." : r.error);
+  };
+
+  return (
+    <>
+      <div className="page-head"><h2><button className="link-back" onClick={onBack}>Send</button> / Compose</h2></div>
+      <div className="card-section">
+        <div className="field-label">To</div>
+        <select className="input" value={to} onChange={(e) => setTo(e.target.value)}>
+          {contacts.map((c) => (
+            <option key={c.bastion_id} value={c.bastion_id}>
+              {c.display} {c.verified ? "✓" : "(unverified)"}
+            </option>
+          ))}
+        </select>
+
+        <div className="field-label" style={{ marginTop: 14 }}>Note</div>
+        <textarea
+          className="textarea"
+          rows={5}
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+          placeholder="Your encrypted note…"
+          autoFocus
+        />
+
+        <label className="send-check">
+          <input type="checkbox" checked={signed} onChange={(e) => setSigned(e.target.checked)} />
+          Sign it (the recipient can verify it's from you)
+        </label>
+
+        <div className="field-label" style={{ marginTop: 14 }}>Extra passphrase (optional)</div>
+        <input className="input" type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="shared out-of-band" />
+
+        <div className="field-label" style={{ marginTop: 14 }}>Expires</div>
+        <select className="input" value={exp} onChange={(e) => setExp(e.target.value)}>
+          <option value="0">Never</option>
+          <option value="3600">1 hour</option>
+          <option value="86400">1 day</option>
+          <option value="604800">7 days</option>
+        </select>
+
+        {error && <div className="callout" style={{ marginTop: 14 }}>{error}</div>}
+        <button className="btn btn-primary" style={{ marginTop: 16 }} disabled={busy} onClick={submit}>
+          {busy ? "Sending…" : "Send encrypted note"}
         </button>
       </div>
     </>

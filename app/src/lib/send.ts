@@ -123,3 +123,68 @@ export async function resolveContact(
   const pinFp = await sha256hex(canonPublic(theirPub));
   return { bastionId: id, public: theirPub, pinFp, safety_number: safety };
 }
+
+export interface ComposeOpts {
+  passphrase?: string;
+  signed: boolean;
+  expiresAt?: number | null;
+}
+
+/**
+ * Seal a note to a contact (BR6: to the PINNED key, never a fresh directory
+ * fetch) and deliver it. For a verified contact, refuse if the published key
+ * changed since we pinned it.
+ */
+export async function composeNote(
+  account: Account,
+  token: string,
+  contact: Contact,
+  plaintext: string,
+  opts: ComposeOpts
+): Promise<{ ok: true } | { error: string; keyChanged?: boolean }> {
+  if (!plaintext.trim()) return { error: "Write a note first." };
+  if (contact.verified) {
+    try {
+      const live = await api.directory(token, contact.bastion_id);
+      if ((await sha256hex(canonPublic(live))) !== contact.pinFp) return { error: "key-changed", keyChanged: true };
+    } catch {
+      /* directory unreachable → fall back to the pinned key (offline) */
+    }
+  }
+  let myId: string | null = null;
+  if (opts.signed) {
+    try {
+      myId = (await api.whoami(token)).bastion_id;
+    } catch {
+      /* unpublished — send unsigned rather than fail */
+    }
+  }
+  const blob = JSON.parse(
+    account.send_seal(
+      plaintext,
+      contact.bastion_id,
+      JSON.stringify(contact.public),
+      opts.passphrase || undefined,
+      opts.signed ? myId || undefined : undefined
+    )
+  ) as { recipient_id: string; message_id: string };
+  try {
+    await api.sendBlob(token, {
+      recipient_id: blob.recipient_id,
+      message_id: blob.message_id,
+      blob,
+      expires_at: opts.expiresAt ?? null,
+    });
+  } catch (e) {
+    const code = e instanceof ApiError ? e.status : 0;
+    const map: Record<number, string> = {
+      413: "Message is too large (256 KiB max).",
+      409: "This message was already sent.",
+      429: "Too many sends, or the recipient's inbox is full. Try again later.",
+      404: "Recipient not found — they may have disabled Send.",
+      0: "Server unreachable. Nothing was sent.",
+    };
+    return { error: map[code] || (e as Error)?.message || "Send failed." };
+  }
+  return { ok: true };
+}

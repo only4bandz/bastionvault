@@ -241,3 +241,5 @@ a { color: var(--accent-2); }
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
   padding: 16px 12px; margin: 6px 0 12px;
 }
+.send-check { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 13px; color: var(--text-dim); cursor: pointer; }
+.send-check input { width: 16px; height: 16px; accent-color: var(--accent); }
