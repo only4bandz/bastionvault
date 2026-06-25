@@ -1,9 +1,10 @@
-# 🔐 Password manager (zero-knowledge)
+# 🔐 Bastion — zero-knowledge password manager
 
 A **zero-knowledge** password manager written in Rust: the server never sees
 your master password or a single secret in plaintext. All encryption happens
-client-side. Designed for a web app today, and a **Chrome extension** later —
-both share the same crypto core (Rust → WASM).
+client-side. One audited crypto core (Rust → WASM) powers **two surfaces**: a
+**web app** (React + TypeScript) and a **Chrome extension** (MV3) — plus
+**Bastion Send**, end-to-end encrypted notes between users.
 
 ## Security model
 
@@ -36,29 +37,58 @@ master password ──Argon2id(salt, 64MiB)──► master key
 - The server only stores **opaque blobs** + a slow hash of the auth secret. A
   server breach reveals no passwords.
 
+## ✉️ Bastion Send — end-to-end encrypted notes
+
+Send a note that **only the chosen recipient can open** — the server stores
+ciphertext only and never sees who can read it. Each user gets a stable,
+non-enumerable **Bastion address** (128-bit, base32). Available in both the
+**extension** and the **web app**.
+
+- **Sealed box** to the recipient's **X25519** key + **Ed25519** sign-then-encrypt,
+  so the recipient can cryptographically verify the sender (or send anonymously).
+- Optional **extra passphrase** folded into the key derivation (a true second
+  factor — the server can't run a dictionary attack on it).
+- **Safety number** (60 digits, Signal-style): compare it out-of-band to pin a
+  contact and defeat a malicious directory. Trust is shown explicitly —
+  **Verified ✓ / Unverified / Anonymous**, and a **key-change** is flagged.
+- The identity and verified contacts live as **encrypted reserved vault items**,
+  so they **sync across surfaces** (verify a contact in the extension, it's
+  verified in the web app too).
+- Server-side: per-recipient inbox quotas, rate limits, size caps, message
+  dedupe, expiry, and **read-once delete** — all without learning any plaintext.
+
+Design + threat model: [`docs/bastion-send-design.md`](docs/bastion-send-design.md).
+
 ## Structure
 
 ```
-crates/crypto-core/   ✅ Crypto core, pure Rust, 32 tests. Compiles native + WASM.
-crates/crypto-wasm/   ✅ wasm-bindgen bindings + wasm32 test (entropy validated).
-web/                  ✅ Browser demo (encrypt/decrypt in WASM). See web/README.md
-crates/server/        ✅ Zero-knowledge Axum API: accounts + encrypted blobs (in-memory, MVP)
+crates/crypto-core/   Crypto core, pure Rust (forbids unsafe). Native + WASM. Includes Bastion Send (send.rs).
+crates/crypto-wasm/   wasm-bindgen bindings (vault + Send) consumed by both surfaces.
+crates/server/        Zero-knowledge Axum API + SQLite persistence (accounts, vault, BIN proxy, Send).
+app/                  Web app — React + TypeScript (Vite). Unlock, vault, generator, health, Send.
+extension/            Chrome extension (MV3) — background worker owns the vault key; CSP-safe popup.
+web/                  Original standalone WASM demo (encrypt/decrypt in the browser).
+docs/                 Design docs (Bastion Send spec + UI implementation plan).
 ```
 
 ### Server — endpoints
 
 Zero-knowledge: stores only opaque blobs + an **Argon2id hash** of the auth
-secret (never the raw secret). Reuses the types from `crypto-core`.
+secret (never the raw secret), persisted to **SQLite**. Reuses the types from
+`crypto-core`.
 
 | Method | Route | Role |
 |---|---|---|
 | `POST` | `/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
 | `GET` | `/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
-| `POST` | `/sessions` | Verifies the auth secret (Argon2id, `spawn_blocking`) → bearer token (TTL 30 min) |
-| `DELETE` | `/sessions` | Revokes the current token (logout) |
+| `POST` / `DELETE` | `/sessions` | Login (Argon2id) → bearer token (TTL 30 min) / logout |
 | `GET` | `/vault` | Encrypted items + manifest (auth) |
-| `PUT`/`DELETE` | `/vault/items/:id` | Upsert / deletion of an encrypted item (auth) |
+| `PUT`/`DELETE` | `/vault/items/:id` | Upsert / delete an encrypted item (auth) |
 | `PUT` | `/vault/manifest` | Stores the integrity manifest (auth) |
+| `GET` | `/bin/:bin` | Cached BIN → issuer/brand proxy (so clients aren't rate-limited) |
+| `PUT` | `/send/identity` | Publish/rotate a Send identity → stable Bastion address |
+| `GET` | `/send/whoami` · `/send/directory/:id` | Your address · resolve a contact (exact-match, rate-limited) |
+| `POST` `/send` · `GET` `/send/inbox` · `DELETE` `/send/inbox/:id` | Deliver / pull / read-once delete an opaque blob |
 
 ```bash
 cargo run -p server          # listens on http://127.0.0.1:7777
@@ -71,19 +101,31 @@ cargo run -p server          # listens on http://127.0.0.1:7777
 | 1 | Crypto core (Argon2id, KDF policy, AEAD, key wrapping) | ✅ Done |
 | 2 | Secret Key (two-secret) + Emergency Kit | ✅ Done |
 | 3 | Vault integrity manifest | ✅ Done |
-| 4 | WASM bindings + browser demo (entropy validated) | ✅ Done |
-| 5 | Axum server API (accounts, encrypted storage) — in-memory MVP | ✅ Done |
-| 6 | Server persistence (SQLite) + full web interface | ⬜ |
-| 7 | TOTP 2FA (authenticator) | ⬜ |
-| 8 | FIDO2 / WebAuthn keys (YubiKey, Trustkey) | ⬜ |
-| 9 | SMS verification | ⬜ |
-| 10 | Chrome extension (reuses crypto-core via WASM) | ⬜ |
+| 4 | WASM bindings + browser demo | ✅ Done |
+| 5 | Axum server API (accounts, encrypted storage) | ✅ Done |
+| 6 | Server persistence (SQLite) | ✅ Done |
+| 7 | Web app (vault, generator, health, import, card/BIN detection) | ✅ Done |
+| 8 | Chrome extension (autofill, save-on-signup, keep-unlock) | ✅ Done |
+| 9 | **Bastion Send** — E2E notes (crypto, server, both UIs) | ✅ Done |
+| 10 | Bastion Send polish (QR address, unread counts) | 🚧 In progress |
+| 11 | TOTP 2FA · FIDO2 / WebAuthn keys | ⬜ |
+| 12 | iOS / Android apps | ⬜ |
 
 ## Development
 
 ```bash
-cargo test --workspace                       # native tests (crypto core)
+# crypto core + server
+cargo test --workspace                       # native tests
 wasm-pack test --node crates/crypto-wasm     # WASM tests (browser entropy)
-./web/build.sh                               # build the demo's WASM module
-cd web && python3 -m http.server 8080        # serve the demo → http://localhost:8080
+cargo run -p server                          # zero-knowledge API on :7777
+
+# web app (React + TS)
+cd app && bash build-wasm.sh && npm install && npm run dev
+
+# Chrome extension (MV3)
+cd extension && ./build.sh                   # build the WASM module
+# then load `extension/` unpacked at chrome://extensions
 ```
+
+> ⚠️ The server is **not production-ready** (no TLS/CORS, and rate limiting only
+> on the Send endpoints). It's a zero-knowledge reference backend for development.
