@@ -80,6 +80,8 @@ const ICON = {
   plus: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
   trash: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>',
   contacts: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.5 3-5.5 6-5.5s6 2 6 5.5"/><path d="M16 4a3.5 3.5 0 0 1 0 7"/><path d="M18.5 14.5c2 .8 3.5 2.4 3.5 5"/></svg>',
+  inbox: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h5l2 3h4l2-3h5"/><path d="M5 6h14l2 6v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6z"/></svg>',
+  lockmini: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
 };
 const SHIELD = '<svg class="logo" viewBox="0 0 32 32" aria-hidden><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9a8cff"/><stop offset="1" stop-color="#5a47e6"/></linearGradient></defs><path fill="url(#bg)" d="M16 2l11 4v8.5c0 7-4.7 12.9-11 15.5C9.7 27.4 5 21.5 5 14.5V6l11-4z"/><circle cx="16" cy="14.5" r="3" fill="#0a0c12"/><path fill="#0a0c12" d="M14.6 15.5h2.8l1 5.5h-4.8z"/></svg>';
 
@@ -394,15 +396,125 @@ function renderSendHome(body, bastionId) {
     </div>
     <p class="sub">Share this address so other Bastion users can send you
     encrypted notes.</p>
-    <button class="btn btn-primary btn-block" id="compose" style="margin-top:8px;display:flex;gap:10px">${ICON.send} Compose note</button>
+    <button class="btn btn-block" id="inbox" style="margin-top:8px;display:flex;gap:10px;justify-content:flex-start">${ICON.inbox} Inbox</button>
+    <button class="btn btn-primary btn-block" id="compose" style="margin-top:6px;display:flex;gap:10px">${ICON.send} Compose note</button>
     <button class="btn btn-block" id="contacts" style="margin-top:6px;display:flex;gap:10px;justify-content:flex-start">${ICON.contacts} Contacts</button>`;
   const c = document.getElementById("copyid");
   c?.addEventListener("click", () => {
     copyText(bastionId, "Bastion address");
     flashCheck(c);
   });
+  document.getElementById("inbox").addEventListener("click", () => showInbox());
   document.getElementById("compose").addEventListener("click", () => showCompose());
   document.getElementById("contacts").addEventListener("click", () => showContacts());
+}
+
+// ── inbox ──
+function senderChip(m) {
+  if (m.keyChanged) return `<span class="badge danger">Key changed</span>`;
+  const st = m.sender?.state;
+  if (st === "verified") return `<span class="badge ok">${ICON.shield} Verified</span>`;
+  if (st === "anonymous") return `<span class="badge">Anonymous</span>`;
+  return `<span class="badge warn">Unverified</span>`;
+}
+
+function senderName(m) {
+  if (m.sender?.state === "anonymous") return "Anonymous sender";
+  return m.display || m.sender?.id || "Unknown sender";
+}
+
+function fmtTime(sec) {
+  if (!sec) return "";
+  const d = new Date(sec * 1000);
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+async function showInbox() {
+  const r = await send({ type: "SEND_INBOX" });
+  if (!r.ok || r.locked) {
+    if (r.locked) return showUnlock({ server: currentServer });
+  }
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Inbox</b><span style="width:30px"></span></div>
+      <div class="dscroll" id="inbox-body"></div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showSend());
+  const body = document.getElementById("inbox-body");
+  if (!r.ok) {
+    body.innerHTML = `<div class="callout">${esc(r.error || "Could not load inbox.")}</div>`;
+    return;
+  }
+  const msgs = r.messages || [];
+  if (!msgs.length) {
+    body.innerHTML = `<div class="empty">No messages.</div>`;
+    return;
+  }
+  body.innerHTML = msgs
+    .map(
+      (m, i) => `<div class="msgrow" data-i="${i}">
+        <div class="meta">
+          <div class="t">${m.needsPass ? ICON.lockmini + " " : ""}${esc(senderName(m))}</div>
+          <div class="s">${m.needsPass ? "Passphrase required" : esc((m.plaintext || "").slice(0, 60))}</div>
+        </div>
+        <div class="right">${senderChip(m)}<div class="time">${esc(fmtTime(m.created_at))}</div></div>
+      </div>`
+    )
+    .join("");
+  body.querySelectorAll(".msgrow").forEach((row) => {
+    row.addEventListener("click", () => showMessage(msgs[Number(row.dataset.i)]));
+  });
+}
+
+function showMessage(m) {
+  const render = (data) => {
+    app.innerHTML = `
+      <div class="detail">
+        <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Message</b><button class="iconbtn" id="del" title="Delete">${ICON.trash}</button></div>
+        <div class="dscroll" id="msg-body"></div>
+      </div>`;
+    document.getElementById("back").addEventListener("click", () => showInbox());
+    document.getElementById("del").addEventListener("click", async () => {
+      await send({ type: "SEND_INBOX_DELETE", messageId: m.message_id });
+      toast("Message deleted");
+      showInbox();
+    });
+    const body = document.getElementById("msg-body");
+    const banner =
+      data.keyChanged
+        ? `<div class="trust danger">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>`
+        : data.sender?.state === "verified"
+          ? `<div class="trust ok">${ICON.shield} Verified — from ${esc(data.display || data.sender.id)}</div>`
+          : data.sender?.state === "anonymous"
+            ? `<div class="trust">Anonymous sender — Bastion can't tell you who sent this.</div>`
+            : `<div class="trust warn">Unverified sender${data.sender?.id ? " · " + esc(data.sender.id) : ""}. Add &amp; verify them to confirm their identity.</div>`;
+    if (data.needsPass) {
+      body.innerHTML = `
+        <div class="trust">${ICON.lockmini} This note is protected by an extra passphrase.</div>
+        <div class="field" style="margin-top:8px"><label>Passphrase</label><input class="input" id="mp" type="password" autofocus /></div>
+        <div id="mp-msg"></div>
+        <button class="btn btn-primary btn-block" id="open">Open</button>`;
+      const btn = document.getElementById("open");
+      const go = async () => {
+        btn.disabled = true;
+        btn.textContent = "Opening…";
+        const rr = await send({ type: "SEND_OPEN", messageId: m.message_id, passphrase: document.getElementById("mp").value });
+        if (rr.ok) return render(rr);
+        document.getElementById("mp-msg").innerHTML = `<div class="callout">${esc(rr.error || "Could not open.")}</div>`;
+        btn.disabled = false;
+        btn.textContent = "Open";
+      };
+      btn.addEventListener("click", go);
+      document.getElementById("mp").addEventListener("keydown", (e) => e.key === "Enter" && go());
+      return;
+    }
+    body.innerHTML = `
+      ${banner}
+      <div class="notebody">${esc(data.plaintext || "")}</div>
+      <button class="btn btn-block" id="reply" style="margin-top:10px;display:flex;gap:10px;justify-content:center">${ICON.send} Reply</button>`;
+    document.getElementById("reply").addEventListener("click", () => showCompose(data.sender?.id));
+  };
+  render(m);
 }
 
 // ── compose ──

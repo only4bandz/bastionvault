@@ -44,6 +44,33 @@ async function saveContacts(s) {
   const blob = JSON.parse(s.account.encrypt_item(JSON.stringify(s.contacts || []), SEND_CONTACTS_ID));
   await makeApi(s.server).putItem(s.token, SEND_CONTACTS_ID, blob);
 }
+
+// Open one inbox blob (BR5 two-pass): pass 1 with no verifier discovers the
+// sender (the claimed id lives *inside* the ciphertext); for a known VERIFIED
+// contact, re-open against the PINNED public to reach "verified" — a signature
+// failure there means the key changed since we verified them.
+function openMessage(s, blob, passphrase) {
+  let r1;
+  try {
+    r1 = JSON.parse(s.account.send_open(JSON.stringify(blob), passphrase || undefined, undefined));
+  } catch {
+    return passphrase ? { error: "Wrong passphrase or corrupted message." } : { needsPass: true };
+  }
+  let sender = r1.sender; // { state, id }
+  let keyChanged = false;
+  if (sender.state === "unverified" && sender.id) {
+    const v = (s.contacts || []).find((c) => c.bastion_id === sender.id && c.verified);
+    if (v) {
+      try {
+        sender = JSON.parse(s.account.send_open(JSON.stringify(blob), passphrase || undefined, JSON.stringify(v.public))).sender;
+      } catch {
+        keyChanged = true; // signature failed against the pinned key
+      }
+    }
+  }
+  const known = (s.contacts || []).find((c) => c.bastion_id === sender.id);
+  return { plaintext: r1.plaintext, sender, display: known?.display || null, keyChanged };
+}
 const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
 
 // chrome.storage.session is TRUSTED_CONTEXTS by default (NOT readable by content
@@ -661,6 +688,49 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             };
             return sendResponse({ ok: false, error: map[code] || e?.message || "Send failed." });
           }
+          sendResponse({ ok: true });
+          break;
+        }
+        case "SEND_INBOX": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          let list;
+          try {
+            list = await makeApi(s.server).inbox(s.token);
+          } catch (e) {
+            return sendResponse({ ok: false, error: e?.message || "Could not load inbox." });
+          }
+          s.inboxCache = new Map();
+          const messages = (list || []).map((m) => {
+            s.inboxCache.set(m.message_id, m.blob);
+            const opened = openMessage(s, m.blob, undefined);
+            return { message_id: m.message_id, created_at: m.created_at, expires_at: m.expires_at, ...opened };
+          });
+          sendResponse({ ok: true, messages });
+          break;
+        }
+        case "SEND_OPEN": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const blob = s.inboxCache?.get(msg.messageId);
+          if (!blob) return sendResponse({ ok: false, error: "Message is no longer available." });
+          const opened = openMessage(s, blob, msg.passphrase);
+          if (opened.error) return sendResponse({ ok: false, error: opened.error, needsPass: opened.needsPass });
+          sendResponse({ ok: true, message_id: msg.messageId, ...opened });
+          break;
+        }
+        case "SEND_INBOX_DELETE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          try {
+            await makeApi(s.server).inboxDelete(s.token, msg.messageId);
+          } catch {
+            /* already gone; treat as deleted */
+          }
+          s.inboxCache?.delete(msg.messageId);
           sendResponse({ ok: true });
           break;
         }
