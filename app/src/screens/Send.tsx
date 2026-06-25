@@ -6,12 +6,17 @@ import {
   saveContacts,
   resolveContact,
   composeNote,
+  openMessage,
+  inboxList,
+  inboxDelete,
   type Contact,
   type Resolved,
+  type Opened,
+  type InboxItem,
 } from "../lib/send";
 import { IcCopy, IcShared, IcPlus, IcTrash } from "../components/icons";
 
-type View = "home" | "contacts" | "add" | "verify" | "compose";
+type View = "home" | "contacts" | "add" | "verify" | "compose" | "inbox";
 
 export function Send({
   account,
@@ -33,6 +38,7 @@ export function Send({
   const [error, setError] = useState<string | null>(null);
   const [view, setView] = useState<View>("home");
   const [resolved, setResolved] = useState<Resolved | null>(null);
+  const [replyTo, setReplyTo] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -154,11 +160,17 @@ export function Send({
     return <AddContact busy={busy} error={error} onBack={() => setView("contacts")} onFind={find} />;
   }
 
+  // ── Inbox ──
+  if (view === "inbox") {
+    return <Inbox account={account} token={token} contacts={contacts} toast={toast} onBack={() => setView("home")} onReply={(id) => { setError(null); setReplyTo(id); setView("compose"); }} />;
+  }
+
   // ── Compose ──
   if (view === "compose") {
     return (
       <Compose
         contacts={contacts}
+        preselect={replyTo}
         onBack={() => setView("home")}
         onSend={async (recipientId, plaintext, opts) => {
           const c = contacts.find((x) => x.bastion_id === recipientId);
@@ -218,9 +230,10 @@ export function Send({
           Share this address so other Bastion users can send you encrypted notes.
         </p>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-primary" onClick={() => { setError(null); setView("compose"); }}>
+          <button className="btn btn-primary" onClick={() => { setError(null); setReplyTo(null); setView("compose"); }}>
             Compose note
           </button>
+          <button className="btn" onClick={() => setView("inbox")}>Inbox</button>
           <button className="btn" onClick={() => setView("contacts")}>
             <IcShared size={16} /> Contacts {contacts.length > 0 && <span className="faint">{contacts.length}</span>}
           </button>
@@ -232,10 +245,12 @@ export function Send({
 
 function Compose({
   contacts,
+  preselect,
   onBack,
   onSend,
 }: {
   contacts: Contact[];
+  preselect?: string | null;
   onBack: () => void;
   onSend: (
     recipientId: string,
@@ -243,7 +258,9 @@ function Compose({
     opts: { passphrase?: string; signed: boolean; expiresAt?: number | null }
   ) => Promise<{ ok: true } | { error: string; keyChanged?: boolean }>;
 }): JSX.Element {
-  const [to, setTo] = useState(contacts[0]?.bastion_id ?? "");
+  const [to, setTo] = useState(
+    (preselect && contacts.some((c) => c.bastion_id === preselect) ? preselect : contacts[0]?.bastion_id) ?? ""
+  );
   const [note, setNote] = useState("");
   const [signed, setSigned] = useState(true);
   const [pass, setPass] = useState("");
@@ -387,6 +404,188 @@ function VerifyContact({
         <button className="btn" style={{ marginTop: 8 }} onClick={() => onSave(name, false)}>
           Save without verifying
         </button>
+      </div>
+    </>
+  );
+}
+
+// ── inbox ──
+function senderName(o: Opened): string {
+  if (o.sender?.state === "anonymous") return "Anonymous sender";
+  return o.display || o.sender?.id || "Unknown sender";
+}
+function senderChip(o: Opened): JSX.Element {
+  if (o.keyChanged) return <span className="badge badge-danger">Key changed</span>;
+  const st = o.sender?.state;
+  if (st === "verified") return <span className="badge badge-ok">Verified</span>;
+  if (st === "anonymous") return <span className="badge">Anonymous</span>;
+  return <span className="badge badge-warn">Unverified</span>;
+}
+function fmtTime(sec: number): string {
+  if (!sec) return "";
+  return new Date(sec * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+type Row = { item: InboxItem; opened: Opened };
+
+function Inbox({
+  account,
+  token,
+  contacts,
+  toast,
+  onBack,
+  onReply,
+}: {
+  account: Account;
+  token: string;
+  contacts: Contact[];
+  toast: (m: string) => void;
+  onBack: () => void;
+  onReply: (id: string) => void;
+}): JSX.Element {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [rows, setRows] = useState<Row[]>([]);
+  const [open, setOpen] = useState<Row | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    inboxList(token)
+      .then((list) => {
+        if (!active) return;
+        setRows(list.map((item) => ({ item, opened: openMessage(account, contacts, item.blob, undefined) })));
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (!active) return;
+        setError((e as Error)?.message || "Could not load inbox.");
+        setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [account, token, contacts]);
+
+  if (open) {
+    return (
+      <Message
+        account={account}
+        contacts={contacts}
+        row={open}
+        onBack={() => setOpen(null)}
+        onReply={onReply}
+        onDelete={async () => {
+          await inboxDelete(token, open.item.message_id).catch(() => {});
+          setRows((r) => r.filter((x) => x.item.message_id !== open.item.message_id));
+          setOpen(null);
+          toast("Message deleted");
+        }}
+      />
+    );
+  }
+
+  return (
+    <>
+      <div className="page-head"><h2><button className="link-back" onClick={onBack}>Send</button> / Inbox</h2></div>
+      <div className="card-section">
+        {loading ? (
+          <div className="faint">Loading…</div>
+        ) : error ? (
+          <div className="callout">{error}</div>
+        ) : rows.length === 0 ? (
+          <div className="faint">No messages.</div>
+        ) : (
+          rows.map((r) => (
+            <div className="msg-row" key={r.item.message_id} onClick={() => setOpen(r)}>
+              <div className="msg-meta">
+                <div className="msg-from">{senderName(r.opened)}</div>
+                <div className="faint msg-prev">{r.opened.needsPass ? "🔒 Passphrase required" : (r.opened.plaintext || "").slice(0, 70)}</div>
+              </div>
+              <div className="msg-right">{senderChip(r.opened)}<div className="faint msg-time">{fmtTime(r.item.created_at)}</div></div>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+}
+
+function Message({
+  account,
+  contacts,
+  row,
+  onBack,
+  onReply,
+  onDelete,
+}: {
+  account: Account;
+  contacts: Contact[];
+  row: Row;
+  onBack: () => void;
+  onReply: (id: string) => void;
+  onDelete: () => void;
+}): JSX.Element {
+  const [data, setData] = useState<Opened>(row.opened);
+  const [pass, setPass] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const banner = data.keyChanged ? (
+    <div className="trust trust-danger">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>
+  ) : data.sender?.state === "verified" ? (
+    <div className="trust trust-ok">Verified — from {data.display || data.sender.id}</div>
+  ) : data.sender?.state === "anonymous" ? (
+    <div className="trust">Anonymous sender — Bastion can't tell you who sent this.</div>
+  ) : (
+    <div className="trust trust-warn">Unverified sender{data.sender?.id ? ` · ${data.sender.id}` : ""}. Add &amp; verify them to confirm their identity.</div>
+  );
+
+  return (
+    <>
+      <div className="page-head">
+        <h2><button className="link-back" onClick={onBack}>Inbox</button> / Message</h2>
+        <button className="btn" onClick={onDelete}><IcTrash size={16} /> Delete</button>
+      </div>
+      <div className="card-section">
+        {data.needsPass ? (
+          <>
+            <div className="trust">🔒 This note is protected by an extra passphrase.</div>
+            <div className="field-label" style={{ marginTop: 12 }}>Passphrase</div>
+            <input
+              className="input"
+              type="password"
+              value={pass}
+              autoFocus
+              onChange={(e) => setPass(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter") return;
+                const o = openMessage(account, contacts, row.item.blob, pass);
+                if (o.error) setError(o.error);
+                else { setData(o); setError(null); }
+              }}
+            />
+            {error && <div className="callout" style={{ marginTop: 12 }}>{error}</div>}
+            <button
+              className="btn btn-primary"
+              style={{ marginTop: 14 }}
+              onClick={() => {
+                const o = openMessage(account, contacts, row.item.blob, pass);
+                if (o.error) setError(o.error);
+                else { setData(o); setError(null); }
+              }}
+            >
+              Open
+            </button>
+          </>
+        ) : (
+          <>
+            {banner}
+            <div className="note-body">{data.plaintext}</div>
+            {data.sender?.id && (
+              <button className="btn" style={{ marginTop: 14 }} onClick={() => onReply(data.sender!.id!)}>Reply</button>
+            )}
+          </>
+        )}
       </div>
     </>
   );

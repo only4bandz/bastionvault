@@ -2,8 +2,10 @@
 // logic, but as functions over the in-memory Account + bearer token (the web
 // app is a single trusted context — no service worker). All crypto stays in
 // WASM; the server only ever sees opaque blobs + published public identities.
-import { api, ApiError, type Blob, type SendPublic } from "./api";
+import { api, ApiError, type Blob, type InboxItem, type SendPublic } from "./api";
 import { send_safety_number, type Account } from "./wasm";
+
+export type { InboxItem };
 
 // Reserved vault-item ids (must match crypto-wasm send_identity_item_id()).
 export const SEND_IDENTITY_ID = "bastion:send-identity";
@@ -188,3 +190,45 @@ export async function composeNote(
   }
   return { ok: true };
 }
+
+// ── inbox ──
+
+export interface Opened {
+  plaintext?: string;
+  sender?: { state: string; id: string | null };
+  display?: string | null;
+  keyChanged?: boolean;
+  needsPass?: boolean;
+  error?: string;
+}
+
+/**
+ * Open one inbox blob (BR5 two-pass): pass 1 with no verifier discovers the
+ * sender; for a known VERIFIED contact, re-open against the PINNED public to
+ * reach "verified" — a signature failure there means the key changed.
+ */
+export function openMessage(account: Account, contacts: Contact[], blob: unknown, passphrase?: string): Opened {
+  let r1: { plaintext: string; sender: { state: string; id: string | null } };
+  try {
+    r1 = JSON.parse(account.send_open(JSON.stringify(blob), passphrase || undefined, undefined));
+  } catch {
+    return passphrase ? { error: "Wrong passphrase or corrupted message." } : { needsPass: true };
+  }
+  let sender = r1.sender;
+  let keyChanged = false;
+  if (sender.state === "unverified" && sender.id) {
+    const v = contacts.find((c) => c.bastion_id === sender.id && c.verified);
+    if (v) {
+      try {
+        sender = JSON.parse(account.send_open(JSON.stringify(blob), passphrase || undefined, JSON.stringify(v.public))).sender;
+      } catch {
+        keyChanged = true;
+      }
+    }
+  }
+  const known = contacts.find((c) => c.bastion_id === sender.id);
+  return { plaintext: r1.plaintext, sender, display: known?.display ?? null, keyChanged };
+}
+
+export const inboxList = (token: string): Promise<InboxItem[]> => api.inbox(token);
+export const inboxDelete = (token: string, messageId: string): Promise<void> => api.inboxDelete(token, messageId);

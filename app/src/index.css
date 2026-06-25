@@ -243,3 +243,17 @@ a { color: var(--accent-2); }
 }
 .send-check { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 13px; color: var(--text-dim); cursor: pointer; }
 .send-check input { width: 16px; height: 16px; accent-color: var(--accent); }
+.badge-danger { color: #fca5a5; background: rgba(255, 93, 110, .14); }
+.msg-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.msg-row:last-child { border-bottom: none; }
+.msg-row:hover { background: var(--surface-2); }
+.msg-meta { flex: 1; min-width: 0; }
+.msg-from { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-prev { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg-right { display: flex; flex-direction: column; align-items: flex-end; gap: 5px; flex: none; }
+.msg-time { font-size: 11px; }
+.trust { font-size: 13px; font-weight: 600; padding: 10px 14px; border-radius: var(--radius-sm); margin-bottom: 14px; background: var(--surface-2); color: var(--text-dim); border: 1px solid var(--line); }
+.trust-ok { color: #6ee7b7; background: rgba(58, 210, 159, .1); border-color: rgba(58, 210, 159, .25); }
+.trust-warn { color: #ffd9a3; background: rgba(255, 180, 84, .1); border-color: rgba(255, 180, 84, .25); }
+.trust-danger { color: #fca5a5; background: rgba(255, 93, 110, .1); border-color: rgba(255, 93, 110, .3); }
+.note-body { white-space: pre-wrap; word-break: break-word; line-height: 1.6; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 14px 16px; }
