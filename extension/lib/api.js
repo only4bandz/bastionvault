@@ -44,5 +44,13 @@ export function makeApi(base) {
     getVault: (token) => req(base, "GET", "/vault", token),
     putItem: (token, id, blob) => req(base, "PUT", `/vault/items/${encodeURIComponent(id)}`, token, { blob }),
     deleteItem: (token, id) => req(base, "DELETE", `/vault/items/${encodeURIComponent(id)}`, token),
+
+    // ── Bastion Send ──
+    publishIdentity: (token, publicIdentity) => req(base, "PUT", "/send/identity", token, publicIdentity),
+    whoami: (token) => req(base, "GET", "/send/whoami", token), // { bastion_id, public } | ApiError 404
+    directory: (token, bastionId) => req(base, "GET", `/send/directory/${encodeURIComponent(bastionId)}`, token),
+    sendBlob: (token, body) => req(base, "POST", "/send", token, body), // { recipient_id, message_id, blob, expires_at? }
+    inbox: (token) => req(base, "GET", "/send/inbox", token),
+    inboxDelete: (token, messageId) => req(base, "DELETE", `/send/inbox/${encodeURIComponent(messageId)}`, token),
   };
 }

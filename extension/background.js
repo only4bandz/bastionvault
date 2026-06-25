@@ -26,6 +26,9 @@ const SESSION_KEY = "session"; // key in chrome.storage.session
 // Vault items under this prefix hold Bastion Send state (identity, contacts) —
 // never user entries; they must never surface in the vault list.
 const isReservedItem = (id) => id.startsWith("bastion:send-");
+// Reserved id for the encrypted Send identity (must match crypto-wasm
+// send_identity_item_id()).
+const SEND_IDENTITY_ID = "bastion:send-identity";
 const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
 
 // chrome.storage.session is TRUSTED_CONTEXTS by default (NOT readable by content
@@ -171,6 +174,10 @@ async function ensureSession() {
     const vault = await api.getVault(token);
     const items = new Map();
     for (const [id, blob] of Object.entries(vault.items || {})) {
+      if (id === SEND_IDENTITY_ID) {
+        try { account.load_send_identity(JSON.stringify(blob)); } catch { /* malformed */ }
+        continue;
+      }
       if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
       try {
         items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
@@ -227,6 +234,10 @@ async function doUnlock(email, password, secretKey) {
 
   const items = new Map();
   for (const [id, blob] of Object.entries(vault.items || {})) {
+    if (id === SEND_IDENTITY_ID) {
+      try { account.load_send_identity(JSON.stringify(blob)); } catch { /* malformed */ }
+      continue;
+    }
     if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
     try {
       items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
@@ -511,6 +522,56 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (!it) throw new Error("Item not found.");
           const filled = await fillActiveTab(it);
           sendResponse({ ok: true, filled });
+          break;
+        }
+        // ── Bastion Send (extension-page-only; NOT in CONTENT_ALLOWED) ──
+        case "SEND_STATE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          const enabled = !!s.account.has_send_identity;
+          let bastionId = s.sendBastionId || null;
+          if (enabled && !bastionId) {
+            try {
+              bastionId = (await makeApi(s.server).whoami(s.token))?.bastion_id || null;
+              s.sendBastionId = bastionId;
+            } catch {
+              bastionId = null;
+            }
+          }
+          sendResponse({ ok: true, enabled, bastionId });
+          break;
+        }
+        case "SEND_ENABLE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const api = makeApi(s.server);
+          let who = null;
+          try {
+            who = await api.whoami(s.token);
+          } catch (e) {
+            if (!(e instanceof ApiError && e.status === 404)) throw e; // 404 = not published yet
+          }
+          if (s.account.has_send_identity) {
+            s.sendBastionId = who?.bastion_id || s.sendBastionId || null;
+            sendResponse({ ok: true, bastionId: s.sendBastionId });
+            break;
+          }
+          if (who) {
+            // Published on another device, but this device holds no identity item.
+            sendResponse({
+              ok: false,
+              error: "Send is already enabled on another device. Unlock that device to use Send here.",
+            });
+            break;
+          }
+          // Fresh enable: create identity → persist the reserved vault item → publish.
+          const itemBlob = JSON.parse(s.account.create_send_identity());
+          await api.putItem(s.token, SEND_IDENTITY_ID, itemBlob);
+          const pub = JSON.parse(s.account.send_identity_public());
+          const res = await api.publishIdentity(s.token, pub);
+          s.sendBastionId = res.bastion_id;
+          sendResponse({ ok: true, bastionId: res.bastion_id });
           break;
         }
         default:

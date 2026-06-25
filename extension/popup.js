@@ -76,6 +76,7 @@ const ICON = {
   shield: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 3v5c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-3z"/><path d="m9 12 2 2 4-4"/></svg>',
   regen: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>',
   key: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 8.15-8.15"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>',
+  send: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7z"/></svg>',
 };
 const SHIELD = '<svg class="logo" viewBox="0 0 32 32" aria-hidden><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#9a8cff"/><stop offset="1" stop-color="#5a47e6"/></linearGradient></defs><path fill="url(#bg)" d="M16 2l11 4v8.5c0 7-4.7 12.9-11 15.5C9.7 27.4 5 21.5 5 14.5V6l11-4z"/><circle cx="16" cy="14.5" r="3" fill="#0a0c12"/><path fill="#0a0c12" d="M14.6 15.5h2.8l1 5.5h-4.8z"/></svg>';
 
@@ -247,6 +248,7 @@ async function showVault(state) {
     <div class="bar">
       <button class="iconbtn" id="settings" title="Settings">${ICON.gear}</button>
       <button class="iconbtn" id="gen" title="Password generator">${ICON.key}</button>
+      <button class="iconbtn" id="send" title="Bastion Send">${ICON.send}</button>
       <div class="spacer"></div>
       <button class="iconbtn" id="lock" title="Lock vault">${ICON.lock}</button>
     </div>`;
@@ -257,6 +259,7 @@ async function showVault(state) {
   });
   document.getElementById("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
   document.getElementById("gen").addEventListener("click", () => showGenerator());
+  document.getElementById("send").addEventListener("click", () => showSend());
   document.getElementById("q").addEventListener("input", (e) => renderVault(e.target.value));
 
   // current tab host (activeTab grants the URL while the popup is open)
@@ -315,6 +318,64 @@ function showGenerator() {
   ["upper", "lower", "digits", "symbols"].forEach((id) =>
     document.getElementById(id).addEventListener("change", regen)
   );
+}
+
+// ── Bastion Send ──
+async function showSend() {
+  const st = await send({ type: "SEND_STATE" });
+  if (!st.ok || st.locked) return showUnlock({ server: currentServer });
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop">
+        <button class="iconbtn" id="back" title="Back">${ICON.back}</button>
+        <b style="flex:1;text-align:center;font-size:15px">Bastion Send</b>
+        <span style="width:30px"></span>
+      </div>
+      <div class="dscroll" id="send-body"></div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showVault(vaultState));
+  const body = document.getElementById("send-body");
+  if (st.enabled) renderSendHome(body, st.bastionId);
+  else renderEnableSend(body);
+}
+
+function renderEnableSend(body) {
+  body.innerHTML = `
+    <div class="send-hero">${SHIELD}<h2>Encrypted notes</h2>
+      <p class="sub">Send end-to-end encrypted notes to other Bastion users.
+      Only your chosen recipient can open them — the server only ever stores
+      ciphertext.</p>
+    </div>
+    <button class="btn btn-primary btn-block" id="enable">Enable Send</button>
+    <div id="enable-msg" style="margin-top:10px"></div>`;
+  const btn = document.getElementById("enable");
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    btn.textContent = "Enabling…";
+    const r = await send({ type: "SEND_ENABLE" });
+    if (r.ok) return renderSendHome(body, r.bastionId);
+    document.getElementById("enable-msg").innerHTML = `<div class="callout">${esc(r.error || "Could not enable Send.")}</div>`;
+    btn.disabled = false;
+    btn.textContent = "Enable Send";
+  });
+}
+
+function renderSendHome(body, bastionId) {
+  body.innerHTML = `
+    <div class="dlabel" style="margin-top:10px">Your Bastion address</div>
+    <div class="idcard">
+      <span class="idtext mono">${esc(bastionId || "—")}</span>
+      <button class="iconbtn" id="copyid" title="Copy address">${ICON.copy}</button>
+    </div>
+    <p class="sub">Share this address so other Bastion users can send you
+    encrypted notes. Compose &amp; inbox arrive in the next update.</p>`;
+  const c = document.getElementById("copyid");
+  c?.addEventListener("click", () => {
+    if (bastionId) {
+      copyText(bastionId, "Bastion address");
+      flashCheck(c);
+    }
+  });
 }
 
 async function showDetail(id) {
