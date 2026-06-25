@@ -113,9 +113,11 @@ export function Send({
       <>
         <div className="page-head">
           <h2><button className="link-back" onClick={() => setView("home")}>Send</button> / Contacts</h2>
-          <button className="btn btn-primary" onClick={() => { setError(null); setView("add"); }}>
-            <IcPlus size={16} /> Add contact
-          </button>
+          <div className="right">
+            <button className="btn btn-primary" onClick={() => { setError(null); setView("add"); }}>
+              <IcPlus size={16} /> Add contact
+            </button>
+          </div>
         </div>
         <div className="card-section">
           {contacts.length === 0 ? (
@@ -125,7 +127,7 @@ export function Send({
               <div className="contact-row" key={c.bastion_id}>
                 <div className="contact-meta">
                   <div className="contact-name">{c.display}</div>
-                  <code className="faint">{c.bastion_id}</code>
+                  {c.display !== c.bastion_id && <code className="faint">{c.bastion_id}</code>}
                 </div>
                 <span className={`badge ${c.verified ? "badge-ok" : "badge-warn"}`}>{c.verified ? "Verified" : "Unverified"}</span>
                 <button
@@ -544,7 +546,7 @@ function Message({
     <>
       <div className="page-head">
         <h2><button className="link-back" onClick={onBack}>Inbox</button> / Message</h2>
-        <button className="btn" onClick={onDelete}><IcTrash size={16} /> Delete</button>
+        <div className="right"><button className="btn" onClick={onDelete}><IcTrash size={16} /> Delete</button></div>
       </div>
       <div className="card-section">
         {data.needsPass ? (
