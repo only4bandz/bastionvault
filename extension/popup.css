@@ -159,6 +159,21 @@ body {
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 10px 12px;
 }
 .idtext { flex: 1; min-width: 0; font-size: 14px; word-break: break-all; letter-spacing: .5px; }
+.contact { display: flex; align-items: center; gap: 10px; padding: 9px 4px; border-bottom: 1px solid var(--line); }
+.contact:last-child { border-bottom: none; }
+.contact .ico { width: 34px; height: 34px; border-radius: 9px; flex: none; display: grid; place-items: center; color: #fff; font-weight: 700; }
+.contact .meta { flex: 1; min-width: 0; }
+.contact .meta .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.contact .meta .s { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.badge { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; }
+.badge.ok { color: var(--ok); background: rgba(58, 210, 159, .12); }
+.badge.ok svg { width: 12px; height: 12px; }
+.badge.warn { color: var(--warn); background: rgba(246, 198, 91, .12); }
+.safety {
+  font-size: 17px; letter-spacing: 1px; line-height: 1.7; text-align: center;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 14px 10px; margin: 6px 0 10px; word-spacing: 2px;
+}
 
 /* ── toast ── */
 .toast {

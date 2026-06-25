@@ -14,7 +14,7 @@
 // Everything is cleared on lock or at expiry; nothing secret touches any
 // disk-backed web storage (enforced by scripts/check-no-browser-secret-storage.sh).
 
-import init, { unlock, rehydrate } from "./pkg/crypto_wasm.js";
+import init, { unlock, rehydrate, send_safety_number } from "./pkg/crypto_wasm.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
 
@@ -29,6 +29,21 @@ const isReservedItem = (id) => id.startsWith("bastion:send-");
 // Reserved id for the encrypted Send identity (must match crypto-wasm
 // send_identity_item_id()).
 const SEND_IDENTITY_ID = "bastion:send-identity";
+// Reserved id for the encrypted verified-contacts list.
+const SEND_CONTACTS_ID = "bastion:send-contacts";
+
+// Canonical JSON of a PublicIdentity (stable key order) for fingerprinting.
+const canonPublic = (pub) => JSON.stringify(pub, Object.keys(pub).sort());
+async function sha256hex(str) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Persist the verified-contacts list as the encrypted reserved vault item.
+async function saveContacts(s) {
+  const blob = JSON.parse(s.account.encrypt_item(JSON.stringify(s.contacts || []), SEND_CONTACTS_ID));
+  await makeApi(s.server).putItem(s.token, SEND_CONTACTS_ID, blob);
+}
 const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
 
 // chrome.storage.session is TRUSTED_CONTEXTS by default (NOT readable by content
@@ -173,9 +188,14 @@ async function ensureSession() {
     const token = await api.login(stored.email, account.auth_secret);
     const vault = await api.getVault(token);
     const items = new Map();
+    let contacts = [];
     for (const [id, blob] of Object.entries(vault.items || {})) {
       if (id === SEND_IDENTITY_ID) {
         try { account.load_send_identity(JSON.stringify(blob)); } catch { /* malformed */ }
+        continue;
+      }
+      if (id === SEND_CONTACTS_ID) {
+        try { contacts = JSON.parse(account.decrypt_item(JSON.stringify(blob), id)); } catch { /* malformed */ }
         continue;
       }
       if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
@@ -185,7 +205,7 @@ async function ensureSession() {
         /* skip corrupt/tampered item */
       }
     }
-    session = { account, token, email: stored.email, server: stored.server, items, expiresAt: stored.expiresAt };
+    session = { account, token, email: stored.email, server: stored.server, items, contacts, expiresAt: stored.expiresAt };
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
     return session;
@@ -233,9 +253,14 @@ async function doUnlock(email, password, secretKey) {
   const vault = await api.getVault(token);
 
   const items = new Map();
+  let contacts = [];
   for (const [id, blob] of Object.entries(vault.items || {})) {
     if (id === SEND_IDENTITY_ID) {
       try { account.load_send_identity(JSON.stringify(blob)); } catch { /* malformed */ }
+      continue;
+    }
+    if (id === SEND_CONTACTS_ID) {
+      try { contacts = JSON.parse(account.decrypt_item(JSON.stringify(blob), id)); } catch { /* malformed */ }
       continue;
     }
     if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
@@ -246,7 +271,7 @@ async function doUnlock(email, password, secretKey) {
     }
   }
 
-  session = { account, token, email, server, items };
+  session = { account, token, email, server, items, contacts };
   await persistSession();
   await touchSession();
   chrome.action.setBadgeText({ text: "✓" });
@@ -577,6 +602,68 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const res = await api.publishIdentity(s.token, pub);
           s.sendBastionId = res.bastion_id;
           sendResponse({ ok: true, bastionId: res.bastion_id });
+          break;
+        }
+        case "CONTACTS_LIST": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          sendResponse({ ok: true, contacts: s.contacts || [] });
+          break;
+        }
+        case "CONTACTS_RESOLVE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          if (!s.account.has_send_identity) return sendResponse({ ok: false, error: "Enable Send first." });
+          const id = (msg.bastionId || "").trim().toUpperCase();
+          if (!id) return sendResponse({ ok: false, error: "Enter a Bastion address." });
+          let myId = s.sendBastionId;
+          if (!myId) {
+            try { myId = (await makeApi(s.server).whoami(s.token))?.bastion_id || null; s.sendBastionId = myId; } catch { /* unpublished */ }
+          }
+          if (!myId) return sendResponse({ ok: false, error: "Publish your own address first." });
+          if (id === myId) return sendResponse({ ok: false, error: "That's your own address." });
+          let theirPub;
+          try {
+            theirPub = await makeApi(s.server).directory(s.token, id);
+          } catch (e) {
+            return sendResponse({
+              ok: false,
+              error: e instanceof ApiError && e.status === 404 ? "No Bastion user has that address." : e?.message || "Lookup failed.",
+            });
+          }
+          const myPub = JSON.parse(s.account.send_identity_public());
+          const safety = send_safety_number(myId, JSON.stringify(myPub), id, JSON.stringify(theirPub));
+          const pinFp = await sha256hex(canonPublic(theirPub));
+          sendResponse({ ok: true, bastionId: id, public: theirPub, pinFp, safety_number: safety });
+          break;
+        }
+        case "CONTACTS_SAVE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const c = {
+            bastion_id: msg.bastionId,
+            public: msg.public,
+            pinFp: msg.pinFp,
+            display: (msg.display || "").trim() || msg.bastionId,
+            verified: !!msg.verified,
+            verified_at: msg.verified ? Date.now() : null,
+            safety_number: msg.safety_number || null,
+          };
+          s.contacts = (s.contacts || []).filter((x) => x.bastion_id !== c.bastion_id);
+          s.contacts.push(c);
+          await saveContacts(s);
+          sendResponse({ ok: true });
+          break;
+        }
+        case "CONTACTS_DELETE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          s.contacts = (s.contacts || []).filter((x) => x.bastion_id !== msg.bastionId);
+          await saveContacts(s);
+          sendResponse({ ok: true });
           break;
         }
         default:
