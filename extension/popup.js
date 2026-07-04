@@ -451,54 +451,112 @@ async function showInbox() {
     return;
   }
   body.innerHTML = msgs
-    .map(
-      (m, i) => `<div class="msgrow" data-i="${i}">
-        <div class="meta">
-          <div class="t">${m.needsPass ? ICON.lockmini + " " : ""}${esc(senderName(m))}</div>
-          <div class="s">${m.needsPass ? "Passphrase required" : esc((m.plaintext || "").slice(0, 60))}</div>
-        </div>
-        <div class="right">${senderChip(m)}<div class="time">${esc(fmtTime(m.created_at))}</div></div>
-      </div>`
-    )
+    .map((m, i) => {
+      const name = m.locked ? esc(m.display || m.contactId) : esc(senderName(m));
+      const sub = m.locked
+        ? m.pending
+          ? "Locked — secure to read"
+          : "Locked — enter phrase"
+        : m.needsPass
+          ? "Passphrase required"
+          : esc((m.plaintext || "").slice(0, 60));
+      const chip = m.locked ? `<span class="badge">${ICON.lockmini} Locked</span>` : senderChip(m);
+      const icon = m.locked || m.needsPass ? ICON.lockmini + " " : "";
+      return `<div class="msgrow" data-i="${i}">
+        <div class="meta"><div class="t">${icon}${name}</div><div class="s">${sub}</div></div>
+        <div class="right">${chip}<div class="time">${esc(fmtTime(m.created_at))}</div></div>
+      </div>`;
+    })
     .join("");
   body.querySelectorAll(".msgrow").forEach((row) => {
     row.addEventListener("click", () => showMessage(msgs[Number(row.dataset.i)]));
   });
 }
 
+function noteBanner(data) {
+  return data.keyChanged
+    ? `<div class="trust danger">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>`
+    : data.sender?.state === "verified"
+      ? `<div class="trust ok">${ICON.shield} Verified — from ${esc(data.display || data.sender.id)}</div>`
+      : data.sender?.state === "anonymous"
+        ? `<div class="trust">Anonymous sender — Bastion can't tell you who sent this.</div>`
+        : `<div class="trust warn">Unverified sender${data.sender?.id ? " · " + esc(data.sender.id) : ""}. Add &amp; verify them to confirm their identity.</div>`;
+}
+
+// Render a decrypted note. `del` is the message to delete it; `replyId` enables Reply.
+function renderOpenedNote(data, del, replyId) {
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Message</b><button class="iconbtn" id="del" title="Delete">${ICON.trash}</button></div>
+      <div class="dscroll" id="msg-body"></div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showInbox());
+  document.getElementById("del").addEventListener("click", async () => {
+    await send(del);
+    toast("Message deleted");
+    showInbox();
+  });
+  document.getElementById("msg-body").innerHTML = `
+    ${noteBanner(data)}
+    <div class="notebody">${esc(data.plaintext || "")}</div>
+    ${replyId ? `<button class="btn btn-block" id="reply" style="margin-top:10px;display:flex;gap:10px;justify-content:center">${ICON.send} Reply</button>` : ""}`;
+  if (replyId) document.getElementById("reply").addEventListener("click", () => showCompose(replyId));
+}
+
+// ── lock phrase strength (offline-attacker estimate, NOT the WASM open cost) ──
+function phraseStrength(p) {
+  if (!p) return { label: "", cls: "", pct: 0 };
+  let charset = 0;
+  if (/[a-z]/.test(p)) charset += 26;
+  if (/[A-Z]/.test(p)) charset += 26;
+  if (/[0-9]/.test(p)) charset += 10;
+  if (/[^a-zA-Z0-9]/.test(p)) charset += 30;
+  const bits = p.length * Math.log2(charset || 1);
+  if (bits < 40) return { label: "Very weak — minutes–hours if your vault is stolen", cls: "danger", pct: 25 };
+  if (bits < 55) return { label: "Weak — days to weeks", cls: "warn", pct: 50 };
+  if (bits < 75) return { label: "OK — years", cls: "ok", pct: 75 };
+  return { label: "Strong — infeasible offline", cls: "ok", pct: 100 };
+}
+function updateMeter(p) {
+  const el = document.getElementById("meter");
+  if (!el) return;
+  const s = phraseStrength(p);
+  el.innerHTML = p
+    ? `<div class="meter-bar"><span class="${s.cls}" style="width:${s.pct}%"></span></div><div class="meter-label ${s.cls}">${esc(s.label)}</div>`
+    : "";
+}
+function lockPhraseError(phrase, confirm) {
+  if (phrase.length < 8) return "Use at least 8 characters.";
+  if (phrase !== confirm) return "The two phrases don't match.";
+  return null;
+}
+
 function showMessage(m) {
+  if (m.locked && m.pending) return showLockSecure(m); // a lock-contact message not yet secured
+  if (m.locked) return showLockedOpen(m); // an already-locked vault record
+
+  // ── normal message ──
   const render = (data) => {
-    app.innerHTML = `
-      <div class="detail">
-        <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Message</b><button class="iconbtn" id="del" title="Delete">${ICON.trash}</button></div>
-        <div class="dscroll" id="msg-body"></div>
-      </div>`;
-    document.getElementById("back").addEventListener("click", () => showInbox());
-    document.getElementById("del").addEventListener("click", async () => {
-      await send({ type: "SEND_INBOX_DELETE", messageId: m.message_id });
-      toast("Message deleted");
-      showInbox();
-    });
-    const body = document.getElementById("msg-body");
-    const banner =
-      data.keyChanged
-        ? `<div class="trust danger">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>`
-        : data.sender?.state === "verified"
-          ? `<div class="trust ok">${ICON.shield} Verified — from ${esc(data.display || data.sender.id)}</div>`
-          : data.sender?.state === "anonymous"
-            ? `<div class="trust">Anonymous sender — Bastion can't tell you who sent this.</div>`
-            : `<div class="trust warn">Unverified sender${data.sender?.id ? " · " + esc(data.sender.id) : ""}. Add &amp; verify them to confirm their identity.</div>`;
     if (data.needsPass) {
-      body.innerHTML = `
+      app.innerHTML = `
+        <div class="detail">
+          <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Message</b><span style="width:30px"></span></div>
+          <div class="dscroll" id="msg-body"></div>
+        </div>`;
+      document.getElementById("back").addEventListener("click", () => showInbox());
+      document.getElementById("msg-body").innerHTML = `
         <div class="trust">${ICON.lockmini} This note is protected by an extra passphrase.</div>
         <div class="field" style="margin-top:8px"><label>Passphrase</label><input class="input" id="mp" type="password" autofocus /></div>
         <div id="mp-msg"></div>
         <button class="btn btn-primary btn-block" id="open">Open</button>`;
       const btn = document.getElementById("open");
       const go = async () => {
+        const passphrase = document.getElementById("mp").value;
         btn.disabled = true;
         btn.textContent = "Opening…";
-        const rr = await send({ type: "SEND_OPEN", messageId: m.message_id, passphrase: document.getElementById("mp").value });
+        const rr = await send({ type: "SEND_OPEN", messageId: m.message_id, passphrase });
+        // Opening revealed a lock contact → never show plaintext; secure it.
+        if (rr.ok && rr.locked) return showLockSecure({ message_id: rr.message_id, contactId: rr.contactId, display: rr.display }, passphrase);
         if (rr.ok) return render(rr);
         document.getElementById("mp-msg").innerHTML = `<div class="callout">${esc(rr.error || "Could not open.")}</div>`;
         btn.disabled = false;
@@ -508,15 +566,74 @@ function showMessage(m) {
       document.getElementById("mp").addEventListener("keydown", (e) => e.key === "Enter" && go());
       return;
     }
-    // Reply only makes sense when we know who sent it (not anonymous).
-    const canReply = !!data.sender?.id;
-    body.innerHTML = `
-      ${banner}
-      <div class="notebody">${esc(data.plaintext || "")}</div>
-      ${canReply ? `<button class="btn btn-block" id="reply" style="margin-top:10px;display:flex;gap:10px;justify-content:center">${ICON.send} Reply</button>` : ""}`;
-    if (canReply) document.getElementById("reply").addEventListener("click", () => showCompose(data.sender.id));
+    renderOpenedNote(data, { type: "SEND_INBOX_DELETE", messageId: m.message_id }, data.sender?.id || null);
   };
   render(m);
+}
+
+function showLockSecure(m, sendPassphrase) {
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Secure message</b><span style="width:30px"></span></div>
+      <div class="dscroll">
+        <div class="trust">${ICON.lockmini} From ${esc(m.display || m.contactId)} — locked. Choose a lock phrase to secure &amp; read it. You'll re-enter the same phrase to open future messages from them.</div>
+        <div class="field" style="margin-top:8px"><label>Lock phrase (8+ chars)</label><input class="input" id="p1" type="password" autofocus /></div>
+        <div id="meter" class="meter"></div>
+        <div class="field"><label>Confirm</label><input class="input" id="p2" type="password" /></div>
+        <div id="ls-msg"></div>
+        <button class="btn btn-primary btn-block" id="go">Secure &amp; read</button>
+      </div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showInbox());
+  const p1 = document.getElementById("p1");
+  p1.addEventListener("input", () => updateMeter(p1.value));
+  document.getElementById("go").addEventListener("click", async (e) => {
+    const phrase = p1.value;
+    const err = lockPhraseError(phrase, document.getElementById("p2").value);
+    if (err) {
+      document.getElementById("ls-msg").innerHTML = `<div class="callout">${esc(err)}</div>`;
+      return;
+    }
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "Securing…";
+    const rr = await send({ type: "SEND_LOCK_FINALIZE", messageId: m.message_id, contactId: m.contactId, phrase, passphrase: sendPassphrase });
+    if (rr.ok) return renderOpenedNote(rr, { type: "SEND_LOCK_DELETE", localId: rr.local_id }, rr.sender?.id || null);
+    document.getElementById("ls-msg").innerHTML = `<div class="callout">${esc(rr.error || "Could not secure.")}</div>`;
+    btn.disabled = false;
+    btn.textContent = "Secure & read";
+  });
+}
+
+function showLockedOpen(m) {
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Locked message</b><button class="iconbtn" id="del" title="Delete">${ICON.trash}</button></div>
+      <div class="dscroll">
+        <div class="trust">${ICON.lockmini} From ${esc(m.display || m.contactId)} — enter the lock phrase to read.</div>
+        <div class="field" style="margin-top:8px"><label>Lock phrase</label><input class="input" id="p" type="password" autofocus /></div>
+        <div id="lo-msg"></div>
+        <button class="btn btn-primary btn-block" id="go">Open</button>
+      </div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showInbox());
+  document.getElementById("del").addEventListener("click", async () => {
+    await send({ type: "SEND_LOCK_DELETE", localId: m.local_id });
+    toast("Message deleted");
+    showInbox();
+  });
+  const go = async () => {
+    const btn = document.getElementById("go");
+    btn.disabled = true;
+    btn.textContent = "Opening…";
+    const rr = await send({ type: "SEND_LOCK_OPEN", localId: m.local_id, phrase: document.getElementById("p").value });
+    if (rr.ok) return renderOpenedNote(rr, { type: "SEND_LOCK_DELETE", localId: m.local_id }, rr.sender?.id || null);
+    document.getElementById("lo-msg").innerHTML = `<div class="callout">${esc(rr.error || "Wrong lock phrase.")}</div>`;
+    btn.disabled = false;
+    btn.textContent = "Open";
+  };
+  document.getElementById("go").addEventListener("click", go);
+  document.getElementById("p").addEventListener("keydown", (e) => e.key === "Enter" && go());
 }
 
 // ── compose ──
@@ -595,8 +712,38 @@ function contactRow(c) {
     <div class="ico" style="background:${colorFor(c.display || c.bastion_id)}">${esc((c.display || "?")[0].toUpperCase())}</div>
     <div class="meta"><div class="t">${esc(c.display)}</div><div class="s mono">${esc(c.bastion_id)}</div></div>
     ${trustBadge(c)}
+    <button class="iconbtn${c.lock_enabled ? " on" : ""}" data-lock title="${c.lock_enabled ? "Lock phrase on" : "Enable lock phrase"}">${ICON.lockmini}</button>
     <button class="iconbtn" data-del title="Remove">${ICON.trash}</button>
   </div>`;
+}
+
+function showLockEnable(bastionId) {
+  app.innerHTML = `
+    <div class="detail">
+      <div class="dtop"><button class="iconbtn" id="back" title="Back">${ICON.back}</button><b style="flex:1;text-align:center;font-size:15px">Lock phrase</b><span style="width:30px"></span></div>
+      <div class="dscroll">
+        <div class="warnbox">
+          <b>⚠️ Before you enable a lock phrase</b>
+          <p>Messages from this contact get locked behind a phrase you choose the first time you secure one.</p>
+          <ul>
+            <li>The phrase is <b>never stored</b>. Forget it and those messages are <b>permanently unreadable</b> — even by you.</li>
+            <li>It <b>can't be changed</b>. To change it, delete &amp; re-add the contact (locked messages are lost).</li>
+            <li>A short phrase can be brute-forced if your vault is stolen — use <b>8+ characters</b>, ideally a passphrase. For real secrecy, ask the sender to add a send passphrase.</li>
+          </ul>
+        </div>
+        <button class="btn btn-primary btn-block" id="enable">I understand — enable</button>
+        <button class="btn btn-block" id="cancel" style="margin-top:6px">Cancel</button>
+      </div>
+    </div>`;
+  document.getElementById("back").addEventListener("click", () => showContacts());
+  document.getElementById("cancel").addEventListener("click", () => showContacts());
+  document.getElementById("enable").addEventListener("click", async () => {
+    const r = await send({ type: "CONTACTS_SET_LOCK", bastionId });
+    if (r.ok) {
+      toast("Lock phrase enabled");
+      showContacts();
+    } else toast(r.error || "Could not enable");
+  });
 }
 
 async function showContacts() {
@@ -621,6 +768,15 @@ async function showContacts() {
   }
   body.innerHTML = list.map(contactRow).join("");
   body.querySelectorAll(".contact[data-id]").forEach((row) => {
+    const c = list.find((x) => x.bastion_id === row.dataset.id);
+    row.querySelector("[data-lock]")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (c?.lock_enabled) {
+        toast("Lock phrase is on. Delete & re-add the contact to change it.");
+        return;
+      }
+      showLockEnable(row.dataset.id);
+    });
     row.querySelector("[data-del]")?.addEventListener("click", async (e) => {
       e.stopPropagation();
       await send({ type: "CONTACTS_DELETE", bastionId: row.dataset.id });

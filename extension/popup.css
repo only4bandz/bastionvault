@@ -196,6 +196,27 @@ body {
   background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px;
 }
 
+/* ── lock phrase ── */
+.iconbtn.on { color: var(--accent); }
+.warnbox {
+  background: rgba(246, 198, 91, .08); border: 1px solid rgba(246, 198, 91, .25);
+  border-radius: var(--r-md); padding: 12px 14px; margin: 6px 0 14px; font-size: 13px; line-height: 1.5;
+}
+.warnbox b { display: block; margin-bottom: 6px; color: var(--warn); }
+.warnbox p { margin: 0 0 8px; color: var(--muted); }
+.warnbox ul { margin: 0; padding-left: 18px; color: var(--muted); }
+.warnbox li { margin-bottom: 6px; }
+.meter { margin: -4px 0 10px; }
+.meter-bar { height: 5px; border-radius: 999px; background: var(--surface-3, var(--line)); overflow: hidden; }
+.meter-bar span { display: block; height: 100%; border-radius: 999px; transition: width .15s ease; }
+.meter-bar span.danger { background: var(--danger); }
+.meter-bar span.warn { background: var(--warn); }
+.meter-bar span.ok { background: var(--ok); }
+.meter-label { font-size: 11px; margin-top: 4px; }
+.meter-label.danger { color: var(--danger); }
+.meter-label.warn { color: var(--warn); }
+.meter-label.ok { color: var(--ok); }
+
 /* ── toast ── */
 .toast {
   position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%);

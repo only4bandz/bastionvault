@@ -14,7 +14,7 @@
 // Everything is cleared on lock or at expiry; nothing secret touches any
 // disk-backed web storage (enforced by scripts/check-no-browser-secret-storage.sh).
 
-import init, { unlock, rehydrate, send_safety_number } from "./pkg/crypto_wasm.js";
+import init, { unlock, rehydrate, send_safety_number, send_lock_open, send_lock_new_params } from "./pkg/crypto_wasm.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
 
@@ -31,6 +31,11 @@ const isReservedItem = (id) => id.startsWith("bastion:send-");
 const SEND_IDENTITY_ID = "bastion:send-identity";
 // Reserved id for the encrypted verified-contacts list.
 const SEND_CONTACTS_ID = "bastion:send-contacts";
+// Reserved prefix for lock-phrase-protected (re-encrypted) messages.
+const SEND_LOCKED_PREFIX = "bastion:send-locked:";
+
+// A lock-enabled contact for this sender id (the recipient set a lock phrase).
+const lockContactFor = (s, id) => (s.contacts || []).find((c) => c.bastion_id === id && c.lock_enabled);
 
 // Canonical JSON of a PublicIdentity (stable key order) for fingerprinting.
 const canonPublic = (pub) => JSON.stringify(pub, Object.keys(pub).sort());
@@ -216,6 +221,7 @@ async function ensureSession() {
     const vault = await api.getVault(token);
     const items = new Map();
     let contacts = [];
+    const lockedRecords = [];
     for (const [id, blob] of Object.entries(vault.items || {})) {
       if (id === SEND_IDENTITY_ID) {
         try { account.load_send_identity(JSON.stringify(blob)); } catch { /* malformed */ }
@@ -225,6 +231,10 @@ async function ensureSession() {
         try { contacts = JSON.parse(account.decrypt_item(JSON.stringify(blob), id)); } catch { /* malformed */ }
         continue;
       }
+      if (id.startsWith(SEND_LOCKED_PREFIX)) {
+        try { lockedRecords.push(JSON.parse(account.decrypt_item(JSON.stringify(blob), id))); } catch { /* malformed */ }
+        continue;
+      }
       if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
       try {
         items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
@@ -232,7 +242,7 @@ async function ensureSession() {
         /* skip corrupt/tampered item */
       }
     }
-    session = { account, token, email: stored.email, server: stored.server, items, contacts, expiresAt: stored.expiresAt };
+    session = { account, token, email: stored.email, server: stored.server, items, contacts, lockedRecords, expiresAt: stored.expiresAt };
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
     return session;
@@ -281,6 +291,7 @@ async function doUnlock(email, password, secretKey) {
 
   const items = new Map();
   let contacts = [];
+  const lockedRecords = [];
   for (const [id, blob] of Object.entries(vault.items || {})) {
     if (id === SEND_IDENTITY_ID) {
       try { account.load_send_identity(JSON.stringify(blob)); } catch { /* malformed */ }
@@ -288,6 +299,10 @@ async function doUnlock(email, password, secretKey) {
     }
     if (id === SEND_CONTACTS_ID) {
       try { contacts = JSON.parse(account.decrypt_item(JSON.stringify(blob), id)); } catch { /* malformed */ }
+      continue;
+    }
+    if (id.startsWith(SEND_LOCKED_PREFIX)) {
+      try { lockedRecords.push(JSON.parse(account.decrypt_item(JSON.stringify(blob), id))); } catch { /* malformed */ }
       continue;
     }
     if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
@@ -298,7 +313,7 @@ async function doUnlock(email, password, secretKey) {
     }
   }
 
-  session = { account, token, email, server, items, contacts };
+  session = { account, token, email, server, items, contacts, lockedRecords };
   await persistSession();
   await touchSession();
   chrome.action.setBadgeText({ text: "✓" });
@@ -702,11 +717,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             return sendResponse({ ok: false, error: e?.message || "Could not load inbox." });
           }
           s.inboxCache = new Map();
-          const messages = (list || []).map((m) => {
-            s.inboxCache.set(m.message_id, m.blob);
+          const messages = [];
+          for (const m of list || []) {
+            s.inboxCache.set(m.message_id, { blob: m.blob, created_at: m.created_at });
             const opened = openMessage(s, m.blob, undefined);
-            return { message_id: m.message_id, created_at: m.created_at, expires_at: m.expires_at, ...opened };
-          });
+            // NO-PERSIST enforcement: if the sender is a lock-enabled contact,
+            // never return the identity-decrypted plaintext — surface a locked
+            // placeholder; the plaintext is discarded (sealed-sender means we had
+            // to decrypt in RAM just to learn the sender).
+            const lc = opened.sender?.id ? lockContactFor(s, opened.sender.id) : null;
+            if (lc) {
+              // Idempotency: if this message was already locked (a prior finalize
+              // whose inbox-delete failed), don't show a duplicate pending row —
+              // the locked record is listed below; just clear the server copy.
+              if ((s.lockedRecords || []).some((r) => r.message_id === m.message_id)) {
+                try { await makeApi(s.server).inboxDelete(s.token, m.message_id); } catch { /* retry next load */ }
+                continue;
+              }
+              messages.push({ message_id: m.message_id, created_at: m.created_at, locked: true, pending: true, contactId: lc.bastion_id, display: lc.display });
+            } else {
+              messages.push({ message_id: m.message_id, created_at: m.created_at, expires_at: m.expires_at, ...opened });
+            }
+          }
+          // Already-locked records (vault items) shown as locked rows, deduped
+          // by message_id (concurrent dual-device finalizes mint distinct items).
+          const seenLocked = new Set();
+          for (const r of s.lockedRecords || []) {
+            if (seenLocked.has(r.message_id)) continue;
+            seenLocked.add(r.message_id);
+            const c = (s.contacts || []).find((x) => x.bastion_id === r.contact_id);
+            messages.push({ local_id: r.local_id, created_at: r.created_at, locked: true, pending: false, contactId: r.contact_id, display: c?.display || r.contact_id });
+          }
+          messages.sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
           sendResponse({ ok: true, messages });
           break;
         }
@@ -714,11 +756,97 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
           await touchSession();
-          const blob = s.inboxCache?.get(msg.messageId);
-          if (!blob) return sendResponse({ ok: false, error: "Message is no longer available." });
-          const opened = openMessage(s, blob, msg.passphrase);
+          const cached = s.inboxCache?.get(msg.messageId);
+          if (!cached) return sendResponse({ ok: false, error: "Message is no longer available." });
+          const opened = openMessage(s, cached.blob, msg.passphrase);
           if (opened.error) return sendResponse({ ok: false, error: opened.error, needsPass: opened.needsPass });
+          // NO-PERSIST guard at the trust boundary: if opening revealed a
+          // lock-enabled contact (e.g. a sender-passphrase'd message whose sender
+          // we couldn't see at list time), NEVER return the plaintext — route to
+          // the lock-phrase secure flow instead.
+          const lc = opened.sender?.id ? lockContactFor(s, opened.sender.id) : null;
+          if (lc) {
+            return sendResponse({ ok: true, locked: true, pending: true, message_id: msg.messageId, contactId: lc.bastion_id, display: lc.display });
+          }
           sendResponse({ ok: true, message_id: msg.messageId, ...opened });
+          break;
+        }
+        case "CONTACTS_SET_LOCK": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const contact = (s.contacts || []).find((c) => c.bastion_id === msg.bastionId);
+          if (!contact) return sendResponse({ ok: false, error: "Unknown contact." });
+          if (contact.lock_enabled) return sendResponse({ ok: true }); // already on
+          const params = JSON.parse(send_lock_new_params());
+          contact.lock_enabled = true;
+          contact.lock_salt = params.salt;
+          contact.lock_kdf = params.kdf;
+          await saveContacts(s);
+          sendResponse({ ok: true });
+          break;
+        }
+        case "SEND_LOCK_FINALIZE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          if (!msg.phrase || msg.phrase.length < 8) {
+            return sendResponse({ ok: false, error: "Lock phrase must be at least 8 characters." });
+          }
+          const cached = s.inboxCache?.get(msg.messageId);
+          if (!cached) return sendResponse({ ok: false, error: "Message is no longer available." });
+          const contact = lockContactFor(s, msg.contactId);
+          if (!contact) return sendResponse({ ok: false, error: "This contact has no lock phrase." });
+          let recordJson;
+          try {
+            recordJson = s.account.send_lock_finalize(
+              JSON.stringify(cached.blob),
+              contact.bastion_id,
+              cached.created_at || 0,
+              msg.passphrase || undefined, // sender passphrase, if the message had one
+              contact.verified ? JSON.stringify(contact.public) : undefined,
+              msg.phrase,
+              contact.lock_salt,
+              JSON.stringify(contact.lock_kdf)
+            );
+          } catch {
+            return sendResponse({ ok: false, error: "Could not lock this message." });
+          }
+          const record = JSON.parse(recordJson);
+          const itemId = SEND_LOCKED_PREFIX + record.local_id;
+          const itemBlob = JSON.parse(s.account.encrypt_item(recordJson, itemId));
+          await makeApi(s.server).putItem(s.token, itemId, itemBlob); // persist BEFORE delete
+          s.lockedRecords.push(record);
+          try { await makeApi(s.server).inboxDelete(s.token, msg.messageId); } catch { /* retry later */ }
+          s.inboxCache.delete(msg.messageId);
+          const opened = JSON.parse(send_lock_open(recordJson, msg.phrase, contact.lock_salt, JSON.stringify(contact.lock_kdf)));
+          sendResponse({ ok: true, local_id: record.local_id, display: contact.display, ...opened });
+          break;
+        }
+        case "SEND_LOCK_OPEN": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          const record = (s.lockedRecords || []).find((r) => r.local_id === msg.localId);
+          if (!record) return sendResponse({ ok: false, error: "Message is no longer available." });
+          const contact = (s.contacts || []).find((c) => c.bastion_id === record.contact_id && c.lock_enabled);
+          if (!contact) return sendResponse({ ok: false, error: "Contact lock data missing." });
+          let opened;
+          try {
+            opened = JSON.parse(send_lock_open(JSON.stringify(record), msg.phrase, contact.lock_salt, JSON.stringify(contact.lock_kdf)));
+          } catch {
+            return sendResponse({ ok: false, error: "Wrong lock phrase." });
+          }
+          sendResponse({ ok: true, local_id: record.local_id, display: contact.display, ...opened });
+          break;
+        }
+        case "SEND_LOCK_DELETE": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await touchSession();
+          try { await makeApi(s.server).deleteItem(s.token, SEND_LOCKED_PREFIX + msg.localId); } catch { /* already gone */ }
+          s.lockedRecords = (s.lockedRecords || []).filter((r) => r.local_id !== msg.localId);
+          sendResponse({ ok: true });
           break;
         }
         case "SEND_INBOX_DELETE": {
@@ -785,6 +913,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
           await touchSession();
+          const gone = (s.contacts || []).find((c) => c.bastion_id === msg.bastionId);
+          // Hard-delete the contact's locked messages (design §7): they become
+          // permanently unreadable, honoring the lock-phrase warning.
+          const orphaned = (s.lockedRecords || []).filter((r) => r.contact_id === msg.bastionId);
+          for (const r of orphaned) {
+            try { await makeApi(s.server).deleteItem(s.token, SEND_LOCKED_PREFIX + r.local_id); } catch { /* already gone */ }
+          }
+          // For a lock contact, also purge any STILL-PENDING (un-secured) inbox
+          // messages from them — otherwise they'd revert to readable once the
+          // contact (and its lock flag) is gone, contradicting the warning.
+          if (gone?.lock_enabled) {
+            try {
+              const list = await makeApi(s.server).inbox(s.token);
+              for (const m of list || []) {
+                const opened = openMessage(s, m.blob, undefined);
+                if (opened.sender?.id === msg.bastionId) {
+                  try { await makeApi(s.server).inboxDelete(s.token, m.message_id); } catch { /* best effort */ }
+                }
+              }
+            } catch { /* inbox unreachable; best effort */ }
+          }
+          s.lockedRecords = (s.lockedRecords || []).filter((r) => r.contact_id !== msg.bastionId);
           s.contacts = (s.contacts || []).filter((x) => x.bastion_id !== msg.bastionId);
           await saveContacts(s);
           sendResponse({ ok: true });
