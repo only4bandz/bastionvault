@@ -17,6 +17,7 @@
 import init, { unlock, rehydrate, send_safety_number, send_lock_open, send_lock_new_params } from "./pkg/crypto_wasm.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
+import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
 import { loadVaultState, VaultIntegrityError } from "./lib/vault-load.js";
 
 const DEFAULT_SERVER = "http://127.0.0.1:7777";
@@ -157,7 +158,7 @@ async function persistSession() {
 // that follows via storage.session; plaintext lives in RAM only until the user
 // saves or dismisses) ──
 let pendingSave = null;
-let lastUser = ""; // last username/email typed (for multi-step sign-ups)
+let lastUser = null; // origin-bound username for multi-step sign-ups
 async function setPending(p) {
   pendingSave = { ...p, stagedAt: Date.now() };
   await chrome.storage.session.set({ pendingSave });
@@ -176,8 +177,24 @@ async function clearPending() {
   await chrome.storage.session.remove("pendingSave");
 }
 
+async function setLastUser(username, host) {
+  lastUser = makeStagedUsername(username, host);
+  if (lastUser) await chrome.storage.session.set({ lastUser });
+  else await chrome.storage.session.remove("lastUser");
+}
+
+async function takeLastUser(host) {
+  if (!lastUser) lastUser = (await chrome.storage.session.get("lastUser")).lastUser || null;
+  const username = stagedUsernameFor(lastUser, host);
+  lastUser = null;
+  await chrome.storage.session.remove("lastUser");
+  return username;
+}
+
 async function lock() {
   await clearPending(); // don't leave a staged plaintext password around
+  lastUser = null;
+  await chrome.storage.session.remove("lastUser");
   if (session) {
     const { account, token, server } = session;
     if (token) makeApi(server).logout(token).catch(() => {});
@@ -469,8 +486,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         case "STAGE_USER": {
           // Username/email typed (often on a prior step than the password).
-          lastUser = (msg.username || "").trim();
-          await chrome.storage.session.set({ lastUser });
+          if (!senderHost) return sendResponse({ ok: false, error: "forbidden" });
+          await setLastUser(msg.username, senderHost);
           sendResponse({ ok: true });
           break;
         }
@@ -479,8 +496,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // once the page settles. Host/URL are taken from the SENDER frame, not
           // the message, so a page can't stage a save for another origin.
           if (msg.password && senderHost) {
-            if (!lastUser) lastUser = (await chrome.storage.session.get("lastUser")).lastUser || "";
-            await setPending({ host: senderHost, url: sender.url, username: msg.username || lastUser || "", password: msg.password });
+            const stagedUser = await takeLastUser(senderHost);
+            await setPending({
+              host: senderHost,
+              url: sender.url,
+              username: msg.username || stagedUser,
+              password: msg.password,
+            });
           }
           sendResponse({ ok: true });
           break;
@@ -537,6 +559,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         case "CLEAR_PENDING":
           await clearPending();
+          lastUser = null;
+          await chrome.storage.session.remove("lastUser");
           sendResponse({ ok: true });
           break;
         case "ITEM": {
