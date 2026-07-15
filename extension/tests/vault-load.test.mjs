@@ -8,6 +8,7 @@ import {
   loadVaultState,
   prepareBootstrapManifest,
   prepareVaultMutation,
+  reconcileVaultMutation,
   VaultIntegrityError,
 } from "../lib/vault-load.js";
 
@@ -181,6 +182,67 @@ test("prepares copy-on-write manifest mutations and rejects duplicates", () => {
         { op: "put", id: "same", blob: nextBlob },
         { op: "delete", id: "same" },
       ]),
+    VaultIntegrityError
+  );
+});
+
+test("reconciles only the exact ambiguous mutation without decrypting items", () => {
+  const acc = account();
+  let decryptions = 0;
+  const decrypt = acc.decrypt_item;
+  acc.decrypt_item = (...args) => {
+    decryptions += 1;
+    return decrypt(...args);
+  };
+  const oldBlob = {
+    v: 1,
+    nonce: "old-nonce",
+    ct: "old-ct",
+    plaintext: JSON.stringify({ id: "old", type: "note", title: "Old", updatedAt: 1 }),
+  };
+  const nextBlob = {
+    v: 1,
+    nonce: "next-nonce",
+    ct: "next-ct",
+    plaintext: JSON.stringify({ id: "next", type: "note", title: "Next", updatedAt: 2 }),
+  };
+  const original = snapshot(acc, { old: oldBlob }, 2);
+  const current = loadVaultState(acc, original).integrity;
+  const prepared = prepareVaultMutation(acc, current, [
+    { op: "put", id: "next", blob: nextBlob },
+  ]);
+  decryptions = 0;
+
+  const committed = {
+    // Object order can differ after server HashMap serialization.
+    items: { next: nextBlob, old: oldBlob },
+    manifest: prepared.manifest,
+    revision: 3,
+  };
+  const reconciled = reconcileVaultMutation(acc, current, prepared, committed);
+  assert.equal(reconciled.revision, 3);
+  assert.equal(decryptions, 0);
+
+  assert.equal(reconcileVaultMutation(acc, current, prepared, original), null);
+
+  const competing = prepareVaultMutation(acc, current, [
+    { op: "delete", id: "old" },
+  ]);
+  assert.equal(
+    reconcileVaultMutation(acc, current, prepared, {
+      items: competing.encryptedItems,
+      manifest: competing.manifest,
+      revision: 3,
+    }),
+    null
+  );
+
+  assert.throws(
+    () =>
+      reconcileVaultMutation(acc, current, prepared, {
+        ...committed,
+        items: { ...committed.items, next: { ...nextBlob, ct: "tampered" } },
+      }),
     VaultIntegrityError
   );
 });

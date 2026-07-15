@@ -26,6 +26,7 @@ import {
   loadVaultState,
   prepareBootstrapManifest,
   prepareVaultMutation,
+  reconcileVaultMutation,
   VaultIntegrityError,
 } from "./lib/vault-load.js";
 import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
@@ -159,12 +160,34 @@ async function commitVaultOperations(s, operations) {
       const current = s.integrity;
       if (!current) throw new VaultIntegrityError();
       const prepared = prepareVaultMutation(s.account, current, operations);
-      const result = await makeApi(s.server).mutateVault(
-        s.token,
-        current.revision,
-        prepared.operations,
-        prepared.manifest
-      );
+      const api = makeApi(s.server);
+      let result;
+      try {
+        result = await api.mutateVault(
+          s.token,
+          current.revision,
+          prepared.operations,
+          prepared.manifest
+        );
+      } catch (error) {
+        const ambiguous =
+          error instanceof ApiError && (error.status === 0 || error.status >= 500);
+        if (ambiguous && session === s) {
+          try {
+            const remote = await api.getVault(s.token);
+            const reconciled = reconcileVaultMutation(s.account, current, prepared, remote);
+            if (reconciled && session === s) {
+              s.integrity = reconciled;
+              await persistSession();
+              return;
+            }
+          } catch {
+            // The original mutation remains ambiguous. The outer handler locks
+            // before any caller can publish speculative local state.
+          }
+        }
+        throw error;
+      }
       if (session !== s) return;
       s.integrity = completeVaultMutation(s.account, current, prepared, result.revision);
       await persistSession();
@@ -172,7 +195,8 @@ async function commitVaultOperations(s, operations) {
       const mustLock =
         error instanceof VaultIntegrityError ||
         !(error instanceof ApiError) ||
-        [0, 401, 409].includes(error.status);
+        [0, 401, 409].includes(error.status) ||
+        error.status >= 500;
       if (mustLock && session === s) await lock();
       throw error;
     }

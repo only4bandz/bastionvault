@@ -96,8 +96,7 @@ function decryptVaultItems(account, rawItems) {
   return { items, contacts, lockedRecords };
 }
 
-/** Verify manifest + complete encrypted set before decrypting any item. */
-export function loadVaultState(account, vault, { lastSeenSeq, minimumRevision } = {}) {
+function verifyVaultSnapshot(account, vault, { lastSeenSeq, minimumRevision } = {}) {
   try {
     if (!isRecord(vault) || !isRecord(vault.items) || !isRecord(vault.manifest)) {
       throw new VaultIntegrityError();
@@ -113,16 +112,24 @@ export function loadVaultState(account, vault, { lastSeenSeq, minimumRevision } 
         ? account.open_manifest(sealedJson)
         : account.open_manifest_checked(sealedJson, lastSeenSeq);
     requireIntactReport(account.check_manifest(manifestJson, JSON.stringify(vault.items)));
-    const decrypted = decryptVaultItems(account, vault.items);
     return {
-      ...decrypted,
-      integrity: {
-        revision: vault.revision,
-        manifestJson,
-        manifestSeq: account.manifest_seq(manifestJson),
-        encryptedItems: { ...vault.items },
-      },
+      revision: vault.revision,
+      manifestJson,
+      manifestSeq: account.manifest_seq(manifestJson),
+      encryptedItems: { ...vault.items },
     };
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
+}
+
+/** Verify manifest + complete encrypted set before decrypting any item. */
+export function loadVaultState(account, vault, options = {}) {
+  try {
+    const integrity = verifyVaultSnapshot(account, vault, options);
+    const decrypted = decryptVaultItems(account, vault.items);
+    return { ...decrypted, integrity };
   } catch (error) {
     if (error instanceof VaultIntegrityError) throw error;
     throw new VaultIntegrityError();
@@ -218,6 +225,47 @@ export function completeVaultMutation(account, current, prepared, revision) {
       manifestSeq: account.manifest_seq(prepared.manifestJson),
       encryptedItems: prepared.encryptedItems,
     };
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
+}
+
+function encryptedItemsEqual(left, right) {
+  const leftIds = Object.keys(left).sort();
+  const rightIds = Object.keys(right).sort();
+  return (
+    leftIds.length === rightIds.length &&
+    leftIds.every((id, index) => {
+      const a = left[id];
+      const b = right[rightIds[index]];
+      return (
+        id === rightIds[index] &&
+        isRecord(a) &&
+        isRecord(b) &&
+        a.v === b.v &&
+        a.nonce === b.nonce &&
+        a.ct === b.ct
+      );
+    })
+  );
+}
+
+/** Positively confirm an ambiguous transaction without decrypting item data. */
+export function reconcileVaultMutation(account, current, prepared, vault) {
+  try {
+    const verified = verifyVaultSnapshot(account, vault, {
+      lastSeenSeq: current.manifestSeq,
+      minimumRevision: current.revision,
+    });
+    if (
+      verified.revision !== current.revision + 1 ||
+      verified.manifestJson !== prepared.manifestJson ||
+      !encryptedItemsEqual(verified.encryptedItems, prepared.encryptedItems)
+    ) {
+      return null;
+    }
+    return completeVaultMutation(account, current, prepared, verified.revision);
   } catch (error) {
     if (error instanceof VaultIntegrityError) throw error;
     throw new VaultIntegrityError();

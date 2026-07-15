@@ -34,6 +34,10 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
   in trusted `chrome.storage.session`, so rollback remains detectable across
   service-worker eviction. The checkpoint does not survive a full browser
   restart, and no cross-restart rollback guarantee is claimed.
+- Vault mutations are serialized, copy-on-write CAS transactions. After an
+  ambiguous response, the worker advances session state only when a fresh
+  manifest-verified encrypted snapshot exactly matches the prepared next
+  revision; otherwise it locks without decrypting reconciliation data.
 - **Auto-lock** after 10 minutes of inactivity, and immediately when the OS
   session locks (`chrome.idle`).
 - Two autofill paths: (1) **inline** — a content script shows a dropdown of
