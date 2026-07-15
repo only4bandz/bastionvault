@@ -7,7 +7,7 @@ import { Dialog } from "../components/Dialog";
 import { Favicon } from "../components/Favicon";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
-  IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault,
+  IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { strength } from "../lib/generator";
@@ -16,6 +16,7 @@ import type { ImportResult } from "../lib/import";
 import type { Account } from "../lib/wasm";
 import type { Contact } from "../lib/send";
 import type { Blob } from "../lib/api";
+import { filterVaultItems } from "../lib/vault-search";
 import { Send } from "./Send";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
@@ -103,17 +104,12 @@ export function Vault({
   const [page, setPage] = useState(1);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const firstNavRef = useRef<HTMLButtonElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
   const mobileNavWasOpen = useRef(false);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return items
-      .filter((i) => tab === "all" || i.type === tab)
-      .filter((i) => !q || i.title.toLowerCase().includes(q) || (i.username ?? "").toLowerCase().includes(q) || (i.url ?? "").toLowerCase().includes(q))
-      .sort((a, b) => b.updatedAt - a.updatedAt);
-  }, [items, tab, query]);
+  const filtered = useMemo(() => filterVaultItems(items, tab, query), [items, tab, query]);
 
   // Paginate so a 270-item vault doesn't scroll forever.
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
@@ -134,6 +130,37 @@ export function Vault({
     return () => {
       document.body.style.overflow = originalBodyOverflow;
     };
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
+    function handleSearchShortcut(event: globalThis.KeyboardEvent): void {
+      if (mobileNavOpen || document.querySelector('[role="dialog"]')) return;
+      const target = event.target;
+      const editable =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable);
+      const commandK =
+        event.key.toLowerCase() === "k" &&
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey;
+      const slash =
+        event.key === "/" &&
+        !editable &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey;
+      if (!commandK && !slash) return;
+
+      event.preventDefault();
+      setNav("vault");
+      setSoonLabel("");
+      searchInputRef.current?.focus();
+    }
+
+    document.addEventListener("keydown", handleSearchShortcut);
+    return () => document.removeEventListener("keydown", handleSearchShortcut);
   }, [mobileNavOpen]);
 
   function copy(text: string, what: string) {
@@ -266,8 +293,26 @@ export function Vault({
           </button>
           <div className="search">
             <IcSearch size={17} />
-            <input aria-label="Search vault items" placeholder="Search all items" value={query} onChange={(e) => setQuery(e.target.value)} />
-            <span className="kbd">Ctrl F</span>
+            <input
+              ref={searchInputRef}
+              aria-label="Search vault items"
+              placeholder="Search names, usernames, and websites"
+              value={query}
+              onFocus={() => go("vault")}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                if (query) setQuery("");
+                else event.currentTarget.blur();
+              }}
+            />
+            {query && (
+              <button className="icon-btn search-clear" aria-label="Clear search" onClick={() => setQuery("")}>
+                <IcX size={14} />
+              </button>
+            )}
+            <kbd className="kbd" aria-label="Keyboard shortcut Control or Command K">Ctrl/⌘ K</kbd>
           </div>
           <div className="topbar-right">
             <span className="pill">🔒 Zero-knowledge</span>
@@ -306,11 +351,36 @@ export function Vault({
                 )}
               </div>
 
+              {query.trim() && (
+                <div className="search-results-status faint" role="status" aria-live="polite">
+                  {filtered.length} {filtered.length === 1 ? "result" : "results"} for “{query.trim()}”
+                </div>
+              )}
+
               {filtered.length === 0 ? (
                 <div className="empty">
-                  <div className="big"><IcVault size={54} /></div>
-                  <div style={{ fontSize: 16, color: "var(--text-dim)" }}>No items yet</div>
-                  <div style={{ marginTop: 6 }}>Create your first item to get started.</div>
+                  <div className="big">{items.length === 0 ? <IcVault size={54} /> : <IcSearch size={54} />}</div>
+                  <div style={{ fontSize: 16, color: "var(--text-dim)" }}>
+                    {items.length === 0 ? "No items yet" : "No matching items"}
+                  </div>
+                  <div style={{ marginTop: 6 }}>
+                    {items.length === 0
+                      ? "Create your first item to get started."
+                      : "Try another search or item type."}
+                  </div>
+                  {items.length > 0 && (
+                    <button
+                      className="btn"
+                      style={{ marginTop: 16 }}
+                      onClick={() => {
+                        setQuery("");
+                        setTab("all");
+                        searchInputRef.current?.focus();
+                      }}
+                    >
+                      Clear filters
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="list">
