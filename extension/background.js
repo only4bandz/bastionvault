@@ -19,7 +19,15 @@ import { autofillPolicyError } from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
-import { loadVaultState, VaultIntegrityError } from "./lib/vault-load.js";
+import {
+  completeBootstrap,
+  completeVaultMutation,
+  loadLegacyVaultState,
+  loadVaultState,
+  prepareBootstrapManifest,
+  prepareVaultMutation,
+  VaultIntegrityError,
+} from "./lib/vault-load.js";
 import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
 import { SIGNING_UNAVAILABLE, senderIdForMode } from "./lib/send-policy.js";
 
@@ -46,9 +54,10 @@ async function sha256hex(str) {
 }
 
 // Persist the verified-contacts list as the encrypted reserved vault item.
-async function saveContacts(s) {
-  const blob = JSON.parse(s.account.encrypt_item(JSON.stringify(s.contacts || []), SEND_CONTACTS_ID));
-  await makeApi(s.server).putItem(s.token, SEND_CONTACTS_ID, blob);
+async function saveContacts(s, contacts = s.contacts || []) {
+  const blob = JSON.parse(s.account.encrypt_item(JSON.stringify(contacts), SEND_CONTACTS_ID));
+  await commitVaultOperations(s, [{ op: "put", id: SEND_CONTACTS_ID, blob }]);
+  s.contacts = contacts;
 }
 
 // Open one inbox blob (BR5 two-pass): pass 1 with no verifier discovers the
@@ -107,8 +116,74 @@ function ensureWasm() {
 }
 
 // ── in-memory session (fast path) ──
-// { account, token, email, server, items: Map<id, item> }
+// { account, token, email, server, items: Map<id, item>, integrity, mutationTail }
 let session = null;
+
+function checkpointFromStored(stored) {
+  if (stored.revision === undefined && stored.manifestSeq === undefined) return null;
+  if (
+    !Number.isSafeInteger(stored.revision) ||
+    stored.revision < 0 ||
+    typeof stored.manifestSeq !== "string" ||
+    !/^\d+$/.test(stored.manifestSeq)
+  ) {
+    throw new VaultIntegrityError();
+  }
+  return { revision: stored.revision, manifestSeq: BigInt(stored.manifestSeq) };
+}
+
+async function loadSessionVault(account, api, token, vault, checkpoint = null) {
+  if (vault?.manifest) {
+    return loadVaultState(account, vault, {
+      lastSeenSeq: checkpoint?.manifestSeq,
+      minimumRevision: checkpoint?.revision,
+    });
+  }
+  // A manifest disappearing while a trusted RAM checkpoint exists is a
+  // rollback, never a legacy bootstrap.
+  if (checkpoint) throw new VaultIntegrityError();
+  const decrypted = loadLegacyVaultState(account, vault);
+  const bootstrap = prepareBootstrapManifest(account, vault);
+  const result = await api.mutateVault(token, vault.revision, [], bootstrap.manifest);
+  return {
+    ...decrypted,
+    integrity: completeBootstrap(account, vault, bootstrap, result.revision),
+    bootstrapped: true,
+  };
+}
+
+async function commitVaultOperations(s, operations) {
+  const execute = async () => {
+    try {
+      if (session !== s) throw new VaultIntegrityError();
+      const current = s.integrity;
+      if (!current) throw new VaultIntegrityError();
+      const prepared = prepareVaultMutation(s.account, current, operations);
+      const result = await makeApi(s.server).mutateVault(
+        s.token,
+        current.revision,
+        prepared.operations,
+        prepared.manifest
+      );
+      if (session !== s) return;
+      s.integrity = completeVaultMutation(s.account, current, prepared, result.revision);
+      await persistSession();
+    } catch (error) {
+      const mustLock =
+        error instanceof VaultIntegrityError ||
+        !(error instanceof ApiError) ||
+        [0, 401, 409].includes(error.status);
+      if (mustLock && session === s) await lock();
+      throw error;
+    }
+  };
+  const scheduled = (s.mutationTail || Promise.resolve()).then(execute, execute);
+  s.mutationTail = scheduled.then(
+    () => undefined,
+    () => undefined
+  );
+  return scheduled;
+}
 
 async function getServerUrl() {
   const { serverUrl } = await chrome.storage.local.get("serverUrl");
@@ -149,13 +224,17 @@ async function touchSession() {
 
 async function persistSession() {
   if (!session) return;
+  if (!session.integrity) throw new VaultIntegrityError();
   const minutes = await getKeepMinutes();
+  if (!session.expiresAt) session.expiresAt = Date.now() + minutes * 60_000;
   await chrome.storage.session.set({
     [SESSION_KEY]: {
       crypto: session.account.export_session(), // contains the vault key (RAM only)
       email: session.email,
       server: session.server,
-      expiresAt: Date.now() + minutes * 60_000,
+      expiresAt: session.expiresAt,
+      revision: session.integrity.revision,
+      manifestSeq: session.integrity.manifestSeq.toString(),
     },
   });
 }
@@ -251,8 +330,27 @@ async function ensureSession() {
     api = makeApi(server);
     token = await api.login(stored.email, account.auth_secret);
     const vault = await api.getVault(token);
-    const { items, contacts, lockedRecords } = loadVaultState(account, vault.items);
-    session = { account, token, email: stored.email, server, items, contacts, lockedRecords, expiresAt: stored.expiresAt };
+    const checkpoint = checkpointFromStored(stored);
+    const { items, contacts, lockedRecords, integrity } = await loadSessionVault(
+      account,
+      api,
+      token,
+      vault,
+      checkpoint
+    );
+    session = {
+      account,
+      token,
+      email: stored.email,
+      server,
+      items,
+      contacts,
+      lockedRecords,
+      integrity,
+      mutationTail: Promise.resolve(),
+      expiresAt: stored.expiresAt,
+    };
+    await persistSession();
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
     return session;
@@ -306,15 +404,25 @@ async function doUnlock(email, password, secretKey) {
   try {
     token = await api.login(email, account.auth_secret);
     const vault = await api.getVault(token);
-    loaded = loadVaultState(account, vault.items);
+    loaded = await loadSessionVault(account, api, token, vault);
   } catch (error) {
     if (token) api.logout(token).catch(() => {});
     account.lock();
     throw error;
   }
-  const { items, contacts, lockedRecords } = loaded;
+  const { items, contacts, lockedRecords, integrity } = loaded;
 
-  session = { account, token, email, server, items, contacts, lockedRecords };
+  session = {
+    account,
+    token,
+    email,
+    server,
+    items,
+    contacts,
+    lockedRecords,
+    integrity,
+    mutationTail: Promise.resolve(),
+  };
   try {
     await persistSession();
     await touchSession();
@@ -557,17 +665,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const url = p.url || `https://${p.host}`;
 
           // Update in place if this site+username already exists; else create.
-          let item = [...s.items.values()].find(
+          const existing = [...s.items.values()].find(
             (it) => it.type === "login" && it.username === username && matchesSite(it.url || it.title, p.host)
           );
-          if (item) {
-            item.password = p.password;
-            item.updatedAt = Date.now();
-          } else {
-            item = { id: crypto.randomUUID(), type: "login", title, username, password: p.password, url, updatedAt: Date.now() };
-          }
+          const item = existing
+            ? { ...existing, password: p.password, updatedAt: Date.now() }
+            : { id: crypto.randomUUID(), type: "login", title, username, password: p.password, url, updatedAt: Date.now() };
           const blob = JSON.parse(s.account.encrypt_item(JSON.stringify(item), item.id));
-          await makeApi(s.server).putItem(s.token, item.id, blob);
+          await commitVaultOperations(s, [{ op: "put", id: item.id, blob }]);
           s.items.set(item.id, item);
           await clearPending();
           sendResponse({ ok: true });
@@ -649,7 +754,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
           // Fresh enable: create identity → persist the reserved vault item → publish.
           const itemBlob = JSON.parse(s.account.create_send_identity());
-          await api.putItem(s.token, SEND_IDENTITY_ID, itemBlob);
+          try {
+            await commitVaultOperations(s, [{ op: "put", id: SEND_IDENTITY_ID, blob: itemBlob }]);
+          } catch (error) {
+            // Discard create_send_identity's staged private identity even when
+            // persistence failed definitively rather than ambiguously.
+            if (session === s) await lock();
+            throw error;
+          }
           const pub = JSON.parse(s.account.send_identity_public());
           const res = await api.publishIdentity(s.token, pub);
           s.sendBastionId = res.bastion_id;
@@ -799,10 +911,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (!contact) return sendResponse({ ok: false, error: "Unknown contact." });
           if (contact.lock_enabled) return sendResponse({ ok: true }); // already on
           const params = JSON.parse(send_lock_new_params());
-          contact.lock_enabled = true;
-          contact.lock_salt = params.salt;
-          contact.lock_kdf = params.kdf;
-          await saveContacts(s);
+          const contacts = (s.contacts || []).map((candidate) =>
+            candidate.bastion_id === msg.bastionId
+              ? { ...candidate, lock_enabled: true, lock_salt: params.salt, lock_kdf: params.kdf }
+              : candidate
+          );
+          await saveContacts(s, contacts);
           sendResponse({ ok: true });
           break;
         }
@@ -835,7 +949,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const record = JSON.parse(recordJson);
           const itemId = SEND_LOCKED_PREFIX + record.local_id;
           const itemBlob = JSON.parse(s.account.encrypt_item(recordJson, itemId));
-          await makeApi(s.server).putItem(s.token, itemId, itemBlob); // persist BEFORE delete
+          await commitVaultOperations(s, [{ op: "put", id: itemId, blob: itemBlob }]); // persist BEFORE delete
           s.lockedRecords.push(record);
           try { await makeApi(s.server).inboxDelete(s.token, msg.messageId); } catch { /* retry later */ }
           s.inboxCache.delete(msg.messageId);
@@ -864,7 +978,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
           await touchSession();
-          try { await makeApi(s.server).deleteItem(s.token, SEND_LOCKED_PREFIX + msg.localId); } catch { /* already gone */ }
+          await commitVaultOperations(s, [{ op: "delete", id: SEND_LOCKED_PREFIX + msg.localId }]);
           s.lockedRecords = (s.lockedRecords || []).filter((r) => r.local_id !== msg.localId);
           sendResponse({ ok: true });
           break;
@@ -923,9 +1037,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             verified_at: msg.verified ? Date.now() : null,
             safety_number: msg.safety_number || null,
           };
-          s.contacts = (s.contacts || []).filter((x) => x.bastion_id !== c.bastion_id);
-          s.contacts.push(c);
-          await saveContacts(s);
+          const contacts = (s.contacts || []).filter((x) => x.bastion_id !== c.bastion_id);
+          contacts.push(c);
+          await saveContacts(s, contacts);
           sendResponse({ ok: true });
           break;
         }
@@ -937,9 +1051,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // Hard-delete the contact's locked messages (design §7): they become
           // permanently unreadable, honoring the lock-phrase warning.
           const orphaned = (s.lockedRecords || []).filter((r) => r.contact_id === msg.bastionId);
-          for (const r of orphaned) {
-            try { await makeApi(s.server).deleteItem(s.token, SEND_LOCKED_PREFIX + r.local_id); } catch { /* already gone */ }
-          }
           // For a lock contact, also purge any STILL-PENDING (un-secured) inbox
           // messages from them — otherwise they'd revert to readable once the
           // contact (and its lock flag) is gone, contradicting the warning.
@@ -954,9 +1065,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               }
             } catch { /* inbox unreachable; best effort */ }
           }
-          s.lockedRecords = (s.lockedRecords || []).filter((r) => r.contact_id !== msg.bastionId);
-          s.contacts = (s.contacts || []).filter((x) => x.bastion_id !== msg.bastionId);
-          await saveContacts(s);
+          const lockedRecords = (s.lockedRecords || []).filter((r) => r.contact_id !== msg.bastionId);
+          const contacts = (s.contacts || []).filter((x) => x.bastion_id !== msg.bastionId);
+          const contactsBlob = JSON.parse(
+            s.account.encrypt_item(JSON.stringify(contacts), SEND_CONTACTS_ID)
+          );
+          await commitVaultOperations(s, [
+            ...orphaned.map((record) => ({
+              op: "delete",
+              id: SEND_LOCKED_PREFIX + record.local_id,
+            })),
+            { op: "put", id: SEND_CONTACTS_ID, blob: contactsBlob },
+          ]);
+          s.lockedRecords = lockedRecords;
+          s.contacts = contacts;
           sendResponse({ ok: true });
           break;
         }

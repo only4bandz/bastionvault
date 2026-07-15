@@ -27,6 +27,13 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
 - When Chrome evicts the service worker, the unlocked session can be rehydrated
   from extension-private, RAM-backed `chrome.storage.session` until its bounded
   expiry. It is never written to disk and is removed on lock.
+- Before decrypting any item, the worker opens the sealed integrity manifest
+  and verifies it against the complete encrypted item set. Legacy vaults use a
+  one-time trust-on-first-use bootstrap only after every encrypted payload
+  validates. The latest manifest sequence and server revision are checkpointed
+  in trusted `chrome.storage.session`, so rollback remains detectable across
+  service-worker eviction. The checkpoint does not survive a full browser
+  restart, and no cross-restart rollback guarantee is claimed.
 - **Auto-lock** after 10 minutes of inactivity, and immediately when the OS
   session locks (`chrome.idle`).
 - Two autofill paths: (1) **inline** — a content script shows a dropdown of
