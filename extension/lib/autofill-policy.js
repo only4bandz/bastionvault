@@ -39,3 +39,20 @@ export function autofillPolicyError(item, tab, expectedTabId) {
   }
   return null;
 }
+
+export function validatedAutofillTarget(item, tab, expectedTabId, injectionResults) {
+  const probe = Array.isArray(injectionResults) && injectionResults.length === 1 ? injectionResults[0] : null;
+  if (
+    !probe ||
+    probe.frameId !== 0 ||
+    typeof probe.documentId !== "string" ||
+    !probe.documentId ||
+    typeof probe.result !== "string"
+  ) {
+    throw new Error("The active page could not be verified. Reopen Bastion before filling.");
+  }
+
+  const policyError = autofillPolicyError(item, { id: tab?.id, url: probe.result }, expectedTabId);
+  if (policyError) throw new Error(policyError);
+  return { tabId: tab.id, documentIds: [probe.documentId] };
+}

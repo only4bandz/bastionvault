@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "106",
   "name": "Bastion — Password Manager",
   "version": "0.1.0",
   "description": "Zero-knowledge password manager. Your vault is decrypted only on your device; the server ever sees opaque encrypted blobs.",

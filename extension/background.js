@@ -17,7 +17,11 @@
 // rollback remains detectable across a complete browser restart.
 
 import init, { unlock, rehydrate, send_safety_number, send_lock_open, send_lock_new_params } from "./pkg/crypto_wasm.js";
-import { autofillPolicyError, credentialPageError } from "./lib/autofill-policy.js";
+import {
+  autofillPolicyError,
+  credentialPageError,
+  validatedAutofillTarget,
+} from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
@@ -551,14 +555,38 @@ async function fillActiveTab(item, expectedTabId) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const policyError = autofillPolicyError(item, tab, expectedTabId);
   if (policyError) throw new Error(policyError);
-  // Top frame ONLY: filling all frames would write the password into any
-  // (possibly malicious, cross-origin) embedded iframe with a password field.
-  const results = await chrome.scripting.executeScript({
+
+  // Probe the top frame without secrets. The returned documentId is a stable
+  // identity for this exact document, unlike tabId/frameId which survive a
+  // navigation and could otherwise retarget the credential injection.
+  const probe = await chrome.scripting.executeScript({
     target: { tabId: tab.id, frameIds: [0] },
-    args: [{ username: item.username || "", password: item.password || "" }],
-    func: injectedFill,
+    func: currentDocumentUrl,
   });
-  return results.some((r) => r.result);
+  const target = validatedAutofillTarget(item, tab, expectedTabId, probe);
+
+  // documentIds and frameIds are intentionally not combined. If navigation
+  // replaced the validated document, Chrome rejects the stale documentId and
+  // the credentials are never delivered to the replacement page.
+  try {
+    const results = await chrome.scripting.executeScript({
+      target,
+      args: [{ username: item.username || "", password: item.password || "" }],
+      func: injectedFill,
+    });
+    return results.some(
+      (result) =>
+        result.documentId === target.documentIds[0] && result.frameId === 0 && result.result === true
+    );
+  } catch {
+    throw new Error("The active page changed. Reopen Bastion before filling.");
+  }
+}
+
+// Runs without arguments and returns no page content beyond the current URL.
+// It is serialized by chrome.scripting, so it must remain self-contained.
+function currentDocumentUrl() {
+  return globalThis.location.href;
 }
 
 // Runs in the page context. Must be self-contained (it is serialized, so it
