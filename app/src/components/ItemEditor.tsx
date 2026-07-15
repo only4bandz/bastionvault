@@ -4,6 +4,7 @@ import { generatePassword } from "../lib/generator";
 import { detectScheme, lookupBin } from "../lib/bin";
 import { IcCard, IcKey, IcNote, IcRefresh } from "./icons";
 import { Dialog } from "./Dialog";
+import { SecretInput } from "./SecretInput";
 
 const NEW = (): VaultItem => ({
   id: crypto.randomUUID(),
@@ -96,28 +97,38 @@ export function ItemEditor({
           )}
 
           <div className="field">
-            <label>Name</label>
-            <input ref={titleRef} className="input" value={item.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. GitHub" />
+            <label htmlFor="item-title">Name</label>
+            <input id="item-title" ref={titleRef} className="input" autoComplete="off" value={item.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. GitHub" />
           </div>
 
           {item.type === "login" && (
             <>
               <div className="field">
-                <label>Username / email</label>
-                <input className="input" value={item.username ?? ""} onChange={(e) => set("username", e.target.value)} />
+                <label htmlFor="item-username">Username / email</label>
+                <input id="item-username" className="input" autoComplete="off" autoCapitalize="none" spellCheck={false} value={item.username ?? ""} onChange={(e) => set("username", e.target.value)} />
               </div>
               <div className="field">
-                <label>Password</label>
+                <label htmlFor="item-password">Password</label>
                 <div className="input-row">
-                  <input className="input mono" value={item.password ?? ""} onChange={(e) => set("password", e.target.value)} />
+                  <SecretInput
+                    key="login-password"
+                    id="item-password"
+                    label="Password"
+                    className="mono"
+                    autoComplete="new-password"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    value={item.password ?? ""}
+                    onChange={(e) => set("password", e.target.value)}
+                  />
                   <button className="btn" aria-label="Generate password" onClick={() => set("password", generatePassword({ length: 20, lower: true, upper: true, digits: true, symbols: true, avoidAmbiguous: true }))}>
                     <IcRefresh size={16} />
                   </button>
                 </div>
               </div>
               <div className="field">
-                <label>Website</label>
-                <input className="input" value={item.url ?? ""} onChange={(e) => set("url", e.target.value)} placeholder="https://" />
+                <label htmlFor="item-url">Website</label>
+                <input id="item-url" className="input" type="url" autoComplete="off" autoCapitalize="none" spellCheck={false} value={item.url ?? ""} onChange={(e) => set("url", e.target.value)} placeholder="https://" />
               </div>
             </>
           )}
@@ -125,8 +136,19 @@ export function ItemEditor({
           {item.type === "card" && (
             <>
               <div className="field">
-                <label>Card number</label>
-                <input className="input mono" value={item.cardNumber ?? ""} onChange={(e) => set("cardNumber", e.target.value)} placeholder="•••• •••• •••• ••••" />
+                <label htmlFor="item-card-number">Card number</label>
+                <SecretInput
+                  key="card-number"
+                  id="item-card-number"
+                  label="Card number"
+                  className="mono"
+                  autoComplete="cc-number"
+                  inputMode="numeric"
+                  maxLength={23}
+                  value={item.cardNumber ?? ""}
+                  onChange={(e) => set("cardNumber", e.target.value)}
+                  placeholder="•••• •••• •••• ••••"
+                />
                 {(item.cardBank || item.cardBrand || item.cardType) && (
                   <div className="faint" style={{ fontSize: 12, marginTop: 6 }}>
                     Detected: {item.cardBank ? `${item.cardBank} · ` : ""}
@@ -137,20 +159,30 @@ export function ItemEditor({
               </div>
               <div className="input-row">
                 <div className="field" style={{ flex: 1 }}>
-                  <label>Expiry</label>
-                  <input className="input mono" placeholder="MM/YY" value={item.cardExp ?? ""} onChange={(e) => set("cardExp", e.target.value)} />
+                  <label htmlFor="item-card-expiry">Expiry</label>
+                  <input id="item-card-expiry" className="input mono" autoComplete="cc-exp" inputMode="numeric" maxLength={5} placeholder="MM/YY" value={item.cardExp ?? ""} onChange={(e) => set("cardExp", e.target.value)} />
                 </div>
                 <div className="field" style={{ flex: 1 }}>
-                  <label>CVV</label>
-                  <input className="input mono" value={item.cardCvv ?? ""} onChange={(e) => set("cardCvv", e.target.value)} />
+                  <label htmlFor="item-card-cvv">CVV</label>
+                  <SecretInput
+                    key="card-cvv"
+                    id="item-card-cvv"
+                    label="CVV"
+                    className="mono"
+                    autoComplete="cc-csc"
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={item.cardCvv ?? ""}
+                    onChange={(e) => set("cardCvv", e.target.value)}
+                  />
                 </div>
               </div>
             </>
           )}
 
           <div className="field">
-            <label>Notes</label>
-            <textarea className="textarea" value={item.notes ?? ""} onChange={(e) => set("notes", e.target.value)} />
+            <label htmlFor="item-notes">Notes</label>
+            <textarea id="item-notes" className="textarea" value={item.notes ?? ""} onChange={(e) => set("notes", e.target.value)} />
           </div>
     </Dialog>
   );
