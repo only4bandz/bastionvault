@@ -257,9 +257,9 @@ async function ensureSession() {
     chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
     return session;
   } catch (error) {
+    if (token && api) api.logout(token).catch(() => {});
+    try { account?.lock(); } catch { /* already locked */ }
     if (error instanceof VaultIntegrityError) {
-      if (token && api) api.logout(token).catch(() => {});
-      try { account?.lock(); } catch { /* already locked */ }
       await chrome.storage.session.remove(SESSION_KEY);
     }
     // Rehydration failed (server unreachable, expired data…) — stay locked but
@@ -301,22 +301,27 @@ async function doUnlock(email, password, secretKey) {
     throw new Error("Invalid master password or Secret Key.");
   }
 
-  const token = await api.login(email, account.auth_secret);
-  const vault = await api.getVault(token);
+  let token;
   let loaded;
   try {
+    token = await api.login(email, account.auth_secret);
+    const vault = await api.getVault(token);
     loaded = loadVaultState(account, vault.items);
   } catch (error) {
-    api.logout(token).catch(() => {});
+    if (token) api.logout(token).catch(() => {});
     account.lock();
-    if (error instanceof VaultIntegrityError) throw error;
-    throw new VaultIntegrityError();
+    throw error;
   }
   const { items, contacts, lockedRecords } = loaded;
 
   session = { account, token, email, server, items, contacts, lockedRecords };
-  await persistSession();
-  await touchSession();
+  try {
+    await persistSession();
+    await touchSession();
+  } catch (error) {
+    await lock();
+    throw error;
+  }
   chrome.action.setBadgeText({ text: "✓" });
   chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
 }
