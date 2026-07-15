@@ -59,8 +59,9 @@ non-enumerable **Bastion address** (128-bit, base32). Available in both the
   so they **sync across surfaces** (verify a contact in the extension, it's
   verified in the web app too).
 - Server-side: strict public-key/envelope routing validation, per-recipient
-  inbox quotas, rate limits, size caps, message dedupe, bounded expiry, and
-  **read-once delete** — all without learning any plaintext.
+  inbox quotas, fixed-window rate limits with strictly bounded state, size
+  caps, message dedupe, bounded expiry, and **read-once delete** — all without
+  learning any plaintext.
 
 Design + threat model: [`docs/bastion-send-design.md`](docs/bastion-send-design.md).
 

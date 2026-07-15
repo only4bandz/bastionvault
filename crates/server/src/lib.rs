@@ -139,8 +139,41 @@ pub fn app_in_memory_with_auth_limit(auth_limit: usize) -> Router {
     build(DEFAULT_TOKEN_TTL, ":memory:", auth_limit)
 }
 
+/// In-memory variant with explicit rate-state bounds for deterministic tests.
+pub fn app_in_memory_with_rate_limits(max_entries: usize, window: Duration) -> Router {
+    build_with_rate_limits(
+        DEFAULT_TOKEN_TTL,
+        ":memory:",
+        MAX_CONCURRENT_AUTH,
+        max_entries,
+        window,
+    )
+}
+
 fn build(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Router {
-    let state = AppState::new(token_ttl, db_path, auth_limit);
+    build_with_rate_limits(
+        token_ttl,
+        db_path,
+        auth_limit,
+        MAX_RATE_ENTRIES,
+        RATE_WINDOW,
+    )
+}
+
+fn build_with_rate_limits(
+    token_ttl: Duration,
+    db_path: &str,
+    auth_limit: usize,
+    max_rate_entries: usize,
+    rate_window: Duration,
+) -> Router {
+    let state = AppState::new(
+        token_ttl,
+        db_path,
+        auth_limit,
+        max_rate_entries,
+        rate_window,
+    );
     let transaction_route = put(apply_vault_transaction)
         .layer(DefaultBodyLimit::max(MAX_VAULT_TRANSACTION_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(
@@ -178,6 +211,8 @@ struct AppState {
     db: Db,
     token_ttl: Duration,
     auth_slots: Arc<Semaphore>,
+    max_rate_entries: usize,
+    rate_window: Duration,
 }
 
 struct Inner {
@@ -215,7 +250,13 @@ struct AccountRecord {
 }
 
 impl AppState {
-    fn new(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Self {
+    fn new(
+        token_ttl: Duration,
+        db_path: &str,
+        auth_limit: usize,
+        max_rate_entries: usize,
+        rate_window: Duration,
+    ) -> Self {
         let db = Db::open(db_path);
         let accounts = db.load_accounts().expect("load persisted vault state");
         Self {
@@ -227,6 +268,8 @@ impl AppState {
             db,
             token_ttl,
             auth_slots: Arc::new(Semaphore::new(auth_limit)),
+            max_rate_entries,
+            rate_window,
         }
     }
 
@@ -1252,30 +1295,49 @@ fn new_bastion_id() -> String {
     data_encoding::BASE32_NOPAD.encode(&bytes)
 }
 
-/// Fixed-window per-account rate limit. `bucket` separates send vs lookup.
-fn rate_limit(st: &AppState, email: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
-    let key = format!("{email}:{bucket}");
-    let mut inner = st.write();
-    let now = Instant::now();
-    // Bound the map: when large, drop entries whose window has elapsed
-    // (anti memory-DoS via many accounts).
-    if inner.rate.len() > MAX_RATE_ENTRIES {
-        inner
-            .rate
-            .retain(|_, v| now.duration_since(v.window_start) <= RATE_WINDOW);
-    }
-    let e = inner.rate.entry(key).or_insert(RateState {
-        window_start: now,
-        count: 0,
-    });
-    if now.duration_since(e.window_start) > RATE_WINDOW {
-        e.window_start = now;
-        e.count = 0;
-    }
-    e.count += 1;
-    if e.count > max {
+/// Fixed-window per-key rate limit. `bucket` separates send, inbound, and
+/// lookup counters. New keys are rejected when the strictly bounded state map
+/// is full and no expired window can be reclaimed.
+fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
+    if max == 0 {
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
+    let key = format!("{subject}:{bucket}");
+    let mut inner = st.write();
+    let now = Instant::now();
+
+    if let Some(entry) = inner.rate.get_mut(&key) {
+        if now.saturating_duration_since(entry.window_start) >= st.rate_window {
+            entry.window_start = now;
+            entry.count = 0;
+        }
+        if entry.count >= max {
+            return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+        }
+        entry.count += 1;
+        return Ok(());
+    }
+
+    if inner.rate.len() >= st.max_rate_entries {
+        inner
+            .rate
+            .retain(|_, entry| now.saturating_duration_since(entry.window_start) < st.rate_window);
+    }
+
+    if inner.rate.len() >= st.max_rate_entries {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "rate limiter capacity reached",
+        ));
+    }
+
+    inner.rate.insert(
+        key,
+        RateState {
+            window_start: now,
+            count: 1,
+        },
+    );
     Ok(())
 }
 
