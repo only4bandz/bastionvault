@@ -205,6 +205,11 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .modal-foot .spacer { flex: 1; }
 .confirm-copy { margin: 0; color: var(--text-dim); line-height: 1.55; }
 .confirm-danger { background: rgba(255, 93, 108, .12); border-color: rgba(255, 93, 108, .3); }
+.import-progress, .import-outcome { display: grid; gap: 8px; margin-top: 14px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); color: var(--text-dim); font-size: 13px; }
+.import-progress progress { width: 100%; accent-color: var(--accent); }
+.import-outcome strong { color: var(--text); }
+.import-outcome.complete { border-color: rgba(58, 210, 159, .35); background: rgba(58, 210, 159, .08); }
+.import-outcome.partial { border-color: rgba(255, 180, 84, .35); background: rgba(255, 180, 84, .08); }
 
 .type-pick { display: flex; gap: 8px; margin-bottom: 18px; }
 .type-pick button { flex: 1; padding: 12px 8px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--bg-2); color: var(--text-dim); font-size: 12px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 6px; }

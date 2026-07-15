@@ -28,7 +28,10 @@ function renderVault(items: VaultItem[] = [LOGIN]) {
       persistEncryptedItem={vi.fn(async () => {})}
       onUpsert={onUpsert}
       onDelete={onDelete}
-      onImport={vi.fn(async () => {})}
+      onImport={vi.fn(async (result) => ({
+        requested: result.items.length,
+        imported: result.items.length,
+      }))}
       onLock={vi.fn()}
       toast={vi.fn()}
     />
