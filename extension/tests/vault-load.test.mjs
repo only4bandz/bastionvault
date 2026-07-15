@@ -4,11 +4,13 @@ import test from "node:test";
 import {
   completeBootstrap,
   completeVaultMutation,
+  decryptVerifiedVaultState,
   loadLegacyVaultState,
   loadVaultState,
   prepareBootstrapManifest,
   prepareVaultMutation,
   reconcileVaultMutation,
+  verifyVaultSnapshot,
   VaultIntegrityError,
 } from "../lib/vault-load.js";
 
@@ -124,7 +126,7 @@ test("fails before decryption when the encrypted set differs from the manifest",
   assert.equal(decryptions, 0);
 });
 
-test("rejects rollback against the RAM checkpoint", () => {
+test("rejects rollback against a trusted checkpoint", () => {
   const acc = account();
   const vault = snapshot(acc, {}, 3);
   assert.throws(
@@ -135,6 +137,35 @@ test("rejects rollback against the RAM checkpoint", () => {
     () => loadVaultState(acc, vault, { lastSeenSeq: 1n, minimumRevision: 3 }),
     VaultIntegrityError
   );
+});
+
+test("refuses to decrypt a snapshot different from the verified encrypted set", () => {
+  const acc = account();
+  let decryptions = 0;
+  const decrypt = acc.decrypt_item;
+  acc.decrypt_item = (...args) => {
+    decryptions += 1;
+    return decrypt(...args);
+  };
+  const verifiedVault = snapshot(acc, {
+    item1: {
+      plaintext: JSON.stringify({ id: "item1", type: "note", title: "One", updatedAt: 1 }),
+    },
+  }, 4);
+  const integrity = verifyVaultSnapshot(acc, verifiedVault);
+  const substituted = {
+    ...verifiedVault,
+    items: {
+      item2: {
+        plaintext: JSON.stringify({ id: "item2", type: "note", title: "Two", updatedAt: 2 }),
+      },
+    },
+  };
+  assert.throws(
+    () => decryptVerifiedVaultState(acc, substituted, integrity),
+    VaultIntegrityError
+  );
+  assert.equal(decryptions, 0);
 });
 
 test("bootstraps a fully validated legacy vault at the exact next revision", () => {
