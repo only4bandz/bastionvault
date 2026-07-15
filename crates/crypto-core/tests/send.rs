@@ -90,6 +90,18 @@ fn signed_message_verifies_and_detects_tampering() {
         Err(CryptoError::Aead)
     ));
 
+    // A malformed or weak pinned identity is rejected before it can be used as
+    // a verifier, even if its bytes happen to parse as an Ed25519 key.
+    let weak = PublicIdentity {
+        enc_pub: [0u8; 32],
+        sig_pub: [0u8; 32],
+        key_version: 1,
+    };
+    assert!(matches!(
+        open(&blob, &b, None, Some(&weak)),
+        Err(CryptoError::Malformed)
+    ));
+
     // No sender key supplied: opens but the sender is only Unverified, never
     // Verified — the type makes the trust state impossible to ignore.
     let unchecked = open(&blob, &b, None, None).unwrap();

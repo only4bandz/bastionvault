@@ -47,6 +47,45 @@ fn browser_kdf_policy_rejects_unbounded_work_before_derivation() {
     .is_err());
 }
 
+#[wasm_bindgen_test]
+fn pinned_send_open_never_returns_plaintext_after_verification_failure() {
+    let mut recipient = register_with("recipient", MEM_KIB, ITERS, PAR).unwrap();
+    recipient.create_send_identity().unwrap();
+    let recipient_public = recipient.send_identity_public().unwrap();
+
+    let mut sender = register_with("sender", MEM_KIB, ITERS, PAR).unwrap();
+    sender.create_send_identity().unwrap();
+    let sender_public = sender.send_identity_public().unwrap();
+    let blob = sender
+        .send_seal(
+            "classified",
+            "RECIPIENT",
+            &recipient_public,
+            None,
+            Some("ALICE".to_string()),
+        )
+        .unwrap();
+
+    let pinned = format!("{{\"ALICE\":{sender_public}}}");
+    let verified: serde_json::Value =
+        serde_json::from_str(&recipient.send_open_with_pins(&blob, None, &pinned).unwrap())
+            .unwrap();
+    assert_eq!(verified["plaintext"], "classified");
+    assert_eq!(verified["sender"]["state"], "verified");
+    assert!(verified.get("keyChanged").is_none());
+
+    let wrong_pin = format!("{{\"ALICE\":{recipient_public}}}");
+    let rejected: serde_json::Value = serde_json::from_str(
+        &recipient
+            .send_open_with_pins(&blob, None, &wrong_pin)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rejected["keyChanged"], true);
+    assert_eq!(rejected["sender"]["id"], "ALICE");
+    assert!(rejected.get("plaintext").is_none());
+}
+
 /// Pulls the formatted Secret Key out of the one-shot `reveal_secret` JSON
 /// (`{ "secret_key": "A1-…", "emergency_kit": "…" }`).
 fn reveal_sk(reveal_json: &str) -> String {

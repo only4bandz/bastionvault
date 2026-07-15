@@ -598,6 +598,9 @@ pub fn open(
     passphrase: Option<&[u8]>,
     verify_sender: Option<&PublicIdentity>,
 ) -> Result<OpenedMessage> {
+    if let Some(sender) = verify_sender {
+        sender.validate()?;
+    }
     if blob.v != SEND_V || blob.typ.as_bytes() != SEND_TYPE {
         return Err(CryptoError::Malformed);
     }
