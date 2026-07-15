@@ -71,9 +71,35 @@ impl Manifest {
         self.seq
     }
 
+    /// Builds a deterministic manifest from a complete set of encrypted items.
+    ///
+    /// The initial sequence equals the number of recorded items, matching the
+    /// result of inserting each item into an empty manifest. Duplicate ids are
+    /// rejected instead of being silently overwritten.
+    pub fn from_items(present: &[(&str, &EncryptedBlob)]) -> Result<Self> {
+        let mut entries = BTreeMap::new();
+        for (id, blob) in present {
+            if entries.insert(*id, item_digest(blob)).is_some() {
+                return Err(CryptoError::Malformed);
+            }
+        }
+        let seq = u64::try_from(entries.len()).map_err(|_| CryptoError::Malformed)?;
+        Ok(Self {
+            seq,
+            entries: entries
+                .into_iter()
+                .map(|(id, digest)| ManifestEntry {
+                    id: id.to_string(),
+                    digest,
+                })
+                .collect(),
+        })
+    }
+
     /// Adds or updates an item's entry from its ciphertext, and increments
-    /// `seq`.
-    pub fn set(&mut self, id: &str, blob: &EncryptedBlob) {
+    /// `seq`. Fails closed instead of wrapping an exhausted sequence counter.
+    pub fn set(&mut self, id: &str, blob: &EncryptedBlob) -> Result<()> {
+        let next_seq = self.seq.checked_add(1).ok_or(CryptoError::Malformed)?;
         let digest = item_digest(blob);
         match self.entries.binary_search_by(|e| e.id.as_str().cmp(id)) {
             Ok(i) => self.entries[i].digest = digest,
@@ -85,17 +111,20 @@ impl Manifest {
                 },
             ),
         }
-        self.seq += 1;
+        self.seq = next_seq;
+        Ok(())
     }
 
     /// Removes an item. Increments `seq` and returns `true` if the item existed.
-    pub fn remove(&mut self, id: &str) -> bool {
+    /// Fails closed instead of wrapping an exhausted sequence counter.
+    pub fn remove(&mut self, id: &str) -> Result<bool> {
         if let Ok(i) = self.entries.binary_search_by(|e| e.id.as_str().cmp(id)) {
+            let next_seq = self.seq.checked_add(1).ok_or(CryptoError::Malformed)?;
             self.entries.remove(i);
-            self.seq += 1;
-            true
+            self.seq = next_seq;
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -103,10 +132,21 @@ impl Manifest {
     /// duplicates**. Called when opening a sealed manifest — a defense against a
     /// corrupted/malformed manifest whose duplicate ids would hide items.
     pub fn validate(&self) -> Result<()> {
+        const SHA256_BYTES: usize = 32;
+        const SHA256_B64_LEN: usize = 44;
+
         for pair in self.entries.windows(2) {
             if pair[0].id >= pair[1].id {
                 return Err(CryptoError::Malformed);
             }
+        }
+        if self.entries.iter().any(|entry| {
+            entry.digest.len() != SHA256_B64_LEN
+                || !B64
+                    .decode(&entry.digest)
+                    .is_ok_and(|digest| digest.len() == SHA256_BYTES)
+        }) {
+            return Err(CryptoError::Malformed);
         }
         Ok(())
     }

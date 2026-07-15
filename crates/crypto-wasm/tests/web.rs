@@ -89,10 +89,37 @@ fn unlocked_account_retains_no_secret() {
 #[wasm_bindgen_test]
 fn manifest_bindings_roundtrip_and_rollback_in_wasm() {
     let account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
-    // Seal a manifest, reopen it (anti-rollback), and reject a rollback.
-    let sealed = account.seal_manifest("{\"seq\":2,\"entries\":[]}").unwrap();
+    let a = account.encrypt_item("a", "a").unwrap();
+    let b = account.encrypt_item("b", "b").unwrap();
+    let items = format!("{{\"b\":{b},\"a\":{a}}}");
+    let manifest = account.manifest_from_items(&items).unwrap();
+    assert!(manifest.contains("\"seq\":2"));
+    assert!(manifest.find("\"id\":\"a\"").unwrap() < manifest.find("\"id\":\"b\"").unwrap());
+
+    let updated_a = account.encrypt_item("updated", "a").unwrap();
+    let manifest = account
+        .manifest_set_item(&manifest, "a", &updated_a)
+        .unwrap();
+    assert!(manifest.contains("\"seq\":3"));
+    let manifest = account.manifest_remove_item(&manifest, "b").unwrap();
+    assert!(manifest.contains("\"seq\":4"));
+    let unchanged = account.manifest_remove_item(&manifest, "absent").unwrap();
+    assert_eq!(unchanged, manifest);
+
+    // Seal the Rust-produced manifest, reopen it, and reject a rollback.
+    let sealed = account.seal_manifest(&manifest).unwrap();
     let opened = account.open_manifest_checked(&sealed, 2).unwrap();
-    assert!(opened.contains("\"seq\":2"));
-    // last_seen_seq=5 > 2 -> rollback detected.
+    assert_eq!(opened, manifest);
     assert!(account.open_manifest_checked(&sealed, 5).is_err());
+
+    // Mutation and sealing reject malformed caller-provided manifests.
+    let malformed = "{\"seq\":1,\"entries\":[{\"id\":\"a\",\"digest\":\"bad\"}]}";
+    assert!(account
+        .manifest_set_item(malformed, "a", &updated_a)
+        .is_err());
+    assert!(account.seal_manifest(malformed).is_err());
+    let exhausted = "{\"seq\":18446744073709551615,\"entries\":[]}";
+    assert!(account
+        .manifest_set_item(exhausted, "a", &updated_a)
+        .is_err());
 }

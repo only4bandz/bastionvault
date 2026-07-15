@@ -21,7 +21,7 @@ fn build(vault: &Vault, items: &[(&str, &[u8])]) -> (Manifest, Vec<(String, Encr
     let mut blobs = Vec::new();
     for (id, plain) in items {
         let blob = vault.encrypt_item(plain, id).unwrap();
-        manifest.set(id, &blob);
+        manifest.set(id, &blob).unwrap();
         blobs.push((id.to_string(), blob));
     }
     (manifest, blobs)
@@ -78,7 +78,7 @@ fn detects_rolled_back_or_substituted_item() {
     let (mut manifest, mut blobs) = build(&vault, &[("a", b"v1")]);
     // Item "a" is updated (new ciphertext) and the manifest follows.
     let updated = vault.encrypt_item(b"v2", "a").unwrap();
-    manifest.set("a", &updated);
+    manifest.set("a", &updated).unwrap();
     // But the server serves the OLD ciphertext again (rollback) -> different digest.
     // blobs[0].1 still holds v1.
     let _ = &mut blobs;
@@ -93,13 +93,13 @@ fn seq_increments_on_change() {
     let mut manifest = Manifest::new();
     assert_eq!(manifest.seq(), 0);
     let blob = vault.encrypt_item(b"x", "a").unwrap();
-    manifest.set("a", &blob);
+    manifest.set("a", &blob).unwrap();
     assert_eq!(manifest.seq(), 1);
-    manifest.set("a", &blob); // updating the same entry counts too
+    manifest.set("a", &blob).unwrap(); // updating the same entry counts too
     assert_eq!(manifest.seq(), 2);
-    assert!(manifest.remove("a"));
+    assert!(manifest.remove("a").unwrap());
     assert_eq!(manifest.seq(), 3);
-    assert!(!manifest.remove("absent")); // no increment if nothing was removed
+    assert!(!manifest.remove("absent").unwrap()); // no increment if nothing was removed
     assert_eq!(manifest.seq(), 3);
 }
 
@@ -118,8 +118,8 @@ fn open_manifest_checked_rejects_rollback() {
     let vault = fresh_vault();
     let mut manifest = Manifest::new();
     let blob = vault.encrypt_item(b"x", "a").unwrap();
-    manifest.set("a", &blob); // seq = 1
-    manifest.set("a", &blob); // seq = 2
+    manifest.set("a", &blob).unwrap(); // seq = 1
+    manifest.set("a", &blob).unwrap(); // seq = 2
     let sealed = vault.seal_manifest(&manifest).unwrap();
 
     // The client saw seq=2; serving seq=2 again is accepted.
@@ -146,7 +146,7 @@ fn check_detects_duplicate_ids() {
 }
 
 #[test]
-fn open_manifest_rejects_duplicate_entries() {
+fn seal_manifest_rejects_duplicate_entries() {
     let vault = fresh_vault();
     // Malformed manifest: two entries with the same id.
     let bogus = Manifest {
@@ -162,11 +162,56 @@ fn open_manifest_rejects_duplicate_entries() {
             },
         ],
     };
-    let sealed = vault.seal_manifest(&bogus).unwrap();
     assert!(matches!(
-        vault.open_manifest(&sealed),
+        vault.seal_manifest(&bogus),
         Err(CryptoError::Malformed)
     ));
+}
+
+#[test]
+fn manifest_from_items_is_deterministic_and_rejects_duplicates() {
+    let vault = fresh_vault();
+    let a = vault.encrypt_item(b"a", "a").unwrap();
+    let b = vault.encrypt_item(b"b", "b").unwrap();
+
+    let forward = Manifest::from_items(&[("a", &a), ("b", &b)]).unwrap();
+    let reverse = Manifest::from_items(&[("b", &b), ("a", &a)]).unwrap();
+    assert_eq!(forward, reverse);
+    assert_eq!(forward.seq(), 2);
+    assert_eq!(forward.entries[0].id, "a");
+    assert_eq!(forward.entries[1].id, "b");
+    assert!(matches!(
+        Manifest::from_items(&[("a", &a), ("a", &b)]),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
+fn manifest_rejects_invalid_digests_and_sequence_overflow() {
+    let vault = fresh_vault();
+    let blob = vault.encrypt_item(b"a", "a").unwrap();
+    let malformed = Manifest {
+        seq: 1,
+        entries: vec![ManifestEntry {
+            id: "a".into(),
+            digest: "not-a-sha256-digest".into(),
+        }],
+    };
+    assert!(matches!(malformed.validate(), Err(CryptoError::Malformed)));
+    assert!(matches!(
+        vault.seal_manifest(&malformed),
+        Err(CryptoError::Malformed)
+    ));
+
+    let mut exhausted = Manifest {
+        seq: u64::MAX,
+        entries: Vec::new(),
+    };
+    assert!(matches!(
+        exhausted.set("a", &blob),
+        Err(CryptoError::Malformed)
+    ));
+    assert!(exhausted.entries.is_empty());
 }
 
 #[test]
