@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use crypto_core::kdf::KdfParams;
-use crypto_core::Vault;
+use crypto_core::{Manifest, Vault};
 
 fn fast_kdf() -> KdfParams {
     KdfParams {
@@ -135,6 +135,7 @@ async fn full_account_and_vault_flow() {
     // Retrieval: the encrypted item is there, and decryptable on the client side.
     let (s, body) = send(&app, "GET", "/vault", Some(&token), None).await;
     assert_eq!(s, StatusCode::OK);
+    assert_eq!(body["revision"], 1);
     let stored: crypto_core::EncryptedBlob =
         serde_json::from_value(body["items"]["github.com"].clone()).unwrap();
     let plain = vault.decrypt_item(&stored, "github.com").unwrap();
@@ -152,6 +153,244 @@ async fn full_account_and_vault_flow() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (_, body) = send(&app, "GET", "/vault", Some(&token), None).await;
     assert!(body["items"].get("github.com").is_none());
+    assert_eq!(body["revision"], 2);
+}
+
+#[tokio::test]
+async fn atomic_vault_transactions_apply_once_and_reject_stale_writers() {
+    let app = server::app_in_memory();
+    let (vault, token) = registered_vault_session(&app, "atomic@example.com").await;
+
+    let first = vault.encrypt_item(b"first", "item-1").unwrap();
+    let mut manifest = Manifest::new();
+    manifest.set("item-1", &first).unwrap();
+    let first_manifest = vault.seal_manifest(&manifest).unwrap();
+    let (status, response) = send(
+        &app,
+        "PUT",
+        "/vault/transaction",
+        Some(&token),
+        Some(json!({
+            "expected_revision": 0,
+            "operations": [{ "op": "put", "id": "item-1", "blob": first }],
+            "manifest": first_manifest
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["revision"], 1);
+
+    let stale = vault.encrypt_item(b"stale", "item-1").unwrap();
+    manifest.set("item-1", &stale).unwrap();
+    let stale_manifest = vault.seal_manifest(&manifest).unwrap();
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/transaction",
+        Some(&token),
+        Some(json!({
+            "expected_revision": 0,
+            "operations": [{ "op": "put", "id": "item-1", "blob": stale }],
+            "manifest": stale_manifest
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (_, stored) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(stored["revision"], 1);
+    let stored_blob = serde_json::from_value(stored["items"]["item-1"].clone()).unwrap();
+    assert_eq!(
+        vault
+            .decrypt_item(&stored_blob, "item-1")
+            .unwrap()
+            .as_slice(),
+        b"first"
+    );
+
+    let mut committed_manifest = Manifest::new();
+    committed_manifest.set("item-1", &stored_blob).unwrap();
+    committed_manifest.remove("item-1").unwrap();
+    let empty_manifest = vault.seal_manifest(&committed_manifest).unwrap();
+    let (status, response) = send(
+        &app,
+        "PUT",
+        "/vault/transaction",
+        Some(&token),
+        Some(json!({
+            "expected_revision": 1,
+            "operations": [{ "op": "delete", "id": "item-1" }],
+            "manifest": empty_manifest
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["revision"], 2);
+    let (_, stored) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(stored["items"], json!({}));
+    assert_eq!(stored["revision"], 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_vault_transactions_have_one_cas_winner() {
+    let app = server::app_in_memory();
+    let (vault, token) = registered_vault_session(&app, "cas@example.com").await;
+
+    let transaction = |value: &'static [u8]| {
+        let item = vault.encrypt_item(value, "shared").unwrap();
+        let mut manifest = Manifest::new();
+        manifest.set("shared", &item).unwrap();
+        let sealed = vault.seal_manifest(&manifest).unwrap();
+        json!({
+            "expected_revision": 0,
+            "operations": [{ "op": "put", "id": "shared", "blob": item }],
+            "manifest": sealed
+        })
+    };
+    let first = transaction(b"first");
+    let second = transaction(b"second");
+    let (first_result, second_result) = tokio::join!(
+        send(&app, "PUT", "/vault/transaction", Some(&token), Some(first)),
+        send(
+            &app,
+            "PUT",
+            "/vault/transaction",
+            Some(&token),
+            Some(second)
+        ),
+    );
+    let statuses = [first_result.0, second_result.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let (_, stored) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(stored["revision"], 1);
+}
+
+#[tokio::test]
+async fn transaction_validation_is_atomic_and_supports_large_manifests() {
+    let app = server::app_in_memory();
+    let (vault, token) = registered_vault_session(&app, "bounds@example.com").await;
+    let item = vault.encrypt_item(b"value", "duplicate").unwrap();
+    let manifest = vault.seal_manifest(&Manifest::new()).unwrap();
+
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/transaction",
+        Some(&token),
+        Some(json!({
+            "expected_revision": 0,
+            "operations": [
+                { "op": "put", "id": "duplicate", "blob": item },
+                { "op": "delete", "id": "duplicate" }
+            ],
+            "manifest": manifest
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, unchanged) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(unchanged["revision"], 0);
+    assert_eq!(unchanged["items"], json!({}));
+    assert!(unchanged["manifest"].is_null());
+
+    let large_manifest = json!({
+        "v": 1,
+        "nonce": B64.encode([0u8; 24]),
+        "ct": "A".repeat(1_100_000)
+    });
+    let (status, response) = send(
+        &app,
+        "PUT",
+        "/vault/transaction",
+        Some(&token),
+        Some(json!({
+            "expected_revision": 0,
+            "operations": [],
+            "manifest": large_manifest
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["revision"], 1);
+}
+
+#[tokio::test]
+async fn failed_manifest_persistence_rolls_back_items_and_revision() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir()
+        .join(format!(
+            "bastion-transaction-rollback-{}-{unique}.db",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let app = server::app_with_db(&path);
+    let (vault, token) = registered_vault_session(&app, "rollback@example.com").await;
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_manifest BEFORE INSERT ON manifests
+         BEGIN SELECT RAISE(ABORT, 'forced manifest failure'); END;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let item = vault.encrypt_item(b"must-not-commit", "item").unwrap();
+    let mut manifest = Manifest::new();
+    manifest.set("item", &item).unwrap();
+    let sealed = vault.seal_manifest(&manifest).unwrap();
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/transaction",
+        Some(&token),
+        Some(json!({
+            "expected_revision": 0,
+            "operations": [{ "op": "put", "id": "item", "blob": item }],
+            "manifest": sealed
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (_, unchanged) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(unchanged["revision"], 0);
+    assert_eq!(unchanged["items"], json!({}));
+    assert!(unchanged["manifest"].is_null());
+
+    drop(app);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let persisted_revision: i64 = conn
+        .query_row(
+            "SELECT vault_revision FROM accounts WHERE email='rollback@example.com'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let persisted_items: i64 = conn
+        .query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(persisted_revision, 0);
+    assert_eq!(persisted_items, 0);
+    drop(conn);
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}-wal"));
+    let _ = std::fs::remove_file(format!("{path}-shm"));
 }
 
 #[tokio::test]
@@ -369,6 +608,32 @@ async fn concurrent_registration_never_replaces_account_credentials() {
 }
 
 /// Registers an account and returns a valid session token.
+async fn registered_vault_session(app: &Router, email: &str) -> (Vault, String) {
+    let (vault, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let auth_secret = reg.auth_secret.expose_b64().to_string();
+    let reg_value = serde_json::to_value(&reg).unwrap();
+    let (status, _) = send(
+        app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({ "email": email, "registration": reg_value })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, body) = send(
+        app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": auth_secret })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    (vault, body["token"].as_str().unwrap().to_string())
+}
+
+/// Registers an account and returns a valid session token.
 async fn registered_session(app: &Router, email: &str) -> String {
     let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let auth_secret = reg.auth_secret.expose_b64().to_string();
@@ -471,7 +736,7 @@ async fn rejects_invalid_item_ids_and_oversized_blobs() {
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 
-    let oversized_manifest = "A".repeat(600 * 1024);
+    let oversized_manifest = "A".repeat(2 * 1024 * 1024);
     let (status, _) = send(
         &app,
         "PUT",
@@ -508,7 +773,7 @@ async fn data_persists_across_restart() {
     let reg_value = serde_json::to_value(&reg).unwrap();
     let email = "persist@example.com";
 
-    // ── First "boot": create account + store an encrypted item ──
+    // ── First "boot": create account + atomically store item and manifest ──
     {
         let app = server::app_with_db(&path);
         let (s, _) = send(
@@ -530,15 +795,24 @@ async fn data_persists_across_restart() {
         .await;
         let token = body["token"].as_str().unwrap().to_string();
         let blob = serde_json::to_value(vault.encrypt_item(b"top-secret", "i1").unwrap()).unwrap();
-        let (s, _) = send(
+        let typed_blob = serde_json::from_value(blob.clone()).unwrap();
+        let mut manifest = Manifest::new();
+        manifest.set("i1", &typed_blob).unwrap();
+        let sealed_manifest = vault.seal_manifest(&manifest).unwrap();
+        let (s, response) = send(
             &app,
             "PUT",
-            "/vault/items/i1",
+            "/vault/transaction",
             Some(&token),
-            Some(json!({ "blob": blob })),
+            Some(json!({
+                "expected_revision": 0,
+                "operations": [{ "op": "put", "id": "i1", "blob": blob }],
+                "manifest": sealed_manifest
+            })),
         )
         .await;
-        assert_eq!(s, StatusCode::NO_CONTENT);
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(response["revision"], 1);
     } // app (and its SQLite connection) dropped → simulates a restart
 
     // ── Second "boot" from the same database ──
@@ -564,12 +838,54 @@ async fn data_persists_across_restart() {
     .await;
     let token = lb["token"].as_str().unwrap().to_string();
     let (_, vb) = send(&app2, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(vb["revision"], 1);
+    assert!(!vb["manifest"].is_null());
     let stored: crypto_core::EncryptedBlob =
         serde_json::from_value(vb["items"]["i1"].clone()).unwrap();
     assert_eq!(
         vault.decrypt_item(&stored, "i1").unwrap().as_slice(),
         b"top-secret"
     );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}-wal"));
+    let _ = std::fs::remove_file(format!("{path}-shm"));
+}
+
+#[test]
+fn migrates_legacy_accounts_with_zero_vault_revision() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir()
+        .join(format!(
+            "bastion-revision-migration-{}-{unique}.db",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE accounts(
+           email TEXT PRIMARY KEY, salt TEXT NOT NULL, kdf TEXT NOT NULL,
+           wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL);",
+    )
+    .unwrap();
+    drop(conn);
+
+    drop(server::app_with_db(&path));
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let columns = conn
+        .prepare("PRAGMA table_info(accounts)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(columns.iter().any(|column| column == "vault_revision"));
+    drop(conn);
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(format!("{path}-wal"));
