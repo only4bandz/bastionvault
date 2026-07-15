@@ -99,6 +99,33 @@ describe("Vault dashboard accessibility", () => {
     expect(document.body).not.toHaveStyle({ overflow: "hidden" });
   });
 
+  it("focuses metadata-only search with accurate keyboard shortcuts", async () => {
+    const user = userEvent.setup();
+    renderVault();
+
+    await user.click(screen.getByRole("button", { name: "Password Generator" }));
+    await user.keyboard("{Control>}k{/Control}");
+
+    const search = screen.getByRole("textbox", { name: "Search vault items" });
+    expect(search).toHaveFocus();
+    expect(screen.getByRole("heading", { name: "Vault" })).toBeVisible();
+    expect(screen.getByText("Ctrl/⌘ K")).toBeVisible();
+
+    await user.type(search, "github");
+    expect(screen.getByRole("status")).toHaveTextContent("1 result for “github”");
+    await user.keyboard("{Escape}");
+    expect(search).toHaveValue("");
+
+    await user.type(search, "abc");
+    expect(screen.getByText("No matching items")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Clear search" }));
+    expect(screen.getByRole("button", { name: "Open GitHub" })).toBeVisible();
+
+    search.blur();
+    await user.keyboard("/");
+    expect(search).toHaveFocus();
+  });
+
   it("opens health findings through native keyboard button behavior", async () => {
     const user = userEvent.setup();
     renderVault();

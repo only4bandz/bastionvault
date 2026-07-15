@@ -149,8 +149,10 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .main { display: flex; flex-direction: column; min-width: 0; }
 .topbar { display: flex; align-items: center; gap: 14px; padding: 14px 22px; border-bottom: 1px solid var(--line); }
 .search { flex: 1; max-width: 560px; display: flex; align-items: center; gap: 9px; background: var(--surface); border: 1px solid var(--line); border-radius: 20px; padding: 8px 14px; }
-.search input { flex: 1; background: none; border: none; outline: none; color: var(--text); font-size: 14px; }
+.search input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--text); font-size: 14px; }
 .search .kbd { font-size: 11px; color: var(--text-faint); border: 1px solid var(--line-2); border-radius: 5px; padding: 1px 6px; }
+.search-clear { width: 24px; height: 24px; flex: none; }
+.search-results-status { margin: -8px 2px 14px; font-size: 12px; }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .avatar { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg, var(--accent-2), var(--accent)); color: #0a0c12; display: grid; place-items: center; font-weight: 800; font-size: 13px; }
 
