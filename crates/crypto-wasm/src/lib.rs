@@ -409,9 +409,50 @@ impl Account {
 
     // ─── Integrity manifest (verification on the Rust/WASM side, not in JS) ───
 
+    /// Builds a deterministic manifest from a complete item map
+    /// (`items_json` = object `{ id: encryptedBlob }`). Digest computation and
+    /// ordering stay inside the audited Rust implementation.
+    pub fn manifest_from_items(&self, items_json: &str) -> Result<String, JsError> {
+        let items: HashMap<String, EncryptedBlob> =
+            serde_json::from_str(items_json).map_err(js_err)?;
+        let present: Vec<(&str, &EncryptedBlob)> =
+            items.iter().map(|(id, blob)| (id.as_str(), blob)).collect();
+        let manifest = Manifest::from_items(&present).map_err(js_err)?;
+        serde_json::to_string(&manifest).map_err(js_err)
+    }
+
+    /// Adds or updates one encrypted item in a validated manifest and returns
+    /// the updated manifest JSON.
+    pub fn manifest_set_item(
+        &self,
+        manifest_json: &str,
+        item_id: &str,
+        blob_json: &str,
+    ) -> Result<String, JsError> {
+        let mut manifest: Manifest = serde_json::from_str(manifest_json).map_err(js_err)?;
+        manifest.validate().map_err(js_err)?;
+        let blob: EncryptedBlob = serde_json::from_str(blob_json).map_err(js_err)?;
+        manifest.set(item_id, &blob).map_err(js_err)?;
+        serde_json::to_string(&manifest).map_err(js_err)
+    }
+
+    /// Removes one item from a validated manifest and returns the updated
+    /// manifest JSON. Removing an absent item is an idempotent no-op.
+    pub fn manifest_remove_item(
+        &self,
+        manifest_json: &str,
+        item_id: &str,
+    ) -> Result<String, JsError> {
+        let mut manifest: Manifest = serde_json::from_str(manifest_json).map_err(js_err)?;
+        manifest.validate().map_err(js_err)?;
+        manifest.remove(item_id).map_err(js_err)?;
+        serde_json::to_string(&manifest).map_err(js_err)
+    }
+
     /// Seals a manifest (JSON) under the vault key; returns the JSON blob.
     pub fn seal_manifest(&self, manifest_json: &str) -> Result<String, JsError> {
         let manifest: Manifest = serde_json::from_str(manifest_json).map_err(js_err)?;
+        manifest.validate().map_err(js_err)?;
         let blob = self.vault()?.seal_manifest(&manifest).map_err(js_err)?;
         serde_json::to_string(&blob).map_err(js_err)
     }
@@ -444,6 +485,7 @@ impl Account {
     /// `IntegrityReport` as JSON (missing / unexpected / corrupted / duplicates).
     pub fn check_manifest(&self, manifest_json: &str, items_json: &str) -> Result<String, JsError> {
         let manifest: Manifest = serde_json::from_str(manifest_json).map_err(js_err)?;
+        manifest.validate().map_err(js_err)?;
         let items: HashMap<String, EncryptedBlob> =
             serde_json::from_str(items_json).map_err(js_err)?;
         let present: Vec<(&str, &EncryptedBlob)> =

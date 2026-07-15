@@ -257,6 +257,7 @@ impl Vault {
     /// Seals an integrity [`Manifest`] under the vault key. The resulting blob
     /// is opaque to the server and readable only by this vault.
     pub fn seal_manifest(&self, manifest: &Manifest) -> Result<EncryptedBlob> {
+        manifest.validate()?;
         let bytes = serde_json::to_vec(manifest).map_err(|_| CryptoError::Malformed)?;
         aead::encrypt(&self.vault_key, &bytes, AAD_MANIFEST)
     }
