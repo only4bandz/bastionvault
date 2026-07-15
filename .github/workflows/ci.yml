@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust format, test, and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install Rust 1.91.0
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run native tests
+        run: cargo test --workspace --all-features --locked
+      - name: Reject Clippy warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  wasm-and-clients:
+    name: WASM, app, and extension
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install Rust 1.91.0 with the WASM target
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          toolchain: 1.91.0
+          targets: wasm32-unknown-unknown
+      - name: Install Node.js 22.22.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.22.0
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install wasm-pack 0.13.1
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2
+        with:
+          tool: wasm-pack@0.13.1
+      - name: Run tests inside WebAssembly
+        run: wasm-pack test --node crates/crypto-wasm
+      - name: Build the app WASM package
+        run: bash app/build-wasm.sh
+      - name: Install locked app dependencies
+        run: npm ci --prefix app
+      - name: Lint the app
+        run: npm run lint --prefix app
+      - name: Type-check and build the app
+        run: npm run build --prefix app
+      - name: Test the extension
+        run: npm test --prefix extension
+      - name: Check extension JavaScript syntax
+        run: >-
+          find extension -path extension/node_modules -prune -o
+          -path extension/pkg -prune -o -name '*.js' -print0 |
+          xargs -0 -n1 node --check
+      - name: Install extension image tooling
+        run: |
+          if ! command -v convert >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends --yes imagemagick
+          fi
+      - name: Build the extension
+        run: bash extension/build.sh
+      - name: Build the standalone WASM demo
+        run: bash web/build.sh
