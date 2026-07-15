@@ -9,7 +9,7 @@ export function RevealSecret({
   toast,
 }: {
   account: Account;
-  onDone: () => void;
+  onDone: () => Promise<void>;
   toast: (m: string) => void;
 }): JSX.Element {
   const done = useRef(false);
@@ -17,6 +17,8 @@ export function RevealSecret({
   const [err, setErr] = useState("");
   const [saved, setSaved] = useState(false);
   const [showKit, setShowKit] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitErr, setSubmitErr] = useState("");
 
   // `reveal_secret` is one-shot (it consumes the Secret Key). Guard against
   // React StrictMode's double-invoke so we only call it once.
@@ -35,6 +37,17 @@ export function RevealSecret({
     if (data) {
       navigator.clipboard?.writeText(data.secret_key);
       toast("Secret Key copied");
+    }
+  }
+
+  async function finish() {
+    setSubmitErr("");
+    setSubmitting(true);
+    try {
+      await onDone();
+    } catch (e) {
+      setSubmitErr(e instanceof Error ? e.message : "Could not create the vault.");
+      setSubmitting(false);
     }
   }
 
@@ -77,8 +90,14 @@ export function RevealSecret({
               I have saved my Secret Key somewhere safe.
             </label>
 
-            <button className="btn btn-primary btn-block" disabled={!saved} onClick={onDone}>
-              Enter my vault
+            {submitErr && <div className="callout">{submitErr}</div>}
+
+            <button
+              className="btn btn-primary btn-block"
+              disabled={!saved || submitting}
+              onClick={() => void finish()}
+            >
+              {submitting ? "Creating your vault…" : "Create and enter my vault"}
             </button>
           </>
         )}
