@@ -5,6 +5,7 @@ import {
   completeVaultMutation,
   prepareBootstrapManifest,
   prepareVaultMutation,
+  reconcileVaultMutation,
   verifyVaultSnapshot,
   type IntegrityAccount,
 } from "./vault-integrity";
@@ -125,6 +126,46 @@ describe("vault integrity state", () => {
     const completed = completeVaultMutation(account, current, prepared, 3);
     expect(completed.revision).toBe(3);
     expect(completed.manifestSeq).toBe(3n);
+  });
+
+  it("positively reconciles only the exact ambiguous mutation result", () => {
+    const account = testAccount();
+    const original = vault(account, { a: blob("a") }, 2);
+    const current = verifyVaultSnapshot(account, original);
+    const prepared = prepareVaultMutation(account, current, [
+      { op: "put", id: "b", blob: blob("b") },
+    ]);
+    const committed: VaultData = {
+      // Server HashMap serialization order is not stable; equality is semantic.
+      items: { b: prepared.encryptedItems.b, a: prepared.encryptedItems.a },
+      manifest: prepared.manifest,
+      revision: 3,
+    };
+    const reconciled = reconcileVaultMutation(account, current, prepared, committed);
+    expect(reconciled?.revision).toBe(3);
+    expect(reconciled?.encryptedItems).toEqual({ a: blob("a"), b: blob("b") });
+
+    // An unchanged snapshot is not proof that the request cannot still commit.
+    expect(reconcileVaultMutation(account, current, prepared, original)).toBeNull();
+
+    // A different CAS winner at the expected next revision is not our result.
+    const competing = prepareVaultMutation(account, current, [
+      { op: "put", id: "c", blob: blob("c") },
+    ]);
+    expect(
+      reconcileVaultMutation(account, current, prepared, {
+        items: competing.encryptedItems,
+        manifest: competing.manifest,
+        revision: 3,
+      })
+    ).toBeNull();
+
+    expect(() =>
+      reconcileVaultMutation(account, current, prepared, {
+        ...committed,
+        items: { ...committed.items, b: blob("tampered") },
+      })
+    ).toThrow(/integrity/i);
   });
 
   it("rejects duplicate operations and unsafe revisions", () => {

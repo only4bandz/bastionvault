@@ -68,6 +68,22 @@ function requireIntactReport(reportJson: string): void {
   }
 }
 
+function encryptedItemsEqual(
+  left: Record<string, Blob>,
+  right: Record<string, Blob>
+): boolean {
+  const leftIds = Object.keys(left).sort();
+  const rightIds = Object.keys(right).sort();
+  return (
+    leftIds.length === rightIds.length &&
+    leftIds.every((id, index) => {
+      const a = left[id];
+      const b = right[rightIds[index]];
+      return id === rightIds[index] && a.v === b.v && a.nonce === b.nonce && a.ct === b.ct;
+    })
+  );
+}
+
 /** Open and verify the complete encrypted item set before any item decryption. */
 export function verifyVaultSnapshot(
   account: IntegrityAccount,
@@ -169,4 +185,26 @@ export function completeVaultMutation(
     manifestSeq: account.manifest_seq(prepared.manifestJson),
     encryptedItems: prepared.encryptedItems,
   };
+}
+
+/**
+ * Positively confirm an ambiguous transaction from a fresh server snapshot.
+ * A current or unrelated snapshot is never interpreted as proof of failure:
+ * the original request may still be completing on another connection.
+ */
+export function reconcileVaultMutation(
+  account: IntegrityAccount,
+  current: VaultIntegrityState,
+  prepared: PreparedVaultMutation,
+  vault: VaultData
+): VaultIntegrityState | null {
+  const verified = verifyVaultSnapshot(account, vault, current.manifestSeq);
+  if (
+    verified.revision !== current.revision + 1 ||
+    verified.manifestJson !== prepared.manifestJson ||
+    !encryptedItemsEqual(verified.encryptedItems, prepared.encryptedItems)
+  ) {
+    return null;
+  }
+  return completeVaultMutation(account, current, prepared, verified.revision);
 }

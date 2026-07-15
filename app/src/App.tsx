@@ -19,6 +19,7 @@ import {
   completeVaultMutation,
   prepareBootstrapManifest,
   prepareVaultMutation,
+  reconcileVaultMutation,
   verifyVaultSnapshot,
   type VaultIntegrityState,
 } from "./lib/vault-integrity";
@@ -293,12 +294,32 @@ export default function App(): JSX.Element {
           const current = integrityRef.current;
           if (!current) throw new Error("Vault integrity state is unavailable.");
           const prepared = prepareVaultMutation(acc, current, operations);
-          const result = await api.mutateVault(
-            tok,
-            current.revision,
-            prepared.operations,
-            prepared.manifest
-          );
+          let result: { revision: number };
+          try {
+            result = await api.mutateVault(
+              tok,
+              current.revision,
+              prepared.operations,
+              prepared.manifest
+            );
+          } catch (error) {
+            const ambiguous =
+              error instanceof ApiError && (error.status === 0 || error.status >= 500);
+            if (ambiguous && sessionEpoch.current === epoch) {
+              try {
+                const remote = await api.getVault(tok);
+                const reconciled = reconcileVaultMutation(acc, current, prepared, remote);
+                if (reconciled && sessionEpoch.current === epoch) {
+                  integrityRef.current = reconciled;
+                  return;
+                }
+              } catch {
+                // The original mutation is still ambiguous. The outer handler
+                // locks before any caller can publish speculative plaintext.
+              }
+            }
+            throw error;
+          }
           if (sessionEpoch.current !== epoch) return;
           integrityRef.current = completeVaultMutation(
             acc,
