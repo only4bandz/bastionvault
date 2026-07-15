@@ -83,9 +83,9 @@ export function Vault({
   token: string | null;
   sendContacts: Contact[];
   setSendContacts: (c: Contact[]) => void;
-  onUpsert: (i: VaultItem) => void;
-  onDelete: (id: string) => void;
-  onImport: (r: ImportResult) => void;
+  onUpsert: (i: VaultItem) => Promise<boolean>;
+  onDelete: (id: string) => Promise<boolean>;
+  onImport: (r: ImportResult) => Promise<void>;
   onLock: () => void;
   toast: (m: string) => void;
 }): JSX.Element {
@@ -308,7 +308,14 @@ export function Vault({
         <ItemEditor
           initial={editor === "new" ? null : editor}
           onClose={() => setEditor(null)}
-          onSave={(i) => { onUpsert(i); setEditor(null); toast("Item saved"); }}
+          onSave={async (i) => {
+            const saved = await onUpsert(i);
+            if (saved) {
+              setEditor(null);
+              toast("Item saved");
+            }
+            return saved;
+          }}
         />
       )}
 
@@ -317,7 +324,14 @@ export function Vault({
           item={detail}
           onClose={() => setDetail(null)}
           onEdit={() => { setEditor(detail); setDetail(null); }}
-          onDelete={() => { onDelete(detail.id); setDetail(null); toast("Item deleted"); }}
+          onDelete={async () => {
+            if (await onDelete(detail.id)) {
+              setDetail(null);
+              toast("Item deleted");
+              return true;
+            }
+            return false;
+          }}
           copy={copy}
         />
       )}
@@ -325,7 +339,12 @@ export function Vault({
       {importing && (
         <ImportModal
           onClose={() => setImporting(false)}
-          onImport={(r) => { onImport(r); setImporting(false); setNav("vault"); setTab("all"); }}
+          onImport={(r) => {
+            void onImport(r);
+            setImporting(false);
+            setNav("vault");
+            setTab("all");
+          }}
         />
       )}
     </div>
@@ -339,10 +358,11 @@ function ItemDetailView({
   item: VaultItem;
   onClose: () => void;
   onEdit: () => void;
-  onDelete: () => void;
+  onDelete: () => Promise<boolean>;
   copy: (t: string, w: string) => void;
 }): JSX.Element {
   const [reveal, setReveal] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const rows: [string, string | undefined, boolean][] =
     item.type === "login"
       ? [["Username", item.username, false], ["Password", item.password, true], ["Website", item.url, false]]
@@ -378,7 +398,18 @@ function ItemDetailView({
           )}
         </div>
         <div className="modal-foot">
-          <button className="btn btn-danger" onClick={onDelete}><IcTrash size={16} /> Delete</button>
+          <button
+            className="btn btn-danger"
+            disabled={deleting}
+            onClick={() => {
+              setDeleting(true);
+              void onDelete().then((deleted) => {
+                if (!deleted) setDeleting(false);
+              });
+            }}
+          >
+            <IcTrash size={16} /> {deleting ? "Deleting…" : "Delete"}
+          </button>
           <span className="spacer" />
           <button className="btn btn-primary" onClick={onEdit}><IcEdit size={16} /> Edit</button>
         </div>

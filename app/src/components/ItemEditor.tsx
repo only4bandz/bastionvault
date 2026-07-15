@@ -17,10 +17,11 @@ export function ItemEditor({
   onClose,
 }: {
   initial: VaultItem | null;
-  onSave: (item: VaultItem) => void;
+  onSave: (item: VaultItem) => Promise<boolean>;
   onClose: () => void;
 }): JSX.Element {
   const [item, setItem] = useState<VaultItem>(initial ?? NEW());
+  const [saving, setSaving] = useState(false);
   const set = <K extends keyof VaultItem>(k: K, v: VaultItem[K]) => setItem((p) => ({ ...p, [k]: v }));
 
   // Detect the card network locally (instant) and the issuing bank from the BIN
@@ -50,9 +51,11 @@ export function ItemEditor({
     return () => clearTimeout(t);
   }, [item.cardNumber, item.type]);
 
-  function save() {
+  async function save() {
     if (!item.title.trim()) return;
-    onSave({ ...item, updatedAt: Date.now() });
+    setSaving(true);
+    const saved = await onSave({ ...item, updatedAt: Date.now() });
+    if (!saved) setSaving(false);
   }
 
   return (
@@ -138,8 +141,14 @@ export function ItemEditor({
         </div>
         <div className="modal-foot">
           <span className="spacer" />
-          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-          <button className="btn btn-primary" onClick={save} disabled={!item.title.trim()}>Save</button>
+          <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            onClick={() => void save()}
+            disabled={!item.title.trim() || saving}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
         </div>
       </div>
     </div>
