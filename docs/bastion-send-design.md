@@ -181,6 +181,9 @@ TOFU is the default only with that visibly-distinct unverified state.
   `recipient_enc_pub` + `eph_pub` + `message_id` (defeats surreptitious
   forwarding / unknown-key-share / identity-misbinding — Davis).
 - **Signed by default**, with an explicit **"send anonymously"** toggle.
+- Signed mode is fail-closed: if the sender's published identity cannot be
+  confirmed, the client must refuse the send. It must never silently omit the
+  signature; anonymous mode requires an explicit user choice.
 - Honest wording: in v0.1 "anonymous" = **anonymous to the recipient**; the
   authenticated POST (§8) means the server still links the upload to the
   sender's session. True server-anonymity is v0.2.

@@ -141,6 +141,8 @@ Alternative rejected: chrome.storage.local or React state only (no sync).
    - Read-once: checkbox "Delete after recipient reads" (maps to `read_once`? Server currently uses best-effort via delete after GET, but blob can carry flag; for now send as hint in UI, actual delete is explicit or on read).
 3. "Send" (primary):
    - If no identity: error.
+   - If signed mode is selected but `whoami` cannot confirm the sender ID: stop
+     and show an error. Never silently send the message anonymously.
    - Lookup/resolve recipient if needed.
    - `const sealed = account.send_seal(plaintext, recipId, recipPubJson, passphrase || undefined, signed ? myId : undefined)`.
    - Parse `const b = JSON.parse(sealed); const { message_id, recipient_id } = b;`
