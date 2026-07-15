@@ -63,6 +63,8 @@ jobs:
         run: npm ci --prefix app
       - name: Lint the app
         run: npm run lint --prefix app
+      - name: Test the app
+        run: npm test --prefix app
       - name: Type-check and build the app
         run: npm run build --prefix app
       - name: Test the extension

@@ -24,7 +24,12 @@ export interface Prelogin {
 export interface VaultData {
   items: Record<string, Blob>;
   manifest: Blob | null;
+  revision: number;
 }
+
+export type VaultOperation =
+  | { op: "put"; id: string; blob: Blob }
+  | { op: "delete"; id: string };
 
 /** A published Send identity (opaque to the server; routing/crypto only). */
 export interface SendPublic {
@@ -90,10 +95,17 @@ export const api = {
     req<{ token: string }>("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),
   logout: (token: string) => req<void>("DELETE", "/sessions", token),
   getVault: (token: string) => req<VaultData>("GET", "/vault", token),
-  putItem: (token: string, id: string, blob: Blob) =>
-    req<void>("PUT", `/vault/items/${encodeURIComponent(id)}`, token, { blob }),
-  deleteItem: (token: string, id: string) =>
-    req<void>("DELETE", `/vault/items/${encodeURIComponent(id)}`, token),
+  mutateVault: (
+    token: string,
+    expectedRevision: number,
+    operations: VaultOperation[],
+    manifest: Blob
+  ) =>
+    req<{ revision: number }>("PUT", "/vault/transaction", token, {
+      expected_revision: expectedRevision,
+      operations,
+      manifest,
+    }),
 
   // ── Bastion Send ──
   publishIdentity: (token: string, pub: SendPublic) =>

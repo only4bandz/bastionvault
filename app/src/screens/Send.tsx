@@ -13,6 +13,7 @@ import {
   type Resolved,
   type Opened,
   type InboxItem,
+  type PersistEncryptedItem,
 } from "../lib/send";
 import { IcCopy, IcShared, IcPlus, IcTrash, IcEdit } from "../components/icons";
 
@@ -29,12 +30,16 @@ export function Send({
   token,
   contacts,
   setContacts,
+  persistEncryptedItem,
+  onLock,
   toast,
 }: {
   account: Account;
   token: string;
   contacts: Contact[];
   setContacts: (c: Contact[]) => void;
+  persistEncryptedItem: PersistEncryptedItem;
+  onLock: () => void;
   toast: (m: string) => void;
 }): JSX.Element {
   const [loading, setLoading] = useState(true);
@@ -66,19 +71,33 @@ export function Send({
   async function enable(): Promise<void> {
     setBusy(true);
     setError(null);
-    const r = await sendEnable(account, token).catch((e) => ({ error: (e as Error)?.message || "Could not enable Send." }));
+    const r = await sendEnable(account, token, persistEncryptedItem).catch((e) => ({
+      error: (e as Error)?.message || "Could not enable Send.",
+      requiresLock: false,
+    }));
     setBusy(false);
     if ("bastionId" in r) {
       setEnabled(true);
       setBastionId(r.bastionId);
     } else {
+      if (r.requiresLock) {
+        toast(r.error);
+        onLock();
+        return;
+      }
       setError(r.error);
     }
   }
 
-  async function persist(next: Contact[]): Promise<void> {
-    setContacts(next);
-    await saveContacts(account, token, next).catch(() => toast("Saved locally — server sync failed"));
+  async function persist(next: Contact[]): Promise<boolean> {
+    try {
+      await saveContacts(account, next, persistEncryptedItem);
+      setContacts(next);
+      return true;
+    } catch {
+      toast("Contact change was not saved");
+      return false;
+    }
   }
 
   if (loading) {
@@ -133,10 +152,17 @@ export function Send({
           ) : (
             contacts.map((c) => {
               const editing = editingId === c.bastion_id;
-              const saveName = () => {
+              const saveName = async () => {
                 const name = editName.trim() || c.bastion_id;
-                persist(contacts.map((x) => (x.bastion_id === c.bastion_id ? { ...x, display: name } : x)));
-                setEditingId(null);
+                if (
+                  await persist(
+                    contacts.map((x) =>
+                      x.bastion_id === c.bastion_id ? { ...x, display: name } : x
+                    )
+                  )
+                ) {
+                  setEditingId(null);
+                }
               };
               return (
                 <div className="contact-row" key={c.bastion_id}>
@@ -149,7 +175,7 @@ export function Send({
                         placeholder="Contact name"
                         onChange={(e) => setEditName(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") saveName();
+                          if (e.key === "Enter") void saveName();
                           if (e.key === "Escape") setEditingId(null);
                         }}
                       />
@@ -171,7 +197,7 @@ export function Send({
                   </div>
                   <span className={`badge ${c.verified ? "badge-ok" : "badge-warn"}`}>{c.verified ? "Verified" : "Unverified"}</span>
                   {editing ? (
-                    <button className="icon-btn icon-btn-ok" title="Save name" onClick={saveName}>✓</button>
+                    <button className="icon-btn icon-btn-ok" title="Save name" onClick={() => void saveName()}>✓</button>
                   ) : (
                     <button
                       className="icon-btn"
@@ -187,7 +213,7 @@ export function Send({
                   <button
                     className="icon-btn"
                     title="Remove"
-                    onClick={() => persist(contacts.filter((x) => x.bastion_id !== c.bastion_id))}
+                    onClick={() => void persist(contacts.filter((x) => x.bastion_id !== c.bastion_id))}
                   >
                     <IcTrash size={16} />
                   </button>
@@ -257,7 +283,7 @@ export function Send({
         verified_at: verified ? Date.now() : null,
         safety_number: resolved.safety_number,
       };
-      await persist([...contacts.filter((x) => x.bastion_id !== c.bastion_id), c]);
+      if (!(await persist([...contacts.filter((x) => x.bastion_id !== c.bastion_id), c]))) return;
       toast(verified ? "Contact verified" : "Contact saved");
       setView("contacts");
     };

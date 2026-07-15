@@ -94,6 +94,7 @@ fn manifest_bindings_roundtrip_and_rollback_in_wasm() {
     let items = format!("{{\"b\":{b},\"a\":{a}}}");
     let manifest = account.manifest_from_items(&items).unwrap();
     assert!(manifest.contains("\"seq\":2"));
+    assert_eq!(account.manifest_seq(&manifest).unwrap(), 2);
     assert!(manifest.find("\"id\":\"a\"").unwrap() < manifest.find("\"id\":\"b\"").unwrap());
 
     let updated_a = account.encrypt_item("updated", "a").unwrap();

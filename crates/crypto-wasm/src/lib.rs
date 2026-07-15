@@ -449,6 +449,14 @@ impl Account {
         serde_json::to_string(&manifest).map_err(js_err)
     }
 
+    /// Returns the validated manifest sequence as a JavaScript `bigint`, so
+    /// clients never lose precision by parsing a `u64` through JSON numbers.
+    pub fn manifest_seq(&self, manifest_json: &str) -> Result<u64, JsError> {
+        let manifest: Manifest = serde_json::from_str(manifest_json).map_err(js_err)?;
+        manifest.validate().map_err(js_err)?;
+        Ok(manifest.seq())
+    }
+
     /// Seals a manifest (JSON) under the vault key; returns the JSON blob.
     pub fn seal_manifest(&self, manifest_json: &str) -> Result<String, JsError> {
         let manifest: Manifest = serde_json::from_str(manifest_json).map_err(js_err)?;

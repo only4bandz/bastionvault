@@ -34,6 +34,8 @@ export interface SendState {
   bastionId: string | null;
 }
 
+export type PersistEncryptedItem = (id: string, blob: Blob) => Promise<void>;
+
 /** Whether Send is enabled on this account, and the published Bastion address. */
 export async function sendState(account: Account, token: string): Promise<SendState> {
   const enabled = account.has_send_identity;
@@ -53,7 +55,11 @@ export async function sendState(account: Account, token: string): Promise<SendSt
  * has none published (whoami 404); otherwise re-publishes the existing one to
  * recover the stable Bastion id. Returns the address or a user-facing error.
  */
-export async function sendEnable(account: Account, token: string): Promise<{ bastionId: string } | { error: string }> {
+export async function sendEnable(
+  account: Account,
+  token: string,
+  persistEncryptedItem: PersistEncryptedItem
+): Promise<{ bastionId: string } | { error: string; requiresLock?: boolean }> {
   let who: { bastion_id: string; public: SendPublic } | null = null;
   try {
     who = await api.whoami(token);
@@ -64,8 +70,18 @@ export async function sendEnable(account: Account, token: string): Promise<{ bas
     if (who) {
       return { error: "Send is already enabled on another device. Unlock that device to use Send here." };
     }
-    const itemBlob = JSON.parse(account.create_send_identity());
-    await api.putItem(token, SEND_IDENTITY_ID, itemBlob);
+    const itemBlob = JSON.parse(account.create_send_identity()) as Blob;
+    try {
+      await persistEncryptedItem(SEND_IDENTITY_ID, itemBlob);
+    } catch {
+      // create_send_identity installs the new private identity in WASM before
+      // returning its encrypted vault item. Locking is required to discard that
+      // staged identity when persistence was not confirmed.
+      return {
+        error: "Send identity persistence failed. Unlock the vault before retrying.",
+        requiresLock: true,
+      };
+    }
   }
   const bastionId =
     who?.bastion_id ?? (await api.publishIdentity(token, JSON.parse(account.send_identity_public()) as SendPublic)).bastion_id;
@@ -100,9 +116,13 @@ export function loadContacts(account: Account, items: Record<string, Blob>): Con
 }
 
 /** Persist the contacts list as the encrypted reserved vault item. */
-export async function saveContacts(account: Account, token: string, contacts: Contact[]): Promise<void> {
+export async function saveContacts(
+  account: Account,
+  contacts: Contact[],
+  persistEncryptedItem: PersistEncryptedItem
+): Promise<void> {
   const blob = JSON.parse(account.encrypt_item(JSON.stringify(contacts), SEND_CONTACTS_ID)) as Blob;
-  await api.putItem(token, SEND_CONTACTS_ID, blob);
+  await persistEncryptedItem(SEND_CONTACTS_ID, blob);
 }
 
 export interface Resolved {
