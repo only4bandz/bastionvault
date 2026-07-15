@@ -26,7 +26,7 @@ use core::fmt;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::account_secret::AccountSecret;
 use crate::aead::{self, EncryptedBlob};
@@ -50,8 +50,8 @@ const MAX_ENCODED_SALT_LEN: usize = 64;
 /// and comparison is done in **constant time**.
 ///
 /// Serializes/deserializes transparently as the underlying base64 string (the
-/// wire format is unchanged).
-#[derive(Serialize, Deserialize)]
+/// wire format is unchanged). Its owned allocation is wiped on drop.
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(transparent)]
 pub struct AuthSecret(String);
 

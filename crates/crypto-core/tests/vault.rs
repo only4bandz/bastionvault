@@ -2,8 +2,9 @@
 
 use crypto_core::aead::EncryptedBlob;
 use crypto_core::kdf::KdfParams;
-use crypto_core::vault::{auth_secret_eq, Vault};
+use crypto_core::vault::{auth_secret_eq, AuthSecret, Vault};
 use crypto_core::{AccountSecret, CryptoError};
+use zeroize::ZeroizeOnDrop;
 
 /// KDF parameters for the tests: exactly the policy floor (the minimum
 /// acceptable security level), to stay fast while still passing the
@@ -150,6 +151,12 @@ fn auth_secret_debug_is_redacted() {
     assert!(!dbg.contains(&secret));
     // Registration's Debug output must not leak the secret either.
     assert!(!format!("{:?}", reg).contains(&secret));
+}
+
+#[test]
+fn auth_secret_is_zeroized_on_drop() {
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<AuthSecret>();
 }
 
 #[test]

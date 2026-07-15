@@ -22,8 +22,10 @@
 //! To **shrink that exposure window**, this crate keeps secrets alive no longer
 //! than their use:
 //! - [`Account::lock`] drops the in-memory vault key (and any unrevealed Secret
-//!   Key) — proven by the fact that decryption fails afterwards. The web app
-//!   should call it on inactivity / tab-hide.
+//!   Key), Send identity, authentication secret, and credential-bearing
+//!   registration JSON — proven by the fact that decryption fails and secret
+//!   getters return empty afterwards. The web app should call it on inactivity
+//!   / tab-hide.
 //! - The Secret Key is exposed only through the **one-shot, consuming**
 //!   [`Account::reveal_secret`]: after the single deliberate display call it is
 //!   dropped (zeroized) and a second call fails. An [`Account`] obtained from
@@ -37,7 +39,7 @@ use crypto_core::pinlock::{self, LockedRecord};
 use crypto_core::send::{self, IdentityKeys as SendIdentity, PublicIdentity, Sender};
 use crypto_core::{kdf, AccountSecret, EncryptedBlob, KdfParams, Manifest, Registration, Vault};
 use std::collections::HashMap;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Converts a displayable error into a `JsError` (opaque message, no secret).
 fn js_err<E: core::fmt::Display>(e: E) -> JsError {
@@ -154,16 +156,34 @@ pub fn send_safety_number(
 /// The vault and the Secret Key are held in `Option`s so their lifetime can be
 /// bounded: [`Account::lock`] takes (and drops) them, and
 /// [`Account::reveal_secret`] consumes the Secret Key on first use.
+#[derive(serde::Serialize)]
+struct ExportedSession<'a> {
+    vault_key: &'a str,
+    registration_json: &'a str,
+    auth_secret: &'a str,
+}
+
+#[derive(serde::Deserialize)]
+struct ImportedSession {
+    vault_key: Zeroizing<String>,
+    registration_json: Zeroizing<String>,
+    #[serde(default)]
+    auth_secret: Zeroizing<String>,
+}
+
 #[wasm_bindgen]
 pub struct Account {
     vault: Option<Vault>,
-    registration_json: String,
+    // Registration JSON contains the server authentication credential. Keep
+    // the Rust-owned copy zeroizing even though copies returned to JavaScript
+    // necessarily live under the host runtime's memory management.
+    registration_json: Zeroizing<String>,
     secret: Option<AccountSecret>,
     /// Server authentication secret (base64). Unlike the vault key / Secret Key,
     /// this cannot decrypt anything — it only authenticates to the server (it is
     /// re-hashed there with Argon2id). Held so the app can log in / re-login, and
     /// dropped on [`Account::lock`].
-    auth_secret: Option<String>,
+    auth_secret: Option<Zeroizing<String>>,
     /// Bastion Send identity (X25519 + Ed25519), once generated/loaded. Lives
     /// only while unlocked; dropped on [`Account::lock`]. Persisted encrypted in
     /// the vault under the reserved item id [`SEND_IDENTITY_ITEM_ID`].
@@ -190,7 +210,7 @@ impl Account {
     /// the server cannot decrypt anything with it.
     #[wasm_bindgen(getter)]
     pub fn registration_json(&self) -> String {
-        self.registration_json.clone()
+        self.registration_json.as_str().to_owned()
     }
 
     /// `true` once [`Account::lock`] has dropped the in-memory vault key.
@@ -199,9 +219,10 @@ impl Account {
         self.vault.is_none()
     }
 
-    /// Locks the account: drops the in-memory vault key (its `ZeroizeOnDrop`
-    /// wipes it) and any **unrevealed** Secret Key. After this, encryption and
-    /// decryption fail until a fresh [`unlock`]. Idempotent.
+    /// Locks the account: wipes/drops the in-memory vault key, any
+    /// **unrevealed** Secret Key, server authentication material, and Send
+    /// identity. After this, encryption and decryption fail until a fresh
+    /// [`unlock`]. Idempotent.
     ///
     /// The web app should call this on inactivity, tab-hide, or sign-out to
     /// shrink the window during which secrets live in browser memory.
@@ -210,6 +231,7 @@ impl Account {
         self.secret = None;
         self.auth_secret = None;
         self.identity = None;
+        self.registration_json.zeroize();
     }
 
     /// The server authentication secret (base64), or `""` if locked. Send this
@@ -217,7 +239,11 @@ impl Account {
     /// decrypt the vault.
     #[wasm_bindgen(getter)]
     pub fn auth_secret(&self) -> String {
-        self.auth_secret.clone().unwrap_or_default()
+        self.auth_secret
+            .as_ref()
+            .map(|secret| secret.as_str())
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// Reveals the Secret Key material **exactly once** (one-time display flow:
@@ -268,11 +294,16 @@ impl Account {
     /// Errors if the account is locked.
     pub fn export_session(&self) -> Result<String, JsError> {
         let key = self.vault()?.export_key();
-        let session = serde_json::json!({
-            "vault_key": B64.encode(&*key),
-            "registration_json": self.registration_json,
-            "auth_secret": self.auth_secret.clone().unwrap_or_default(),
-        });
+        let vault_key = Zeroizing::new(B64.encode(&*key));
+        let session = ExportedSession {
+            vault_key: vault_key.as_str(),
+            registration_json: self.registration_json.as_str(),
+            auth_secret: self
+                .auth_secret
+                .as_ref()
+                .map(|secret| secret.as_str())
+                .unwrap_or_default(),
+        };
         serde_json::to_string(&session).map_err(js_err)
     }
 
@@ -283,7 +314,7 @@ impl Account {
     /// server under [`send_identity_item_id`]. Replaces any existing one.
     pub fn create_send_identity(&mut self) -> Result<String, JsError> {
         let ident = SendIdentity::generate(1);
-        let stored = B64.encode(&*ident.to_bytes());
+        let stored = Zeroizing::new(B64.encode(&*ident.to_bytes()));
         let blob = {
             let vault = self.vault()?;
             vault
@@ -303,7 +334,7 @@ impl Account {
             let stored = vault
                 .decrypt_item(&blob, SEND_IDENTITY_ITEM_ID)
                 .map_err(js_err)?;
-            let bytes = B64.decode(&*stored).map_err(js_err)?;
+            let bytes = Zeroizing::new(B64.decode(&*stored).map_err(js_err)?);
             SendIdentity::from_bytes(&bytes).map_err(js_err)?
         };
         self.identity = Some(ident);
@@ -563,8 +594,8 @@ impl Account {
 #[wasm_bindgen]
 pub fn register(master_password: &str) -> Result<Account, JsError> {
     let (vault, reg, secret) = Vault::register(master_password.as_bytes()).map_err(js_err)?;
-    let registration_json = serde_json::to_string(&reg).map_err(js_err)?;
-    let auth_secret = Some(reg.auth_secret.expose_b64().to_string());
+    let registration_json = Zeroizing::new(serde_json::to_string(&reg).map_err(js_err)?);
+    let auth_secret = Some(Zeroizing::new(reg.auth_secret.expose_b64().to_string()));
     Ok(Account {
         vault: Some(vault),
         registration_json,
@@ -590,8 +621,8 @@ pub fn register_with(
     };
     let (vault, reg, secret) =
         Vault::register_with(master_password.as_bytes(), params).map_err(js_err)?;
-    let registration_json = serde_json::to_string(&reg).map_err(js_err)?;
-    let auth_secret = Some(reg.auth_secret.expose_b64().to_string());
+    let registration_json = Zeroizing::new(serde_json::to_string(&reg).map_err(js_err)?);
+    let auth_secret = Some(Zeroizing::new(reg.auth_secret.expose_b64().to_string()));
     Ok(Account {
         vault: Some(vault),
         registration_json,
@@ -625,9 +656,9 @@ pub fn unlock(
     // kept (server credential only) so the app can establish a session.
     Ok(Account {
         vault: Some(vault),
-        registration_json: registration_json.to_string(),
+        registration_json: Zeroizing::new(registration_json.to_string()),
         secret: None,
-        auth_secret: Some(auth.expose_b64().to_string()),
+        auth_secret: Some(Zeroizing::new(auth.expose_b64().to_string())),
         identity: None,
     })
 }
@@ -639,33 +670,28 @@ pub fn unlock(
 /// `reveal_secret` correctly fails on it.
 #[wasm_bindgen]
 pub fn rehydrate(session_json: &str) -> Result<Account, JsError> {
-    let v: serde_json::Value = serde_json::from_str(session_json).map_err(js_err)?;
-    let vault_key_b64 = v["vault_key"]
-        .as_str()
-        .ok_or_else(|| JsError::new("missing vault_key"))?;
-    let registration_json = v["registration_json"]
-        .as_str()
-        .ok_or_else(|| JsError::new("missing registration_json"))?;
-    let auth_secret = v["auth_secret"].as_str().unwrap_or_default();
+    let session: ImportedSession = serde_json::from_str(session_json).map_err(js_err)?;
 
     // Defense in depth: the registration must be well-formed (reject malformed /
     // attacker-mangled stored sessions instead of building a half-valid Account).
-    serde_json::from_str::<Registration>(registration_json)
+    serde_json::from_str::<Registration>(&session.registration_json)
         .map_err(|_| JsError::new("invalid registration"))?;
 
-    // Decode into a buffer we zeroize once the key has been copied into the Vault.
-    let mut key_bytes = B64.decode(vault_key_b64).map_err(js_err)?;
+    // Both the base64 input owned by `session` and decoded bytes are wiped on
+    // every return path, including an invalid key length.
+    let key_bytes = Zeroizing::new(B64.decode(&session.vault_key).map_err(js_err)?);
     let vault = Vault::from_key(&key_bytes).map_err(js_err)?;
-    key_bytes.zeroize();
+    let registration_json = session.registration_json;
+    let auth_secret = if session.auth_secret.is_empty() {
+        None
+    } else {
+        Some(session.auth_secret)
+    };
     Ok(Account {
         vault: Some(vault),
-        registration_json: registration_json.to_string(),
+        registration_json,
         secret: None,
-        auth_secret: if auth_secret.is_empty() {
-            None
-        } else {
-            Some(auth_secret.to_string())
-        },
+        auth_secret,
         identity: None,
     })
 }
