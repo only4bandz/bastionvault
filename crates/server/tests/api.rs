@@ -6,6 +6,9 @@ use axum::Router;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use std::fmt;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use tower::ServiceExt;
 
 use crypto_core::kdf::KdfParams;
@@ -16,6 +19,61 @@ fn fast_kdf() -> KdfParams {
         mem_kib: KdfParams::MIN_MEM_KIB,
         iterations: KdfParams::MIN_ITERATIONS,
         parallelism: KdfParams::MIN_PARALLELISM,
+    }
+}
+
+struct TestDbPath {
+    path: String,
+    directory: PathBuf,
+}
+
+impl Deref for TestDbPath {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for TestDbPath {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.path)
+    }
+}
+
+impl fmt::Display for TestDbPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.path.fmt(formatter)
+    }
+}
+
+impl Drop for TestDbPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", self.path));
+        }
+        let _ = std::fs::remove_dir(&self.directory);
+    }
+}
+
+fn test_db_path(label: &str) -> TestDbPath {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory =
+        std::env::temp_dir().join(format!("bastion-{label}-{}-{unique}", std::process::id()));
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&directory).unwrap();
+    TestDbPath {
+        path: directory.join("bastion.db").to_string_lossy().into_owned(),
+        directory,
     }
 }
 
@@ -329,17 +387,7 @@ async fn transaction_validation_is_atomic_and_supports_large_manifests() {
 
 #[tokio::test]
 async fn failed_manifest_persistence_rolls_back_items_and_revision() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!(
-            "bastion-transaction-rollback-{}-{unique}.db",
-            std::process::id()
-        ))
-        .to_string_lossy()
-        .to_string();
+    let path = test_db_path("transaction-rollback");
     let app = server::app_with_db(&path);
     let (vault, token) = registered_vault_session(&app, "rollback@example.com").await;
     let conn = rusqlite::Connection::open(&path).unwrap();
@@ -987,12 +1035,86 @@ async fn health_ok() {
     assert_eq!(s, StatusCode::OK);
 }
 
+#[cfg(unix)]
+#[test]
+fn creates_sqlite_database_and_sidecars_with_owner_only_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = test_db_path("owner-only");
+    let app = server::app_with_db(&path);
+    for artifact in [
+        path.to_string(),
+        format!("{path}-wal"),
+        format!("{path}-shm"),
+    ] {
+        let metadata = std::fs::symlink_metadata(&artifact).unwrap();
+        assert!(metadata.is_file());
+        assert!(!metadata.file_type().is_symlink());
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    }
+    drop(app);
+}
+
+#[cfg(unix)]
+#[test]
+fn tightens_existing_database_permissions_before_opening() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = test_db_path("tighten-permissions");
+    std::fs::write(&*path, []).unwrap();
+    std::fs::set_permissions(&*path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(server::app_with_db(&path));
+    assert_eq!(
+        std::fs::metadata(&*path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symbolic_link_database_and_sidecar_paths() {
+    use std::os::unix::fs::symlink;
+
+    let linked_database = test_db_path("linked-database");
+    let database_target = linked_database.directory.join("target.db");
+    std::fs::write(&database_target, []).unwrap();
+    symlink(&database_target, &*linked_database).unwrap();
+    assert!(std::panic::catch_unwind(|| server::app_with_db(&linked_database)).is_err());
+    std::fs::remove_file(&database_target).unwrap();
+
+    let linked_sidecar = test_db_path("linked-sidecar");
+    std::fs::write(&*linked_sidecar, []).unwrap();
+    let sidecar_target = linked_sidecar.directory.join("target.wal");
+    std::fs::write(&sidecar_target, []).unwrap();
+    symlink(&sidecar_target, format!("{linked_sidecar}-wal")).unwrap();
+    assert!(std::panic::catch_unwind(|| server::app_with_db(&linked_sidecar)).is_err());
+    std::fs::remove_file(&sidecar_target).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_hard_linked_database_paths() {
+    let path = test_db_path("hard-linked-database");
+    std::fs::write(&*path, []).unwrap();
+    let alias = path.directory.join("database-alias.db");
+    std::fs::hard_link(&*path, &alias).unwrap();
+    assert!(std::panic::catch_unwind(|| server::app_with_db(&path)).is_err());
+    std::fs::remove_file(alias).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_database_parent_writable_by_group_or_others() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = test_db_path("unsafe-parent");
+    std::fs::set_permissions(&path.directory, std::fs::Permissions::from_mode(0o770)).unwrap();
+    assert!(std::panic::catch_unwind(|| server::app_with_db(&path)).is_err());
+}
+
 #[tokio::test]
 async fn data_persists_across_restart() {
-    let path = std::env::temp_dir()
-        .join(format!("bastion-persist-{}.db", std::process::id()))
-        .to_string_lossy()
-        .to_string();
+    let path = test_db_path("persist");
     let _ = std::fs::remove_file(&path);
 
     let (vault, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
@@ -1081,17 +1203,7 @@ async fn data_persists_across_restart() {
 
 #[test]
 fn migrates_legacy_accounts_with_zero_vault_revision() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!(
-            "bastion-revision-migration-{}-{unique}.db",
-            std::process::id()
-        ))
-        .to_string_lossy()
-        .to_string();
+    let path = test_db_path("revision-migration");
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
         "CREATE TABLE accounts(
@@ -1121,17 +1233,7 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
 
 #[tokio::test]
 async fn corrupt_persisted_account_credentials_prevent_restart() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!(
-            "bastion-corrupt-credentials-{}-{unique}.db",
-            std::process::id()
-        ))
-        .to_string_lossy()
-        .to_string();
+    let path = test_db_path("corrupt-credentials");
     let email = "persisted-credentials@example.com";
     let app = server::app_with_db(&path);
     let (_vault, _token) = registered_vault_session(&app, email).await;
@@ -1208,17 +1310,7 @@ async fn corrupt_persisted_account_credentials_prevent_restart() {
 
 #[tokio::test]
 async fn corrupt_persisted_vault_state_prevents_restart() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!(
-            "bastion-corrupt-state-{}-{unique}.db",
-            std::process::id()
-        ))
-        .to_string_lossy()
-        .to_string();
+    let path = test_db_path("corrupt-state");
 
     let (vault, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let auth = reg.auth_secret.expose_b64().to_string();
@@ -1281,17 +1373,7 @@ async fn corrupt_persisted_vault_state_prevents_restart() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_keep_cache_and_sqlite_consistent() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!(
-            "bastion-write-order-{}-{unique}.db",
-            std::process::id()
-        ))
-        .to_string_lossy()
-        .to_string();
+    let path = test_db_path("write-order");
 
     let app = server::app_with_db(&path);
     let (vault, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
@@ -1637,17 +1719,7 @@ async fn bastion_send_directory_and_inbox_flow() {
 
 #[tokio::test]
 async fn corrupted_send_persistence_fails_closed() {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let path = std::env::temp_dir()
-        .join(format!(
-            "bastion-send-corruption-{}-{unique}.db",
-            std::process::id()
-        ))
-        .to_string_lossy()
-        .to_string();
+    let path = test_db_path("send-corruption");
     let app = server::app_with_db(&path);
     let alice = signup_login(&app, "send-corrupt-alice@example.com").await;
     let bob = signup_login(&app, "send-corrupt-bob@example.com").await;

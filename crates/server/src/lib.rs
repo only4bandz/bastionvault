@@ -11,9 +11,14 @@
 //! the reads and is loaded from SQLite at startup; mutations are write-through.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, OpenOptions};
 use std::io;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
@@ -25,7 +30,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -361,9 +366,120 @@ enum DbVaultMutation {
     Stale,
 }
 
+fn sqlite_artifact_path(path: &FsPath, suffix: &str) -> PathBuf {
+    let mut artifact = path.as_os_str().to_os_string();
+    artifact.push(suffix);
+    PathBuf::from(artifact)
+}
+
+fn secure_database_parent(path: &FsPath) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| FsPath::new("."));
+    let absolute_parent = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(parent)
+    };
+    for ancestor in absolute_parent.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "database parent chain must contain only real directories",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            let mode = metadata.permissions().mode();
+            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "database parent chain must not be writable by group or others",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn secure_database_artifact(path: &FsPath, required: bool) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !required => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "database artifact must be a regular file, not a symbolic link",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        if metadata.nlink() != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "database artifact must not have hard links",
+            ));
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        if fs::symlink_metadata(path)?.permissions().mode() & 0o777 != 0o600 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "database artifact permissions are not owner-only",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_database_path(path: &FsPath) -> io::Result<()> {
+    secure_database_parent(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(_) => secure_database_artifact(path, true)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            options.open(path)?;
+            secure_database_artifact(path, true)?;
+        }
+        Err(error) => return Err(error),
+    }
+    for suffix in ["-wal", "-shm", "-journal"] {
+        secure_database_artifact(&sqlite_artifact_path(path, suffix), false)?;
+    }
+    Ok(())
+}
+
+fn secure_database_artifacts(path: &FsPath) -> io::Result<()> {
+    secure_database_artifact(path, true)?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        secure_database_artifact(&sqlite_artifact_path(path, suffix), false)?;
+    }
+    Ok(())
+}
+
 impl Db {
     fn open(path: &str) -> Self {
-        let conn = Connection::open(path).expect("open database");
+        let file_path = (path != ":memory:").then(|| FsPath::new(path));
+        if let Some(file_path) = file_path {
+            prepare_database_path(file_path).expect("secure database path");
+        }
+        let conn = if path == ":memory:" {
+            Connection::open_in_memory()
+        } else {
+            Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
+        }
+        .expect("open database");
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS accounts(
@@ -402,6 +518,9 @@ impl Db {
                 [],
             )
             .expect("migrate vault revision");
+        }
+        if let Some(file_path) = file_path {
+            secure_database_artifacts(file_path).expect("secure database artifacts");
         }
         Self {
             conn: Arc::new(Mutex::new(conn)),
