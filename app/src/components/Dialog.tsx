@@ -18,6 +18,21 @@ const FOCUSABLE = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
+let openDialogCount = 0;
+let bodyOverflowBeforeDialogs = "";
+
+function lockBodyScroll(): () => void {
+  if (openDialogCount === 0) {
+    bodyOverflowBeforeDialogs = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+  }
+  openDialogCount += 1;
+  return () => {
+    openDialogCount = Math.max(0, openDialogCount - 1);
+    if (openDialogCount === 0) document.body.style.overflow = bodyOverflowBeforeDialogs;
+  };
+}
+
 export function Dialog({
   title,
   children,
@@ -26,6 +41,7 @@ export function Dialog({
   headerMeta,
   onClose,
   closeDisabled = false,
+  inactive = false,
   initialFocusRef,
 }: {
   title: string;
@@ -35,6 +51,7 @@ export function Dialog({
   headerMeta?: ReactNode;
   onClose: () => void;
   closeDisabled?: boolean;
+  inactive?: boolean;
   initialFocusRef?: RefObject<HTMLElement | null>;
 }): JSX.Element {
   const titleId = useId();
@@ -42,7 +59,6 @@ export function Dialog({
   const restoreFocusRef = useRef(
     document.activeElement instanceof HTMLElement ? document.activeElement : null
   );
-  const originalBodyOverflowRef = useRef(document.body.style.overflow);
   const onCloseRef = useRef(onClose);
   const closeDisabledRef = useRef(closeDisabled);
   onCloseRef.current = onClose;
@@ -50,11 +66,10 @@ export function Dialog({
 
   useEffect(() => {
     const restoreFocus = restoreFocusRef.current;
-    const originalBodyOverflow = originalBodyOverflowRef.current;
-    document.body.style.overflow = "hidden";
+    const unlockBodyScroll = lockBodyScroll();
     (initialFocusRef?.current ?? dialogRef.current)?.focus();
     return () => {
-      document.body.style.overflow = originalBodyOverflow;
+      unlockBodyScroll();
       restoreFocus?.focus();
     };
   }, [initialFocusRef]);
@@ -92,7 +107,8 @@ export function Dialog({
 
   return (
     <div
-      className="overlay"
+      className={`overlay${inactive ? " inactive" : ""}`}
+      aria-hidden={inactive || undefined}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) close();
       }}

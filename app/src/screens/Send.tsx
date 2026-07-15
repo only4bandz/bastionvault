@@ -17,6 +17,8 @@ import {
 } from "../lib/send";
 import { IcCopy, IcShared, IcPlus, IcTrash, IcEdit } from "../components/icons";
 import { copyWithFeedback } from "../lib/clipboard";
+import { ConfirmDialog } from "../components/ConfirmDialog";
+import { deleteInboxMessage } from "../lib/destructive-actions";
 
 type View = "home" | "contacts" | "add" | "verify" | "compose" | "inbox";
 
@@ -53,6 +55,7 @@ export function Send({
   const [replyTo, setReplyTo] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [removingContact, setRemovingContact] = useState<Contact | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -211,7 +214,7 @@ export function Send({
                   <button
                     className="icon-btn"
                     aria-label={`Remove ${contactLabel(c)}`}
-                    onClick={() => void persist(contacts.filter((x) => x.bastion_id !== c.bastion_id))}
+                    onClick={() => setRemovingContact(c)}
                   >
                     <IcTrash size={16} />
                   </button>
@@ -220,6 +223,19 @@ export function Send({
             })
           )}
         </div>
+        {removingContact && (
+          <ConfirmDialog
+            title={`Remove ${contactLabel(removingContact)}?`}
+            confirmLabel="Remove contact"
+            pendingLabel="Removing…"
+            onClose={() => setRemovingContact(null)}
+            onConfirm={() =>
+              persist(contacts.filter((contact) => contact.bastion_id !== removingContact.bastion_id))
+            }
+          >
+            This removes the contact from your encrypted address book. It does not block that address or delete existing messages.
+          </ConfirmDialog>
+        )}
       </>
     );
   }
@@ -553,12 +569,16 @@ function Inbox({
         row={open}
         onBack={() => setOpen(null)}
         onReply={onReply}
-        onDelete={async () => {
-          await inboxDelete(token, open.item.message_id).catch(() => {});
-          setRows((r) => r.filter((x) => x.item.message_id !== open.item.message_id));
-          setOpen(null);
-          toast("Message deleted");
-        }}
+        onDelete={() =>
+          deleteInboxMessage(
+            () => inboxDelete(token, open.item.message_id),
+            () => {
+              setRows((rows) => rows.filter((row) => row.item.message_id !== open.item.message_id));
+              setOpen(null);
+            },
+            toast
+          )
+        }
       />
     );
   }
@@ -602,11 +622,12 @@ function Message({
   row: Row;
   onBack: () => void;
   onReply: (id: string) => void;
-  onDelete: () => void;
+  onDelete: () => Promise<boolean>;
 }): JSX.Element {
   const [data, setData] = useState<Opened>(row.opened);
   const [pass, setPass] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   const banner = data.keyChanged ? (
     <div className="trust trust-danger" role="alert">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>
@@ -622,7 +643,7 @@ function Message({
     <>
       <div className="page-head">
         <h2><button className="link-back" onClick={onBack}>Inbox</button> / Message</h2>
-        <div className="right"><button className="btn" onClick={onDelete}><IcTrash size={16} /> Delete</button></div>
+        <div className="right"><button className="btn" onClick={() => setConfirmingDelete(true)}><IcTrash size={16} /> Delete</button></div>
       </div>
       <div className="card-section">
         {data.needsPass ? (
@@ -665,6 +686,17 @@ function Message({
           </>
         )}
       </div>
+      {confirmingDelete && (
+        <ConfirmDialog
+          title="Delete message?"
+          confirmLabel="Delete message"
+          pendingLabel="Deleting…"
+          onClose={() => setConfirmingDelete(false)}
+          onConfirm={onDelete}
+        >
+          This permanently removes the encrypted message from your inbox. This action cannot be undone.
+        </ConfirmDialog>
+      )}
     </>
   );
 }

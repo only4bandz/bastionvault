@@ -77,6 +77,22 @@ describe("Vault dashboard accessibility", () => {
     expect(openItem).toHaveFocus();
   });
 
+  it("requires explicit confirmation before deleting a vault item", async () => {
+    const user = userEvent.setup();
+    const { onDelete } = renderVault();
+
+    await user.click(screen.getByRole("button", { name: "Open GitHub" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(screen.getByRole("dialog", { name: "Delete GitHub?" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+    expect(onDelete).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Delete item" }));
+    expect(onDelete).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
   it("controls the mobile navigation drawer and contains its keyboard focus", async () => {
     const user = userEvent.setup();
     renderVault();
