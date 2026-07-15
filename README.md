@@ -94,7 +94,12 @@ secret (never the raw secret), persisted to **SQLite**. Reuses the types from
 timestamps are revalidated on read; corruption fails the request instead of
 returning partial or synthetic data. Persisted account identifiers, KDFs,
 wrapped keys, and bounded Argon2id credential hashes are validated before the
-server begins serving traffic.
+server begins serving traffic. On Unix, the database and its WAL/SHM sidecars
+are forced to owner-only `0600`; symbolic-link artifacts and database parents
+or ancestors writable by group or others are rejected before SQLite opens the
+file (sticky temporary directories remain supported). Database artifacts with
+hard links are also rejected so an alternate pathname cannot bypass the
+owner-only mode.
 
 | Method | Route | Role |
 |---|---|---|
