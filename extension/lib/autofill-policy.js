@@ -1,15 +1,34 @@
 import { matchesSite } from "./match.js";
 
+const INSECURE_HTTP_ERROR = "Credentials are never released to insecure HTTP pages.";
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+export function credentialPageError(rawUrl) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return "Open a website before filling credentials.";
+  }
+
+  if (url.protocol === "https:") return null;
+  if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) return null;
+  if (url.protocol === "http:") return INSECURE_HTTP_ERROR;
+  return "Open a website before filling credentials.";
+}
+
 export function autofillPolicyError(item, tab, expectedTabId) {
   if (!Number.isInteger(expectedTabId) || !tab || tab.id !== expectedTabId) {
     return "The active tab changed. Reopen Bastion before filling.";
   }
   if (item?.type !== "login") return "Only login items can be filled.";
 
+  const pageError = credentialPageError(tab.url);
+  if (pageError) return pageError;
+
   let host;
   try {
     const url = new URL(tab.url);
-    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("unsupported protocol");
     host = url.hostname.toLowerCase().replace(/^www\./, "");
   } catch {
     return "Open a website before filling credentials.";
