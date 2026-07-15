@@ -29,7 +29,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crypto_core::{EncryptedBlob, KdfParams, Registration};
+use crypto_core::{EncryptedBlob, KdfParams, PublicIdentity, Registration, SendBlob};
 
 /// Default session token lifetime (30 min).
 const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
@@ -61,6 +61,7 @@ const MAX_ACTIVE_SESSIONS: usize = 100_000;
 /// Bastion Send: max stored blob size, per-recipient inbox cap, and per-account
 /// fixed-window rate limits (abuse controls — see docs/bastion-send-design.md §8).
 const MAX_SEND_BLOB: usize = 256 * 1024;
+const MAX_SEND_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const MAX_INBOX: i64 = 500;
 const MAX_INBOX_PAGE: i64 = 100; // cap a single inbox fetch (paginate by deleting)
 const RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -74,6 +75,27 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+fn valid_bastion_id(id: &str) -> bool {
+    if id.len() != 26 {
+        return false;
+    }
+    data_encoding::BASE32_NOPAD
+        .decode(id.as_bytes())
+        .ok()
+        .filter(|decoded| decoded.len() == 16)
+        .is_some_and(|decoded| data_encoding::BASE32_NOPAD.encode(&decoded) == id)
+}
+
+fn valid_message_id(id: &str) -> bool {
+    if id.len() != 24 {
+        return false;
+    }
+    B64.decode(id)
+        .ok()
+        .filter(|decoded| decoded.len() == 16)
+        .is_some_and(|decoded| B64.encode(&decoded) == id)
 }
 
 /// Builds the router, persisting to the SQLite database at `$BASTION_DB`
@@ -1319,18 +1341,6 @@ impl Db {
             .optional()
     }
 
-    fn recipient_exists(&self, bastion_id: &str) -> rusqlite::Result<bool> {
-        Ok(self
-            .lock()
-            .query_row(
-                "SELECT 1 FROM send_directory WHERE bastion_id=?1",
-                [bastion_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some())
-    }
-
     /// Atomically enforce the quota and insert (one lock hold → no count/insert
     /// TOCTOU). Dedupe is per-recipient (PK is `(recipient_id, message_id)`).
     fn insert_inbox(
@@ -1405,7 +1415,7 @@ impl Db {
 #[derive(Serialize)]
 struct WhoAmI {
     bastion_id: String,
-    public: serde_json::Value,
+    public: PublicIdentity,
 }
 
 #[derive(Serialize)]
@@ -1417,7 +1427,7 @@ struct PublishResponse {
 struct SendPost {
     recipient_id: String,
     message_id: String,
-    blob: serde_json::Value,
+    blob: SendBlob,
     expires_at: Option<i64>,
 }
 
@@ -1436,14 +1446,17 @@ enum InboxInsert {
     Full,
 }
 
-/// Publish (or rotate) the caller's Send identity. Body = the PublicIdentity
-/// JSON (opaque to the server). Returns the stable Bastion ID.
+/// Publish (or rotate) the caller's validated Send public identity. Returns the
+/// stable Bastion ID.
 async fn publish_identity(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Json(public): Json<serde_json::Value>,
+    Json(public): Json<PublicIdentity>,
 ) -> Result<Json<PublishResponse>, ApiError> {
     let email = require_auth(&st, &headers)?;
+    public
+        .validate()
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid public identity"))?;
     let public_json = serde_json::to_string(&public)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad json"))?;
     if public_json.len() > MAX_SEND_BLOB {
@@ -1470,10 +1483,15 @@ async fn send_whoami(
         .whoami(&email)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
     {
-        Some((bastion_id, public)) => Ok(Json(WhoAmI {
-            bastion_id,
-            public: serde_json::from_str(&public).unwrap_or(serde_json::Value::Null),
-        })),
+        Some((bastion_id, public)) => {
+            let public = serde_json::from_str::<PublicIdentity>(&public).map_err(|_| {
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid stored identity")
+            })?;
+            public.validate().map_err(|_| {
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid stored identity")
+            })?;
+            Ok(Json(WhoAmI { bastion_id, public }))
+        }
         None => Err(ApiError(StatusCode::NOT_FOUND, "no identity published")),
     }
 }
@@ -1484,17 +1502,26 @@ async fn send_directory(
     State(st): State<AppState>,
     headers: HeaderMap,
     Path(bastion_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+) -> Result<Json<PublicIdentity>, ApiError> {
     let email = require_auth(&st, &headers)?;
     rate_limit(&st, &email, "lookup", MAX_LOOKUPS_PER_MIN)?;
+    if !valid_bastion_id(&bastion_id) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad bastion id"));
+    }
     match st
         .db
         .directory_lookup(&bastion_id)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
     {
-        Some(public) => Ok(Json(
-            serde_json::from_str(&public).unwrap_or(serde_json::Value::Null),
-        )),
+        Some(public) => {
+            let public = serde_json::from_str::<PublicIdentity>(&public).map_err(|_| {
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid stored identity")
+            })?;
+            public.validate().map_err(|_| {
+                ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid stored identity")
+            })?;
+            Ok(Json(public))
+        }
         None => Err(ApiError(StatusCode::NOT_FOUND, "unknown recipient")),
     }
 }
@@ -1513,19 +1540,32 @@ async fn send_post(
     if blob_str.len() > MAX_SEND_BLOB {
         return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "blob too large"));
     }
-    if body.message_id.is_empty() || body.message_id.len() > 128 || body.recipient_id.len() > 128 {
+    if !valid_bastion_id(&body.recipient_id)
+        || !valid_message_id(&body.message_id)
+        || body.message_id != body.blob.message_id
+        || body.recipient_id != body.blob.recipient_id
+    {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad ids"));
     }
-    if !st
+    let recipient_json = st
         .db
-        .recipient_exists(&body.recipient_id)
+        .directory_lookup(&body.recipient_id)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
-    {
-        return Err(ApiError(StatusCode::NOT_FOUND, "unknown recipient"));
+        .ok_or(ApiError(StatusCode::NOT_FOUND, "unknown recipient"))?;
+    let recipient = serde_json::from_str::<PublicIdentity>(&recipient_json)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid stored identity"))?;
+    body.blob
+        .validate_for_delivery(&body.recipient_id, &recipient)
+        .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid send envelope"))?;
+    let now = now_secs();
+    if body.expires_at.is_some_and(|expires_at| {
+        expires_at <= now || expires_at > now.saturating_add(MAX_SEND_TTL_SECS)
+    }) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid expiration"));
     }
     // Per-recipient throttle (anti inbox-flood), on top of the per-sender cap.
     rate_limit(&st, &body.recipient_id, "inbound", MAX_INBOUND_PER_MIN)?;
-    st.db.purge_expired(now_secs());
+    st.db.purge_expired(now);
     // Atomic quota + dedupe (single lock → no TOCTOU).
     match st
         .db
@@ -1574,6 +1614,9 @@ async fn send_inbox_delete(
     Path(message_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers)?;
+    if !valid_message_id(&message_id) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "bad message id"));
+    }
     let mine = st
         .db
         .bastion_id_for(&email)
