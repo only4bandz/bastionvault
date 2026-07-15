@@ -14,6 +14,7 @@ import { lookupBin } from "../lib/bin";
 import type { ImportResult } from "../lib/import";
 import type { Account } from "../lib/wasm";
 import type { Contact } from "../lib/send";
+import type { Blob } from "../lib/api";
 import { Send } from "./Send";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
@@ -71,6 +72,7 @@ export function Vault({
   token,
   sendContacts,
   setSendContacts,
+  persistEncryptedItem,
   onUpsert,
   onDelete,
   onImport,
@@ -83,6 +85,7 @@ export function Vault({
   token: string | null;
   sendContacts: Contact[];
   setSendContacts: (c: Contact[]) => void;
+  persistEncryptedItem: (id: string, blob: Blob) => Promise<void>;
   onUpsert: (i: VaultItem) => Promise<boolean>;
   onDelete: (id: string) => Promise<boolean>;
   onImport: (r: ImportResult) => Promise<void>;
@@ -290,6 +293,8 @@ export function Vault({
               token={token}
               contacts={sendContacts}
               setContacts={setSendContacts}
+              persistEncryptedItem={persistEncryptedItem}
+              onLock={onLock}
               toast={toast}
             />
           )}

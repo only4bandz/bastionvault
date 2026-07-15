@@ -33,7 +33,11 @@ master password ──Argon2id(salt, 64MiB)──► master key
 - **Integrity manifest**: an index encrypted under the vault key lists the
   digest of each item. On sync, it detects whether a malicious server has
   deleted, injected, or rolled back an item (which per-item AEAD alone cannot
-  catch). A monotonic `seq` counter blocks rollback of the manifest itself.
+  catch). A monotonic `seq` counter blocks manifest rollback relative to the
+  latest sequence held in the current trusted session. Browser clients do not
+  persist a trusted checkpoint, so rollback across a complete browser restart
+  remains outside this guarantee. Legacy vaults without a manifest use one
+  explicit trust-on-first-use bootstrap after every encrypted item validates.
 - The server only stores **opaque blobs** + a slow hash of the auth secret. A
   server breach reveals no passwords.
 

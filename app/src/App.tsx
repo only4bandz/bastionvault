@@ -4,9 +4,24 @@ import { RevealSecret } from "./screens/RevealSecret";
 import { Unlock } from "./screens/Unlock";
 import { Vault } from "./screens/Vault";
 import { ensureWasm, register, unlock, type Account } from "./lib/wasm";
-import { api, ApiError, type Blob, type Registration, type VaultData } from "./lib/api";
+import {
+  api,
+  ApiError,
+  type Blob,
+  type Registration,
+  type VaultData,
+  type VaultOperation,
+} from "./lib/api";
 import { SEND_CONTACTS_ID, SEND_IDENTITY_ID, loadContacts, type Contact } from "./lib/send";
 import type { VaultItem } from "./lib/types";
+import {
+  completeBootstrap,
+  completeVaultMutation,
+  prepareBootstrapManifest,
+  prepareVaultMutation,
+  verifyVaultSnapshot,
+  type VaultIntegrityState,
+} from "./lib/vault-integrity";
 
 type Phase = "welcome" | "reveal" | "unlock" | "vault";
 
@@ -56,6 +71,45 @@ function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+function decryptVaultState(
+  account: Account,
+  encryptedItems: Record<string, Blob>
+): { items: VaultItem[]; contacts: Contact[] } {
+  const identity = encryptedItems[SEND_IDENTITY_ID];
+  if (identity) account.load_send_identity(JSON.stringify(identity));
+  return {
+    items: loadItems(account, encryptedItems),
+    contacts: loadContacts(account, encryptedItems),
+  };
+}
+
+async function establishVaultIntegrity(
+  account: Account,
+  token: string,
+  vault: VaultData
+): Promise<{
+  integrity: VaultIntegrityState;
+  items: VaultItem[];
+  contacts: Contact[];
+  bootstrapped: boolean;
+}> {
+  if (vault.manifest) {
+    const integrity = verifyVaultSnapshot(account, vault);
+    return { integrity, ...decryptVaultState(account, vault.items), bootstrapped: false };
+  }
+
+  // Legacy migration is explicit trust-on-first-use: every encrypted payload
+  // must decrypt and validate before the first manifest is committed.
+  const decrypted = decryptVaultState(account, vault.items);
+  const bootstrap = prepareBootstrapManifest(account, vault);
+  const result = await api.mutateVault(token, vault.revision, [], bootstrap.manifest);
+  return {
+    integrity: completeBootstrap(account, vault, bootstrap, result.revision),
+    ...decrypted,
+    bootstrapped: true,
+  };
+}
+
 export default function App(): JSX.Element {
   const [phase, setPhase] = useState<Phase>("welcome");
   const [account, setAccount] = useState<Account | null>(null);
@@ -66,6 +120,8 @@ export default function App(): JSX.Element {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
   const sessionEpoch = useRef(0);
+  const integrityRef = useRef<VaultIntegrityState | null>(null);
+  const mutationTail = useRef<Promise<void>>(Promise.resolve());
 
   const toast = useCallback((m: string) => {
     setToastMsg(m);
@@ -81,6 +137,8 @@ export default function App(): JSX.Element {
     setToken(null);
     setItems([]); // plaintext cleared; reloaded from the server on next unlock
     setSendContacts([]);
+    integrityRef.current = null;
+    mutationTail.current = Promise.resolve();
     setPhase("unlock");
   }, [account, token]);
 
@@ -148,9 +206,24 @@ export default function App(): JSX.Element {
         "Your vault may already be created, and your saved Secret Key keeps it recoverable. Retry, or unlock the existing vault."
       );
     }
-    setToken(tok);
-    setPhase("vault");
-  }, [account, email]);
+    try {
+      const vault = await api.getVault(tok);
+      const opened = await establishVaultIntegrity(account, tok, vault);
+      integrityRef.current = opened.integrity;
+      setToken(tok);
+      setItems(opened.items);
+      setSendContacts(opened.contacts);
+      setPhase("vault");
+      if (opened.bootstrapped) toast("Vault integrity protection initialized");
+    } catch (error) {
+      api.logout(tok).catch(() => {});
+      account.lock();
+      setAccount(null);
+      setToken(null);
+      setPhase("unlock");
+      throw error;
+    }
+  }, [account, email, toast]);
 
   // ── unlock an existing vault from the server ──
   const onUnlock = useCallback(async (em: string, pw: string, secretKey: string) => {
@@ -188,31 +261,73 @@ export default function App(): JSX.Element {
       acc.lock();
       throw error;
     }
-    let loadedItems: VaultItem[];
-    let contacts: Contact[];
+    let opened: Awaited<ReturnType<typeof establishVaultIntegrity>>;
     try {
-      // Load the Send identity (if enabled) so has_send_identity works; it's a
-      // reserved item, kept out of the vault list by loadItems.
-      const idItem = vault.items[SEND_IDENTITY_ID];
-      if (idItem) {
-        acc.load_send_identity(JSON.stringify(idItem));
-      }
-      loadedItems = loadItems(acc, vault.items);
-      contacts = loadContacts(acc, vault.items);
+      opened = await establishVaultIntegrity(acc, tok, vault);
     } catch {
       api.logout(tok).catch(() => {});
       acc.lock();
       throw new Error("Encrypted vault integrity check failed. No items were loaded.");
     }
+    integrityRef.current = opened.integrity;
     setAccount(acc);
     setEmail(em);
     setToken(tok);
-    setItems(loadedItems);
-    setSendContacts(contacts);
+    setItems(opened.items);
+    setSendContacts(opened.contacts);
     setPhase("vault");
-  }, []);
+    if (opened.bootstrapped) toast("Legacy vault verified and integrity protection initialized");
+  }, [toast]);
 
-  // ── item mutations (encrypt + persist first, then commit visible state) ──
+  // ── all vault mutations are serialized manifest + item CAS transactions ──
+  const commitVaultOperations = useCallback(
+    (operations: VaultOperation[]): Promise<void> => {
+      const acc = account;
+      const tok = token;
+      const epoch = sessionEpoch.current;
+      const execute = async (): Promise<void> => {
+        try {
+          if (!acc || !tok || sessionEpoch.current !== epoch) {
+            throw new Error("Vault is locked.");
+          }
+          const current = integrityRef.current;
+          if (!current) throw new Error("Vault integrity state is unavailable.");
+          const prepared = prepareVaultMutation(acc, current, operations);
+          const result = await api.mutateVault(
+            tok,
+            current.revision,
+            prepared.operations,
+            prepared.manifest
+          );
+          if (sessionEpoch.current !== epoch) return;
+          integrityRef.current = completeVaultMutation(
+            acc,
+            current,
+            prepared,
+            result.revision
+          );
+        } catch (error) {
+          const mustLock =
+            !(error instanceof ApiError) || [0, 401, 409].includes(error.status);
+          if (mustLock && sessionEpoch.current === epoch) lock();
+          throw error;
+        }
+      };
+      const scheduled = mutationTail.current.then(execute, execute);
+      mutationTail.current = scheduled.then(
+        () => undefined,
+        () => undefined
+      );
+      return scheduled;
+    },
+    [account, lock, token]
+  );
+
+  const persistEncryptedItem = useCallback(
+    (id: string, blob: Blob) => commitVaultOperations([{ op: "put", id, blob }]),
+    [commitVaultOperations]
+  );
+
   const upsert = useCallback(
     async (item: VaultItem): Promise<boolean> => {
       if (!account || !token) {
@@ -222,7 +337,7 @@ export default function App(): JSX.Element {
       const epoch = sessionEpoch.current;
       try {
         const blob = JSON.parse(account.encrypt_item(JSON.stringify(item), item.id)) as Blob;
-        await api.putItem(token, item.id, blob);
+        await persistEncryptedItem(item.id, blob);
         if (sessionEpoch.current !== epoch) return true;
         setItems((prev) => {
           const i = prev.findIndex((x) => x.id === item.id);
@@ -233,31 +348,39 @@ export default function App(): JSX.Element {
         });
         return true;
       } catch {
-        toast("Save failed — item was not changed");
+        toast(
+          sessionEpoch.current !== epoch
+            ? "Save was not confirmed — vault locked"
+            : "Save failed — item was not changed"
+        );
         return false;
       }
     },
-    [account, token, toast]
+    [account, persistEncryptedItem, token, toast]
   );
 
   const remove = useCallback(
     async (id: string): Promise<boolean> => {
-      if (!token) {
+      if (!account || !token) {
         toast("Vault is locked — item was not deleted");
         return false;
       }
       const epoch = sessionEpoch.current;
       try {
-        await api.deleteItem(token, id);
+        await commitVaultOperations([{ op: "delete", id }]);
         if (sessionEpoch.current !== epoch) return true;
         setItems((prev) => prev.filter((x) => x.id !== id));
         return true;
       } catch {
-        toast("Delete failed — item was not changed");
+        toast(
+          sessionEpoch.current !== epoch
+            ? "Delete was not confirmed — vault locked"
+            : "Delete failed — item was not changed"
+        );
         return false;
       }
     },
-    [token, toast]
+    [account, commitVaultOperations, token, toast]
   );
 
   // ── bulk import (CSV): expose only items confirmed by the server ──
@@ -270,21 +393,25 @@ export default function App(): JSX.Element {
       }
       toast(`Importing ${imported.length} items…`);
       const epoch = sessionEpoch.current;
-      const queue = imported.slice();
+      const deduplicated = [...new Map(imported.map((item) => [item.id, item])).values()];
       const persisted: VaultItem[] = [];
-      const worker = async () => {
-        while (queue.length) {
-          const it = queue.shift()!;
-          try {
-            const blob = JSON.parse(account.encrypt_item(JSON.stringify(it), it.id)) as Blob;
-            await api.putItem(token, it.id, blob);
-            persisted.push(it);
-          } catch {
-            /* keep going; report total at the end */
-          }
+      // The server reserves room for a complete maximum-size manifest plus
+      // three maximum-size item blobs. Keep imports within that deterministic
+      // transaction envelope instead of estimating ciphertext sizes in JS.
+      for (let start = 0; start < deduplicated.length; start += 3) {
+        const batch = deduplicated.slice(start, start + 3);
+        try {
+          const operations: VaultOperation[] = batch.map((item) => ({
+            op: "put",
+            id: item.id,
+            blob: JSON.parse(account.encrypt_item(JSON.stringify(item), item.id)) as Blob,
+          }));
+          await commitVaultOperations(operations);
+          persisted.push(...batch);
+        } catch {
+          break;
         }
-      };
-      await Promise.all(Array.from({ length: 8 }, worker));
+      }
       if (sessionEpoch.current !== epoch) return;
       setItems((prev) => {
         const next = new Map(prev.map((item) => [item.id, item]));
@@ -292,12 +419,12 @@ export default function App(): JSX.Element {
         return [...next.values()].sort((a, b) => b.updatedAt - a.updatedAt);
       });
       toast(
-        persisted.length === imported.length
+        persisted.length === deduplicated.length
           ? `Imported ${persisted.length} items`
-          : `Imported ${persisted.length}/${imported.length} (failed items were not added)`
+          : `Imported ${persisted.length}/${deduplicated.length} (remaining items were not added)`
       );
     },
-    [account, token, toast]
+    [account, commitVaultOperations, token, toast]
   );
 
   return (
@@ -315,6 +442,7 @@ export default function App(): JSX.Element {
           token={token}
           sendContacts={sendContacts}
           setSendContacts={setSendContacts}
+          persistEncryptedItem={persistEncryptedItem}
           onUpsert={upsert}
           onDelete={remove}
           onImport={importItems}
