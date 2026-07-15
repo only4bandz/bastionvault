@@ -312,7 +312,7 @@ export function Send({
         <p className="faint" style={{ margin: "10px 0 16px" }}>
           Share this address so other Bastion users can send you encrypted notes.
         </p>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="send-actions">
           <button className="btn btn-primary" onClick={() => { setError(null); setReplyTo(null); setView("compose"); }}>
             Compose note
           </button>
