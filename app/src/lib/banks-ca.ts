@@ -1,5 +1,5 @@
 // Registry of (mostly Canadian) card issuers. The domain drives the real logo
-// (the bank's favicon); detection itself is fully local (see bins-ca.ts).
+// (a stable local identifier); detection itself is fully local (see bins-ca.ts).
 export interface Bank {
   id: string;
   name: string;

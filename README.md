@@ -85,7 +85,6 @@ secret (never the raw secret), persisted to **SQLite**. Reuses the types from
 | `GET` | `/vault` | Encrypted items + manifest (auth) |
 | `PUT`/`DELETE` | `/vault/items/:id` | Upsert / delete an encrypted item (auth) |
 | `PUT` | `/vault/manifest` | Stores the integrity manifest (auth) |
-| `GET` | `/bin/:bin` | Cached BIN → issuer/brand proxy (so clients aren't rate-limited) |
 | `PUT` | `/send/identity` | Publish/rotate a Send identity → stable Bastion address |
 | `GET` | `/send/whoami` · `/send/directory/:id` | Your address · resolve a contact (exact-match, rate-limited) |
 | `POST` `/send` · `GET` `/send/inbox` · `DELETE` `/send/inbox/:id` | Deliver / pull / read-once delete an opaque blob |
