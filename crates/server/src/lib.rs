@@ -34,7 +34,7 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crypto_core::{EncryptedBlob, KdfParams, PublicIdentity, Registration, SendBlob};
+use crypto_core::{AuthSecret, EncryptedBlob, KdfParams, PublicIdentity, Registration, SendBlob};
 
 /// Default session token lifetime (30 min).
 const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
@@ -754,7 +754,7 @@ struct Prelogin {
 struct LoginRequest {
     email: String,
     /// Base64 authentication secret derived on the client side.
-    auth_secret: String,
+    auth_secret: AuthSecret,
 }
 
 #[derive(Serialize)]
@@ -827,11 +827,11 @@ async fn create_account(
         return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
     }
     // Slow hash on a dedicated blocking thread (no starvation of the async runtime).
-    let secret = req.registration.auth_secret.expose_b64().to_string();
+    let secret = req.registration.auth_secret;
     let permit = auth_permit(&st)?;
     let auth_hash = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        hash_secret(&secret)
+        hash_secret(secret.expose_b64())
     })
     .await
     .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
@@ -900,7 +900,7 @@ async fn create_session(
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
     validate_account_id(&req.email)?;
-    if !is_exact_b64(&req.auth_secret, AUTH_SECRET_BYTES) {
+    if !is_exact_b64(req.auth_secret.expose_b64(), AUTH_SECRET_BYTES) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
     auth_rate_limit(
@@ -923,11 +923,11 @@ async fn create_session(
         .map(|a| a.auth_hash.clone());
     // Same response for "unknown account" and "wrong secret".
     let phc = phc.ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"))?;
-    let secret = req.auth_secret.clone();
+    let secret = req.auth_secret;
     let permit = auth_permit(&st)?;
     let ok = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        verify_secret(&secret, &phc)
+        verify_secret(secret.expose_b64(), &phc)
     })
     .await
     .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?;

@@ -7,8 +7,9 @@
 
 #![cfg(target_arch = "wasm32")]
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use crypto_core::{default_lock_kdf, KdfParams};
-use crypto_wasm::{register_with, unlock};
+use crypto_wasm::{register_with, rehydrate, unlock};
 use wasm_bindgen_test::*;
 
 // KDF policy floor, for a fast test that still stays compliant.
@@ -125,15 +126,37 @@ fn lock_zeroizes_vault_so_decryption_fails() {
     let mut account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
     let blob = account.encrypt_item("hunter2", "login-1").unwrap();
     assert!(!account.is_locked());
+    assert!(!account.registration_json().is_empty());
+    assert!(!account.auth_secret().is_empty());
 
     account.lock();
     assert!(account.is_locked());
+    assert!(account.registration_json().is_empty());
+    assert!(account.auth_secret().is_empty());
     // The vault key is gone: decryption (and encryption) must fail.
     assert!(account.decrypt_item(&blob, "login-1").is_err());
     assert!(account.encrypt_item("x", "login-2").is_err());
     // lock() is idempotent.
     account.lock();
     assert!(account.is_locked());
+}
+
+#[wasm_bindgen_test]
+fn session_rehydrate_and_private_identity_import_roundtrip() {
+    let mut account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let item = account.encrypt_item("hunter2", "login-1").unwrap();
+    let identity_blob = account.create_send_identity().unwrap();
+    let public = account.send_identity_public().unwrap();
+    let session = account.export_session().unwrap();
+
+    let mut restored = rehydrate(&session).unwrap();
+    assert_eq!(restored.decrypt_item(&item, "login-1").unwrap(), "hunter2");
+    restored.load_send_identity(&identity_blob).unwrap();
+    assert_eq!(restored.send_identity_public().unwrap(), public);
+
+    let mut malformed: serde_json::Value = serde_json::from_str(&session).unwrap();
+    malformed["vault_key"] = serde_json::Value::String(B64.encode([0u8; 31]));
+    assert!(rehydrate(&serde_json::to_string(&malformed).unwrap()).is_err());
 }
 
 #[wasm_bindgen_test]

@@ -251,16 +251,19 @@ impl IdentityKeys {
         Zeroizing::new(out)
     }
 
-    /// Rebuild from [`IdentityKeys::to_bytes`].
+    /// Rebuild from [`IdentityKeys::to_bytes`]. Private-key staging arrays are
+    /// wiped on every return path after the dalek key types copy their values.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() != 68 {
             return Err(CryptoError::Malformed);
         }
-        let x: [u8; 32] = bytes[0..32].try_into().unwrap();
-        let s: [u8; 32] = bytes[32..64].try_into().unwrap();
+        let mut x = Zeroizing::new([0u8; 32]);
+        x.copy_from_slice(&bytes[0..32]);
+        let mut s = Zeroizing::new([0u8; 32]);
+        s.copy_from_slice(&bytes[32..64]);
         let ver = u32::from_be_bytes(bytes[64..68].try_into().unwrap());
         Ok(Self {
-            x_priv: StaticSecret::from(x),
+            x_priv: StaticSecret::from(core::mem::take(&mut *x)),
             sig: SigningKey::from_bytes(&s),
             key_version: ver,
         })
