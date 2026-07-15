@@ -21,6 +21,7 @@ import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
 import { loadVaultState, VaultIntegrityError } from "./lib/vault-load.js";
 import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
+import { SIGNING_UNAVAILABLE, senderIdForMode } from "./lib/send-policy.js";
 
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
@@ -675,9 +676,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               /* directory unreachable → fall back to the pinned key (offline) */
             }
           }
-          let myId = s.sendBastionId;
-          if (msg.signed && !myId) {
-            try { myId = (await makeApi(s.server).whoami(s.token))?.bastion_id || null; s.sendBastionId = myId; } catch { /* unpublished */ }
+          let myId;
+          try {
+            myId = await senderIdForMode({
+              signed: !!msg.signed,
+              cachedId: s.sendBastionId,
+              lookup: async () => {
+                const id = (await makeApi(s.server).whoami(s.token))?.bastion_id || null;
+                s.sendBastionId = id;
+                return id;
+              },
+            });
+          } catch {
+            return sendResponse({ ok: false, error: SIGNING_UNAVAILABLE });
           }
           // Seal to the PINNED public (BR6), not a fresh directory fetch.
           const blob = JSON.parse(
@@ -686,7 +697,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               contact.bastion_id,
               JSON.stringify(contact.public),
               msg.passphrase || undefined,
-              msg.signed ? myId || undefined : undefined
+              myId || undefined
             )
           );
           try {

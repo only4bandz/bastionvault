@@ -146,6 +146,19 @@ export interface ComposeOpts {
   expiresAt?: number | null;
 }
 
+const SIGNING_UNAVAILABLE =
+  "Your sender identity could not be confirmed. Nothing was sent; retry or choose anonymous mode explicitly.";
+
+async function senderIdForMode(
+  signed: boolean,
+  lookup: () => Promise<string>
+): Promise<string | undefined> {
+  if (!signed) return undefined;
+  const id = await lookup();
+  if (!id) throw new Error(SIGNING_UNAVAILABLE);
+  return id;
+}
+
 /**
  * Seal a note to a contact (BR6: to the PINNED key, never a fresh directory
  * fetch) and deliver it. For a verified contact, refuse if the published key
@@ -167,13 +180,11 @@ export async function composeNote(
       /* directory unreachable → fall back to the pinned key (offline) */
     }
   }
-  let myId: string | null = null;
-  if (opts.signed) {
-    try {
-      myId = (await api.whoami(token)).bastion_id;
-    } catch {
-      /* unpublished — send unsigned rather than fail */
-    }
+  let myId: string | undefined;
+  try {
+    myId = await senderIdForMode(opts.signed, async () => (await api.whoami(token)).bastion_id);
+  } catch {
+    return { error: SIGNING_UNAVAILABLE };
   }
   const blob = JSON.parse(
     account.send_seal(
@@ -181,7 +192,7 @@ export async function composeNote(
       contact.bastion_id,
       JSON.stringify(contact.public),
       opts.passphrase || undefined,
-      opts.signed ? myId || undefined : undefined
+      myId
     )
   ) as { recipient_id: string; message_id: string };
   try {
