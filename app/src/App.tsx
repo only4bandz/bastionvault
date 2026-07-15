@@ -86,25 +86,43 @@ export default function App(): JSX.Element {
     };
   }, [phase, lock]);
 
-  // ── create a new vault, persisted on the server ──
+  // ── create a new vault locally; persist only after the recovery key is saved ──
   const onCreate = useCallback(async (em: string, pw: string) => {
     await ensureWasm();
     const acc = register(pw);
-    const registration = JSON.parse(acc.registration_json) as Registration;
-    try {
-      await api.createAccount(em, registration);
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 409)
-        throw new Error('An account with this email already exists. Use "Unlock an existing vault".');
-      throw e;
-    }
-    const tok = await api.login(em, acc.auth_secret);
     setAccount(acc);
     setEmail(em);
-    setToken(tok);
+    setToken(null);
     setItems([]);
     setPhase("reveal");
   }, []);
+
+  const finishCreate = useCallback(async () => {
+    if (!account) throw new Error("The local vault is no longer available. Start again.");
+    const registration = JSON.parse(account.registration_json) as Registration;
+    let collided = false;
+    try {
+      await api.createAccount(email, registration);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) collided = true;
+      else throw e;
+    }
+    let tok: string;
+    try {
+      // Login after both a fresh create and a conflict. A conflict can be the
+      // idempotent retry of our own create after its response was lost.
+      tok = await api.login(email, account.auth_secret);
+    } catch (e) {
+      if (collided && e instanceof ApiError && e.status === 401) {
+        throw new Error('An account with this email already exists. Use "Unlock an existing vault".');
+      }
+      throw new Error(
+        "Your vault may already be created, and your saved Secret Key keeps it recoverable. Retry, or unlock the existing vault."
+      );
+    }
+    setToken(tok);
+    setPhase("vault");
+  }, [account, email]);
 
   // ── unlock an existing vault from the server ──
   const onUnlock = useCallback(async (em: string, pw: string, secretKey: string) => {
@@ -208,7 +226,7 @@ export default function App(): JSX.Element {
     <>
       {phase === "welcome" && <Welcome onCreate={onCreate} onHaveVault={() => setPhase("unlock")} />}
       {phase === "reveal" && account && (
-        <RevealSecret account={account} toast={toast} onDone={() => setPhase("vault")} />
+        <RevealSecret account={account} toast={toast} onDone={finishCreate} />
       )}
       {phase === "unlock" && <Unlock onUnlock={onUnlock} onCreateNew={() => setPhase("welcome")} />}
       {phase === "vault" && (
