@@ -35,6 +35,8 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
   hands out non-secret metadata (`SUGGEST`) until the user explicitly picks an
   account. (2) **from the popup** — the *Fill* button injects a one-shot fill
   function into the active tab via `chrome.scripting` (`activeTab`).
+- Credential release is bound to the same registrable domain (Public Suffix
+  List aware). Distinct domains are never treated as equivalent implicitly.
 - Cross-origin calls to the server are made from the worker under
   `host_permissions`, so no CORS relaxation is needed on the server.
 - Remote server origins must use HTTPS. Plain HTTP is accepted only for the
