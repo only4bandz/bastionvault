@@ -98,6 +98,14 @@ fn valid_message_id(id: &str) -> bool {
         .is_some_and(|decoded| B64.encode(&decoded) == id)
 }
 
+fn stored_data_error(
+    column: usize,
+    data_type: rusqlite::types::Type,
+    error: impl std::error::Error + Send + Sync + 'static,
+) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(column, data_type, Box::new(error))
+}
+
 /// Builds the router, persisting to the SQLite database at `$BASTION_DB`
 /// (default `bastion.db` in the working directory).
 ///
@@ -1372,11 +1380,38 @@ impl Db {
         })
     }
 
-    fn purge_expired(&self, now: i64) {
-        let _ = self.lock().execute(
-            "DELETE FROM send_inbox WHERE expires_at IS NOT NULL AND expires_at < ?1",
-            [now],
-        );
+    fn purge_expired(&self, recipient_id: &str, now: i64) -> rusqlite::Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "SELECT created_at, expires_at FROM send_inbox
+                 WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
+            )?;
+            let rows = stmt.query_map(params![recipient_id, now], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (created_at, expires_at) = row?;
+                if created_at <= 0
+                    || expires_at <= created_at
+                    || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
+                {
+                    return Err(stored_data_error(
+                        1,
+                        rusqlite::types::Type::Integer,
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
+                    ));
+                }
+            }
+        }
+        tx.execute(
+            "DELETE FROM send_inbox
+             WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
+            params![recipient_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn inbox_list(&self, recipient_id: &str, now: i64) -> rusqlite::Result<Vec<InboxItem>> {
@@ -1387,12 +1422,43 @@ impl Db {
              ORDER BY created_at ASC LIMIT ?3",
         )?;
         let rows = stmt.query_map(params![recipient_id, now, MAX_INBOX_PAGE], |r| {
+            let message_id: String = r.get(0)?;
+            let blob_json: String = r.get(1)?;
+            let created_at: i64 = r.get(2)?;
+            let expires_at: Option<i64> = r.get(3)?;
+            let blob: SendBlob = serde_json::from_str(&blob_json)
+                .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
+            if !valid_message_id(&message_id) {
+                return Err(stored_data_error(
+                    0,
+                    rusqlite::types::Type::Text,
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid stored message id"),
+                ));
+            }
+            blob.validate_stored_routing(&message_id, recipient_id)
+                .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
+            if created_at <= 0 {
+                return Err(stored_data_error(
+                    2,
+                    rusqlite::types::Type::Integer,
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid stored creation time"),
+                ));
+            }
+            if expires_at.is_some_and(|expires_at| {
+                expires_at <= created_at
+                    || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
+            }) {
+                return Err(stored_data_error(
+                    3,
+                    rusqlite::types::Type::Integer,
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
+                ));
+            }
             Ok(InboxItem {
-                message_id: r.get(0)?,
-                blob: serde_json::from_str(&r.get::<_, String>(1)?)
-                    .unwrap_or(serde_json::Value::Null),
-                created_at: r.get(2)?,
-                expires_at: r.get(3)?,
+                message_id,
+                blob,
+                created_at,
+                expires_at,
             })
         })?;
         // Propagate DB row errors instead of silently dropping them.
@@ -1434,7 +1500,7 @@ struct SendPost {
 #[derive(Serialize)]
 struct InboxItem {
     message_id: String,
-    blob: serde_json::Value,
+    blob: SendBlob,
     created_at: i64,
     expires_at: Option<i64>,
 }
@@ -1565,7 +1631,9 @@ async fn send_post(
     }
     // Per-recipient throttle (anti inbox-flood), on top of the per-sender cap.
     rate_limit(&st, &body.recipient_id, "inbound", MAX_INBOUND_PER_MIN)?;
-    st.db.purge_expired(now);
+    st.db
+        .purge_expired(&body.recipient_id, now)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
     // Atomic quota + dedupe (single lock → no TOCTOU).
     match st
         .db
@@ -1599,7 +1667,9 @@ async fn send_inbox(
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no identity published"))?;
     let now = now_secs();
-    st.db.purge_expired(now);
+    st.db
+        .purge_expired(&mine, now)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
     let items = st
         .db
         .inbox_list(&mine, now)

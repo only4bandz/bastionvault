@@ -300,10 +300,27 @@ impl SendBlob {
         recipient: &PublicIdentity,
     ) -> Result<()> {
         recipient.validate()?;
+        self.validate_stored_routing(&self.message_id, recipient_id)?;
+        if self.recipient_key_version != recipient.key_version {
+            return Err(CryptoError::Malformed);
+        }
+        let recipient_enc_pub: [u8; 32] = unb64_exact_canonical(&self.recipient_enc_pub, 32)?
+            .try_into()
+            .map_err(|_| CryptoError::Malformed)?;
+        if recipient_enc_pub != recipient.enc_pub {
+            return Err(CryptoError::Malformed);
+        }
+        Ok(())
+    }
+
+    /// Revalidate a persisted inbox row without requiring the recipient's
+    /// current directory key, which may have rotated since ingestion.
+    pub fn validate_stored_routing(&self, message_id: &str, recipient_id: &str) -> Result<()> {
         if self.v != SEND_V
             || self.typ.as_bytes() != SEND_TYPE
+            || self.message_id != message_id
             || self.recipient_id != recipient_id
-            || self.recipient_key_version != recipient.key_version
+            || self.recipient_key_version == 0
         {
             return Err(CryptoError::Malformed);
         }
@@ -312,9 +329,7 @@ impl SendBlob {
         let recipient_enc_pub: [u8; 32] = unb64_exact_canonical(&self.recipient_enc_pub, 32)?
             .try_into()
             .map_err(|_| CryptoError::Malformed)?;
-        if recipient_enc_pub != recipient.enc_pub {
-            return Err(CryptoError::Malformed);
-        }
+        validate_x25519_public(recipient_enc_pub)?;
 
         let eph_pub: [u8; 32] = unb64_exact_canonical(&self.eph_pub, 32)?
             .try_into()

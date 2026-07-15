@@ -208,8 +208,13 @@ fn delivery_validation_binds_routing_and_current_recipient_key() {
     let public = recipient.public();
     let blob = seal(b"deliver", "BOB-ID", &public, None, None).unwrap();
     blob.validate_for_delivery("BOB-ID", &public).unwrap();
+    blob.validate_stored_routing(&blob.message_id, "BOB-ID")
+        .unwrap();
 
     assert!(blob.validate_for_delivery("OTHER-ID", &public).is_err());
+    assert!(blob
+        .validate_stored_routing("AAAAAAAAAAAAAAAAAAAAAA==", "BOB-ID")
+        .is_err());
     assert!(blob
         .validate_for_delivery("BOB-ID", &IdentityKeys::generate(2).public())
         .is_err());
