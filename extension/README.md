@@ -24,8 +24,9 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
 - The vault is **decrypted only inside the service worker**, in WASM memory.
   Nothing secret is ever written to `chrome.storage`, `localStorage`,
   IndexedDB or cookies (the same anti-stealer rule the web app enforces in CI).
-- When Chrome evicts the service worker, the in-memory session is lost, which
-  **re-locks** the vault — by design.
+- When Chrome evicts the service worker, the unlocked session can be rehydrated
+  from extension-private, RAM-backed `chrome.storage.session` until its bounded
+  expiry. It is never written to disk and is removed on lock.
 - **Auto-lock** after 10 minutes of inactivity, and immediately when the OS
   session locks (`chrome.idle`).
 - Two autofill paths: (1) **inline** — a content script shows a dropdown of
@@ -36,6 +37,8 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
   function into the active tab via `chrome.scripting` (`activeTab`).
 - Cross-origin calls to the server are made from the worker under
   `host_permissions`, so no CORS relaxation is needed on the server.
+- Remote server origins must use HTTPS. Plain HTTP is accepted only for the
+  built-in `localhost` and `127.0.0.1` development origins.
 
 ## Build & load
 
