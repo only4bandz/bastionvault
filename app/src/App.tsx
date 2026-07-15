@@ -23,6 +23,17 @@ import {
   verifyVaultSnapshot,
   type VaultIntegrityState,
 } from "./lib/vault-integrity";
+import {
+  VaultRollbackError,
+  assertVaultRollbackProgress,
+  createVaultRollbackAnchor,
+  readVaultRollbackAnchor,
+  vaultRollbackAnchorKey,
+  withVaultRollbackLock,
+  writeVaultRollbackAnchor,
+  type AnchorStorage,
+  type VaultRollbackAnchor,
+} from "./lib/vault-anchor";
 
 type Phase = "welcome" | "reveal" | "unlock" | "vault";
 
@@ -87,16 +98,28 @@ function decryptVaultState(
 async function establishVaultIntegrity(
   account: Account,
   token: string,
-  vault: VaultData
+  vault: VaultData,
+  trustedAnchor: VaultRollbackAnchor | null
 ): Promise<{
   integrity: VaultIntegrityState;
+  rollbackAnchor: VaultRollbackAnchor;
   items: VaultItem[];
   contacts: Contact[];
   bootstrapped: boolean;
 }> {
   if (vault.manifest) {
-    const integrity = verifyVaultSnapshot(account, vault);
-    return { integrity, ...decryptVaultState(account, vault.items), bootstrapped: false };
+    const integrity = verifyVaultSnapshot(account, vault, trustedAnchor?.manifestSeq);
+    const rollbackAnchor = await createVaultRollbackAnchor(integrity);
+    assertVaultRollbackProgress(rollbackAnchor, trustedAnchor);
+    return {
+      integrity,
+      rollbackAnchor,
+      ...decryptVaultState(account, vault.items),
+      bootstrapped: false,
+    };
+  }
+  if (trustedAnchor) {
+    throw new VaultRollbackError("A trusted vault manifest is missing from the server snapshot.");
   }
 
   // Legacy migration is explicit trust-on-first-use: every encrypted payload
@@ -104,11 +127,49 @@ async function establishVaultIntegrity(
   const decrypted = decryptVaultState(account, vault.items);
   const bootstrap = prepareBootstrapManifest(account, vault);
   const result = await api.mutateVault(token, vault.revision, [], bootstrap.manifest);
+  const integrity = completeBootstrap(account, vault, bootstrap, result.revision);
   return {
-    integrity: completeBootstrap(account, vault, bootstrap, result.revision),
+    integrity,
+    rollbackAnchor: await createVaultRollbackAnchor(integrity),
     ...decrypted,
     bootstrapped: true,
   };
+}
+
+function browserAnchorStorage(): AnchorStorage {
+  return window.localStorage; // storage-guard:allow -- non-secret rollback metadata only
+}
+
+function rollbackAnchorKey(accountId: string): string {
+  const apiScope = new URL("/api", window.location.href).href;
+  return vaultRollbackAnchorKey(apiScope, accountId);
+}
+
+async function establishVaultIntegrityAnchored(
+  account: Account,
+  accountId: string,
+  token: string,
+  vault: VaultData
+): Promise<Awaited<ReturnType<typeof establishVaultIntegrity>>> {
+  const key = rollbackAnchorKey(accountId);
+  return withVaultRollbackLock(key, async () => {
+    const storage = browserAnchorStorage();
+    const trusted = readVaultRollbackAnchor(storage, key);
+    const opened = await establishVaultIntegrity(account, token, vault, trusted);
+    writeVaultRollbackAnchor(storage, key, opened.rollbackAnchor);
+    return opened;
+  });
+}
+
+async function persistVaultIntegrityAnchor(
+  accountId: string,
+  integrity: VaultIntegrityState
+): Promise<void> {
+  const key = rollbackAnchorKey(accountId);
+  const candidate = await createVaultRollbackAnchor(integrity);
+  await withVaultRollbackLock(key, async () => {
+    writeVaultRollbackAnchor(browserAnchorStorage(), key, candidate);
+  });
 }
 
 export default function App(): JSX.Element {
@@ -209,7 +270,7 @@ export default function App(): JSX.Element {
     }
     try {
       const vault = await api.getVault(tok);
-      const opened = await establishVaultIntegrity(account, tok, vault);
+      const opened = await establishVaultIntegrityAnchored(account, email, tok, vault);
       integrityRef.current = opened.integrity;
       setToken(tok);
       setItems(opened.items);
@@ -264,10 +325,11 @@ export default function App(): JSX.Element {
     }
     let opened: Awaited<ReturnType<typeof establishVaultIntegrity>>;
     try {
-      opened = await establishVaultIntegrity(acc, tok, vault);
-    } catch {
+      opened = await establishVaultIntegrityAnchored(acc, em, tok, vault);
+    } catch (error) {
       api.logout(tok).catch(() => {});
       acc.lock();
+      if (error instanceof VaultRollbackError) throw error;
       throw new Error("Encrypted vault integrity check failed. No items were loaded.");
     }
     integrityRef.current = opened.integrity;
@@ -310,6 +372,8 @@ export default function App(): JSX.Element {
                 const remote = await api.getVault(tok);
                 const reconciled = reconcileVaultMutation(acc, current, prepared, remote);
                 if (reconciled && sessionEpoch.current === epoch) {
+                  await persistVaultIntegrityAnchor(email, reconciled);
+                  if (sessionEpoch.current !== epoch) return;
                   integrityRef.current = reconciled;
                   return;
                 }
@@ -321,12 +385,15 @@ export default function App(): JSX.Element {
             throw error;
           }
           if (sessionEpoch.current !== epoch) return;
-          integrityRef.current = completeVaultMutation(
+          const completed = completeVaultMutation(
             acc,
             current,
             prepared,
             result.revision
           );
+          await persistVaultIntegrityAnchor(email, completed);
+          if (sessionEpoch.current !== epoch) return;
+          integrityRef.current = completed;
         } catch (error) {
           const mustLock =
             !(error instanceof ApiError) || [0, 401, 409].includes(error.status);
@@ -341,7 +408,7 @@ export default function App(): JSX.Element {
       );
       return scheduled;
     },
-    [account, lock, token]
+    [account, email, lock, token]
   );
 
   const persistEncryptedItem = useCallback(
