@@ -5,7 +5,7 @@ import { Unlock } from "./screens/Unlock";
 import { Vault } from "./screens/Vault";
 import { ensureWasm, register, unlock, type Account } from "./lib/wasm";
 import { api, ApiError, type Blob, type Registration } from "./lib/api";
-import { SEND_IDENTITY_ID, loadContacts, type Contact } from "./lib/send";
+import { SEND_CONTACTS_ID, SEND_IDENTITY_ID, loadContacts, type Contact } from "./lib/send";
 import type { VaultItem } from "./lib/types";
 
 type Phase = "welcome" | "reveal" | "unlock" | "vault";
@@ -15,16 +15,42 @@ const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
 
 /** Vault items under this prefix hold Bastion Send state (identity, contacts),
  * not user entries — never surface them in the vault list. */
-const isReservedItem = (id: string): boolean => id.startsWith("bastion:send-");
+const SEND_LOCKED_PREFIX = "bastion:send-locked:";
+const OPTIONAL_ITEM_STRINGS: (keyof VaultItem)[] = [
+  "username", "password", "url", "cardNumber", "cardExp", "cardCvv",
+  "cardBrand", "cardBank", "cardBankDomain", "cardType", "notes",
+];
 
 function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
   const out: VaultItem[] = [];
   for (const [id, blob] of Object.entries(items)) {
-    if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
+    if (id === SEND_IDENTITY_ID) continue; // validated by load_send_identity before this call
     try {
-      out.push(JSON.parse(account.decrypt_item(JSON.stringify(blob), id)) as VaultItem);
+      const item: unknown = JSON.parse(account.decrypt_item(JSON.stringify(blob), id));
+      if (id === SEND_CONTACTS_ID || id.startsWith(SEND_LOCKED_PREFIX)) {
+        if (id === SEND_CONTACTS_ID ? !Array.isArray(item) : !item || typeof item !== "object") {
+          throw new Error("invalid reserved item payload");
+        }
+        continue;
+      }
+      if (id.startsWith("bastion:send-")) throw new Error("unsupported reserved item");
+      if (
+        !item ||
+        typeof item !== "object" ||
+        (item as VaultItem).id !== id ||
+        !["login", "note", "card"].includes((item as VaultItem).type) ||
+        typeof (item as VaultItem).title !== "string" ||
+        !Number.isFinite((item as VaultItem).updatedAt) ||
+        OPTIONAL_ITEM_STRINGS.some(
+          (field) => (item as VaultItem)[field] !== undefined && typeof (item as VaultItem)[field] !== "string"
+        ) ||
+        ((item as VaultItem).favorite !== undefined && typeof (item as VaultItem).favorite !== "boolean")
+      ) {
+        throw new Error("invalid item payload");
+      }
+      out.push(item as VaultItem);
     } catch {
-      // Skip an item that fails to decrypt (corrupt / tampered).
+      throw new Error("Encrypted vault integrity check failed. No items were loaded.");
     }
   }
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -149,21 +175,27 @@ export default function App(): JSX.Element {
     }
     const tok = await api.login(em, acc.auth_secret);
     const vault = await api.getVault(tok);
-    // Load the Send identity (if enabled) so has_send_identity works; it's a
-    // reserved item, kept out of the vault list by loadItems.
-    const idItem = vault.items[SEND_IDENTITY_ID];
-    if (idItem) {
-      try {
+    let loadedItems: VaultItem[];
+    let contacts: Contact[];
+    try {
+      // Load the Send identity (if enabled) so has_send_identity works; it's a
+      // reserved item, kept out of the vault list by loadItems.
+      const idItem = vault.items[SEND_IDENTITY_ID];
+      if (idItem) {
         acc.load_send_identity(JSON.stringify(idItem));
-      } catch {
-        /* malformed reserved item */
       }
+      loadedItems = loadItems(acc, vault.items);
+      contacts = loadContacts(acc, vault.items);
+    } catch {
+      api.logout(tok).catch(() => {});
+      acc.lock();
+      throw new Error("Encrypted vault integrity check failed. No items were loaded.");
     }
     setAccount(acc);
     setEmail(em);
     setToken(tok);
-    setItems(loadItems(acc, vault.items));
-    setSendContacts(loadContacts(acc, vault.items));
+    setItems(loadedItems);
+    setSendContacts(contacts);
     setPhase("vault");
   }, []);
 

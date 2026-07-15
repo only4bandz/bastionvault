@@ -78,11 +78,25 @@ export async function sendEnable(account: Account, token: string): Promise<{ bas
 export function loadContacts(account: Account, items: Record<string, Blob>): Contact[] {
   const blob = items[SEND_CONTACTS_ID];
   if (!blob) return [];
-  try {
-    return JSON.parse(account.decrypt_item(JSON.stringify(blob), SEND_CONTACTS_ID)) as Contact[];
-  } catch {
-    return [];
+  const contacts: unknown = JSON.parse(account.decrypt_item(JSON.stringify(blob), SEND_CONTACTS_ID));
+  if (
+    !Array.isArray(contacts) ||
+    !contacts.every(
+      (contact) =>
+        contact &&
+        typeof contact === "object" &&
+        typeof (contact as Contact).bastion_id === "string" &&
+        typeof (contact as Contact).public === "object" &&
+        typeof (contact as Contact).pinFp === "string" &&
+        typeof (contact as Contact).display === "string" &&
+        typeof (contact as Contact).verified === "boolean" &&
+        ((contact as Contact).verified_at === null || typeof (contact as Contact).verified_at === "number") &&
+        ((contact as Contact).safety_number === null || typeof (contact as Contact).safety_number === "string")
+    )
+  ) {
+    throw new Error("invalid contacts payload");
   }
+  return contacts as Contact[];
 }
 
 /** Persist the contacts list as the encrypted reserved vault item. */
