@@ -135,6 +135,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 /* ─── app shell ───────────────────────────────────────────────────────── */
 .shell { display: grid; grid-template-columns: 248px 1fr; height: 100%; }
 .sidebar { background: var(--bg-2); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 16px 12px; gap: 4px; }
+.mobile-nav-toggle, .sidebar-backdrop { display: none; }
 .sidebar .brand { padding: 6px 8px 16px; }
 .nav-item { display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: var(--radius-sm); color: var(--text-dim); font-size: 14px; font-weight: 500; border: none; background: none; width: 100%; text-align: left; }
 .nav-item:hover { background: var(--surface); color: var(--text); }
@@ -227,6 +228,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 
 /* ── Bastion Send ── */
 .send-enable { text-align: center; }
+.send-actions { display: flex; gap: 8px; }
 .send-hero { padding: 8px 4px 18px; color: var(--text-dim); }
 .send-hero h3 { margin: 12px 0 8px; color: var(--text); font-size: 17px; }
 .send-hero p { margin: 0 auto; max-width: 380px; line-height: 1.55; }
@@ -268,3 +270,56 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .contact-addr { display: block; padding: 0; border: 0; background: none; font-size: 12px; text-align: left; }
 .contact-addr:hover { color: var(--text); text-decoration: underline; }
 .icon-btn-ok { color: #6ee7b7; font-size: 16px; font-weight: 700; }
+
+@media (max-width: 760px) {
+  .shell { display: block; }
+  .main { height: 100%; }
+  .mobile-nav-toggle { display: grid; flex: none; }
+  .sidebar-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 60; width: 100%; height: 100%;
+    border: 0; background: rgba(5, 7, 12, .72); backdrop-filter: blur(2px);
+  }
+  .sidebar {
+    position: fixed; inset: 0 auto 0 0; z-index: 70; width: min(84vw, 280px);
+    overflow-y: auto; visibility: hidden; transform: translateX(-100%);
+    transition: transform .2s ease, visibility 0s linear .2s; box-shadow: var(--shadow);
+  }
+  .sidebar.open { visibility: visible; transform: translateX(0); transition-delay: 0s; }
+  .topbar { gap: 10px; padding: 12px 14px; }
+  .search { min-width: 0; padding: 8px 12px; }
+  .search .kbd { display: none; }
+  .topbar-right > .pill, .topbar-right > .faint { display: none; }
+  .content { padding: 20px 14px; }
+  .page-head { align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  .page-head h2 { font-size: 21px; }
+  .page-head .right { display: flex; width: 100%; margin-left: 0; }
+  .tabs { flex-wrap: nowrap; margin-right: -14px; overflow-x: auto; padding-right: 14px; }
+  .tab { flex: none; }
+  .list-head { grid-template-columns: 1fr; }
+  .list-head span:not(:first-child), .row .when { display: none; }
+  .row { grid-template-columns: minmax(0, 1fr) 70px; gap: 6px; padding: 0 10px; }
+  .row-open { grid-template-columns: minmax(0, 1fr); }
+  .row .actions { opacity: 1; }
+  .card-section { width: 100%; max-width: none; padding: 16px; }
+  .send-actions { flex-wrap: wrap; }
+  .pager { align-items: flex-start; }
+  .pager-btns { max-width: 100%; overflow-x: auto; }
+  .overlay { padding: 12px; }
+  .modal { max-height: 94vh; }
+  .modal-head, .modal-body, .modal-foot { padding-right: 16px; padding-left: 16px; }
+  .toast { bottom: 14px; max-width: calc(100vw - 28px); text-align: center; }
+}
+
+@media (max-width: 480px) {
+  .topbar-right { display: none; }
+  .page-head .right .btn { flex: 1; padding-right: 10px; padding-left: 10px; }
+  .type-pick { display: grid; grid-template-columns: repeat(3, 1fr); }
+  .modal-foot { flex-wrap: wrap; }
+  .modal-foot .spacer { display: none; }
+  .modal-foot .btn { flex: 1; }
+  .row-copy .k { width: 82px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar { transition: none; }
+}

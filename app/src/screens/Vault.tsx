@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type JSX } from "react";
+import { useEffect, useMemo, useRef, useState, type JSX, type KeyboardEvent } from "react";
 import { Brand } from "../components/Brand";
 import { Generator } from "../components/Generator";
 import { ItemEditor } from "../components/ItemEditor";
@@ -7,7 +7,7 @@ import { Dialog } from "../components/Dialog";
 import { Favicon } from "../components/Favicon";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
-  IcLock, IcMask, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault,
+  IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { strength } from "../lib/generator";
@@ -101,6 +101,11 @@ export function Vault({
   const [detail, setDetail] = useState<VaultItem | null>(null);
   const [importing, setImporting] = useState(false);
   const [page, setPage] = useState(1);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const firstNavRef = useRef<HTMLButtonElement>(null);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const mobileNavWasOpen = useRef(false);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -115,6 +120,21 @@ export function Vault({
   const safePage = Math.min(page, pageCount);
   const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
   useEffect(() => { setPage(1); }, [query, tab]); // reset to first page on filter change
+
+  useEffect(() => {
+    if (mobileNavOpen) firstNavRef.current?.focus();
+    else if (mobileNavWasOpen.current) menuButtonRef.current?.focus();
+    mobileNavWasOpen.current = mobileNavOpen;
+  }, [mobileNavOpen]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const originalBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = originalBodyOverflow;
+    };
+  }, [mobileNavOpen]);
 
   function copy(text: string, what: string) {
     navigator.clipboard?.writeText(text);
@@ -131,14 +151,52 @@ export function Vault({
   function go(n: Nav, label = "") {
     setNav(n);
     setSoonLabel(label);
+    setMobileNavOpen(false);
+  }
+
+  function handleSidebarKeyDown(event: KeyboardEvent<HTMLElement>): void {
+    if (!mobileNavOpen) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setMobileNavOpen(false);
+      return;
+    }
+    if (event.key !== "Tab") return;
+
+    const buttons = [...(sidebarRef.current?.querySelectorAll<HTMLButtonElement>("button:not([disabled])") ?? [])];
+    const first = buttons[0];
+    const last = buttons[buttons.length - 1];
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   return (
     <div className="shell">
       {/* ── Sidebar ── */}
-      <aside className="sidebar" aria-label="Vault navigation">
+      {mobileNavOpen && (
+        <button
+          className="sidebar-backdrop"
+          type="button"
+          aria-label="Dismiss navigation"
+          onClick={() => setMobileNavOpen(false)}
+        />
+      )}
+      <aside
+        ref={sidebarRef}
+        id="vault-navigation"
+        className={`sidebar${mobileNavOpen ? " open" : ""}`}
+        aria-label="Vault navigation"
+        onKeyDown={handleSidebarKeyDown}
+      >
         <Brand size={30} />
         <button
+          ref={firstNavRef}
           className={`nav-item${nav === "vault" ? " active" : ""}`}
           aria-current={nav === "vault" ? "page" : undefined}
           onClick={() => go("vault")}
@@ -195,6 +253,17 @@ export function Vault({
       {/* ── Main ── */}
       <div className="main">
         <header className="topbar">
+          <button
+            ref={menuButtonRef}
+            className="icon-btn mobile-nav-toggle"
+            type="button"
+            aria-label={mobileNavOpen ? "Close navigation" : "Open navigation"}
+            aria-expanded={mobileNavOpen}
+            aria-controls="vault-navigation"
+            onClick={() => setMobileNavOpen((open) => !open)}
+          >
+            <IcMenu size={20} />
+          </button>
           <div className="search">
             <IcSearch size={17} />
             <input aria-label="Search vault items" placeholder="Search all items" value={query} onChange={(e) => setQuery(e.target.value)} />

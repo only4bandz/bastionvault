@@ -77,6 +77,28 @@ describe("Vault dashboard accessibility", () => {
     expect(openItem).toHaveFocus();
   });
 
+  it("controls the mobile navigation drawer and contains its keyboard focus", async () => {
+    const user = userEvent.setup();
+    renderVault();
+
+    const toggle = screen.getByRole("button", { name: "Open navigation" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Dismiss navigation" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Vault" })).toHaveFocus();
+    expect(document.body).toHaveStyle({ overflow: "hidden" });
+
+    await user.tab({ shift: true });
+    expect(screen.getByRole("button", { name: "Lock vault" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveFocus();
+    expect(document.body).not.toHaveStyle({ overflow: "hidden" });
+  });
+
   it("opens health findings through native keyboard button behavior", async () => {
     const user = userEvent.setup();
     renderVault();

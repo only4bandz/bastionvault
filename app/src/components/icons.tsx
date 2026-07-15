@@ -40,6 +40,9 @@ export const IcBreach = ({ size }: P): JSX.Element => (
 export const IcSearch = ({ size }: P): JSX.Element => (
   <svg {...S(size)}><circle cx="11" cy="11" r="7" /><path d="m20 20-3-3" /></svg>
 );
+export const IcMenu = ({ size }: P): JSX.Element => (
+  <svg {...S(size)}><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+);
 export const IcPlus = ({ size }: P): JSX.Element => (
   <svg {...S(size)}><path d="M12 5v14M5 12h14" /></svg>
 );
