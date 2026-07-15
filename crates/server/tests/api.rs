@@ -366,6 +366,79 @@ async fn data_persists_across_restart() {
     let _ = std::fs::remove_file(format!("{path}-shm"));
 }
 
+#[tokio::test]
+async fn corrupt_persisted_vault_state_prevents_restart() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir()
+        .join(format!(
+            "bastion-corrupt-state-{}-{unique}.db",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    let (vault, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let auth = reg.auth_secret.expose_b64().to_string();
+    {
+        let app = server::app_with_db(&path);
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/accounts",
+            None,
+            Some(json!({
+                "email": "corrupt@example.com",
+                "registration": serde_json::to_value(&reg).unwrap()
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, login) = send(
+            &app,
+            "POST",
+            "/sessions",
+            None,
+            Some(json!({
+                "email": "corrupt@example.com",
+                "auth_secret": auth
+            })),
+        )
+        .await;
+        let token = login["token"].as_str().unwrap();
+        let blob = vault.encrypt_item(b"secret", "item-1").unwrap();
+        let (status, _) = send(
+            &app,
+            "PUT",
+            "/vault/items/item-1",
+            Some(token),
+            Some(json!({ "blob": blob })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE items SET blob='not-json' WHERE email='corrupt@example.com' AND id='item-1'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let restart = std::panic::catch_unwind(|| server::app_with_db(&path));
+    assert!(
+        restart.is_err(),
+        "a corrupt persisted item must stop startup instead of disappearing"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}-wal"));
+    let _ = std::fs::remove_file(format!("{path}-shm"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_writes_keep_cache_and_sqlite_consistent() {
     let unique = std::time::SystemTime::now()
