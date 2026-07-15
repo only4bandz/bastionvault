@@ -110,6 +110,11 @@ budget allows (≤ existing `MAX_MEM_KIB`). Params are **versioned and stored wi
 the contact** so future contacts can use stronger values without breaking old
 locked blobs.
 
+The WASM build caps attacker-controlled Argon2 work at **128 MiB, 6 passes,
+and p=4** before allocating. The v1 lock default sits at that memory ceiling
+with 3 passes and p=1. Native builds keep their larger compatibility ceiling;
+browser clients fail closed on records above the browser budget.
+
 ### 4.2 Lock key — Argon2id then HKDF domain
 
 ```
