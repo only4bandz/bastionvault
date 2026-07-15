@@ -11,6 +11,7 @@
 //! the reads and is loaded from SQLite at startup; mutations are write-through.
 
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -141,7 +142,7 @@ struct AccountRecord {
 impl AppState {
     fn new(token_ttl: Duration, db_path: &str) -> Self {
         let db = Db::open(db_path);
-        let accounts = db.load_accounts();
+        let accounts = db.load_accounts().expect("load persisted vault state");
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 accounts,
@@ -247,34 +248,28 @@ impl Db {
     }
 
     /// Loads all accounts (with their items and manifest) at startup.
-    fn load_accounts(&self) -> HashMap<String, AccountRecord> {
+    fn load_accounts(
+        &self,
+    ) -> Result<HashMap<String, AccountRecord>, Box<dyn std::error::Error + Send + Sync>> {
         let conn = self.lock();
         let mut accounts: HashMap<String, AccountRecord> = HashMap::new();
 
         {
-            let mut stmt = conn
-                .prepare("SELECT email,salt,kdf,wrapped_vault_key,auth_hash FROM accounts")
-                .expect("prepare accounts");
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, String>(3)?,
-                        r.get::<_, String>(4)?,
-                    ))
-                })
-                .expect("query accounts");
-            for (email, salt, kdf_s, wrapped_s, auth_hash) in rows.flatten() {
-                let kdf: KdfParams = match serde_json::from_str(&kdf_s) {
-                    Ok(k) => k,
-                    Err(_) => continue,
-                };
-                let wrapped_vault_key: EncryptedBlob = match serde_json::from_str(&wrapped_s) {
-                    Ok(w) => w,
-                    Err(_) => continue,
-                };
+            let mut stmt =
+                conn.prepare("SELECT email,salt,kdf,wrapped_vault_key,auth_hash FROM accounts")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (email, salt, kdf_s, wrapped_s, auth_hash) = row?;
+                let kdf: KdfParams = serde_json::from_str(&kdf_s)?;
+                let wrapped_vault_key: EncryptedBlob = serde_json::from_str(&wrapped_s)?;
                 accounts.insert(
                     email,
                     AccountRecord {
@@ -289,40 +284,43 @@ impl Db {
             }
         }
         {
-            let mut stmt = conn
-                .prepare("SELECT email,id,blob FROM items")
-                .expect("prepare items");
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                    ))
-                })
-                .expect("query items");
-            for (email, id, blob_s) in rows.flatten() {
-                if let Some(acc) = accounts.get_mut(&email) {
-                    if let Ok(blob) = serde_json::from_str(&blob_s) {
-                        acc.items.insert(id, blob);
-                    }
-                }
+            let mut stmt = conn.prepare("SELECT email,id,blob FROM items")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (email, id, blob_s) = row?;
+                let blob = serde_json::from_str(&blob_s)?;
+                let acc = accounts.get_mut(&email).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("orphaned item {id:?} for account {email:?}"),
+                    )
+                })?;
+                acc.items.insert(id, blob);
             }
         }
         {
-            let mut stmt = conn
-                .prepare("SELECT email,blob FROM manifests")
-                .expect("prepare manifests");
-            let rows = stmt
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-                .expect("query manifests");
-            for (email, blob_s) in rows.flatten() {
-                if let Some(acc) = accounts.get_mut(&email) {
-                    acc.manifest = serde_json::from_str(&blob_s).ok();
-                }
+            let mut stmt = conn.prepare("SELECT email,blob FROM manifests")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (email, blob_s) = row?;
+                let blob = serde_json::from_str(&blob_s)?;
+                let acc = accounts.get_mut(&email).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("orphaned manifest for account {email:?}"),
+                    )
+                })?;
+                acc.manifest = Some(blob);
             }
         }
-        accounts
+        Ok(accounts)
     }
 }
 
