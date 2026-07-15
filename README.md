@@ -38,6 +38,9 @@ master password ──Argon2id(salt, 64MiB)──► master key
   persist a trusted checkpoint, so rollback across a complete browser restart
   remains outside this guarantee. Legacy vaults without a manifest use one
   explicit trust-on-first-use bootstrap after every encrypted item validates.
+- Web vault mutations publish local plaintext state only after a successful
+  CAS response or a fresh authenticated snapshot that exactly matches the
+  prepared next revision. Every other ambiguous result locks the vault.
 - The server only stores **opaque blobs** + a slow hash of the auth secret. A
   server breach reveals no passwords.
 
