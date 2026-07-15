@@ -15,29 +15,62 @@ const UPPER_AMB = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const DIGITS = "23456789";
 const DIGITS_AMB = "0123456789";
 const SYMBOLS = "!@#$%^&*()-_=+[]{};:,.?/";
+const UINT32_RANGE = 0x1_0000_0000;
+export const MAX_GENERATED_PASSWORD_LENGTH = 256;
 
-function randInt(max: number): number {
+export function uniformRandomInt(
+  max: number,
+  fillRandom: (buffer: Uint32Array<ArrayBuffer>) => void = (buffer) => {
+    crypto.getRandomValues(buffer);
+  }
+): number {
+  if (!Number.isSafeInteger(max) || max < 1 || max > UINT32_RANGE) {
+    throw new RangeError("Random upper bound must be an integer between 1 and 2^32.");
+  }
   // Rejection sampling for a uniform value in [0, max).
-  const limit = Math.floor(0xffffffff / max) * max;
-  const buf = new Uint32Array(1);
+  const limit = Math.floor(UINT32_RANGE / max) * max;
+  const buf = new Uint32Array(new ArrayBuffer(Uint32Array.BYTES_PER_ELEMENT));
   let x = 0;
   do {
-    crypto.getRandomValues(buf);
+    fillRandom(buf);
     x = buf[0];
   } while (x >= limit);
   return x % max;
 }
 
 export function generatePassword(o: GenOptions): string {
-  let pool = "";
-  if (o.lower) pool += o.avoidAmbiguous ? LOWER : LOWER_AMB;
-  if (o.upper) pool += o.avoidAmbiguous ? UPPER : UPPER_AMB;
-  if (o.digits) pool += o.avoidAmbiguous ? DIGITS : DIGITS_AMB;
-  if (o.symbols) pool += SYMBOLS;
-  if (!pool) return "";
-  let out = "";
-  for (let i = 0; i < o.length; i++) out += pool[randInt(pool.length)];
-  return out;
+  const classes = [
+    o.lower ? (o.avoidAmbiguous ? LOWER : LOWER_AMB) : "",
+    o.upper ? (o.avoidAmbiguous ? UPPER : UPPER_AMB) : "",
+    o.digits ? (o.avoidAmbiguous ? DIGITS : DIGITS_AMB) : "",
+    o.symbols ? SYMBOLS : "",
+  ].filter(Boolean);
+  if (classes.length === 0) return "";
+  if (
+    !Number.isSafeInteger(o.length) ||
+    o.length < classes.length ||
+    o.length > MAX_GENERATED_PASSWORD_LENGTH
+  ) {
+    throw new RangeError(
+      `Password length must be an integer from ${classes.length} to ${MAX_GENERATED_PASSWORD_LENGTH}.`
+    );
+  }
+
+  const pool = classes.join("");
+  const output = classes.map((characters) =>
+    characters[uniformRandomInt(characters.length)]
+  );
+  while (output.length < o.length) {
+    output.push(pool[uniformRandomInt(pool.length)]);
+  }
+
+  // Fisher-Yates prevents the guaranteed class characters from occupying
+  // predictable leading positions.
+  for (let index = output.length - 1; index > 0; index--) {
+    const swapWith = uniformRandomInt(index + 1);
+    [output[index], output[swapWith]] = [output[swapWith], output[index]];
+  }
+  return output.join("");
 }
 
 /** Rough strength score 0..4 for a password. */
