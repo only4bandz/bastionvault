@@ -55,3 +55,39 @@ test("reports malformed JSON as a protocol error", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("sends atomic vault operations with the expected revision and manifest", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      json: async () => ({ revision: 8 }),
+    };
+  };
+
+  try {
+    const manifest = { v: 1, nonce: "nonce", ct: "manifest" };
+    const operations = [{ op: "delete", id: "old" }];
+    const response = await makeApi("https://vault.example.com").mutateVault(
+      "token",
+      7,
+      operations,
+      manifest
+    );
+    assert.equal(response.revision, 8);
+    assert.equal(request.url, "https://vault.example.com/vault/transaction");
+    assert.equal(request.options.method, "PUT");
+    assert.equal(request.options.headers.Authorization, "Bearer token");
+    assert.deepEqual(JSON.parse(request.options.body), {
+      expected_revision: 7,
+      operations,
+      manifest,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

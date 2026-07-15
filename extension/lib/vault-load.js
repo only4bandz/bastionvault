@@ -43,38 +43,183 @@ function isContact(value) {
   );
 }
 
-/** Decrypt and validate the complete vault, or expose nothing. */
-export function loadVaultState(account, rawItems) {
-  if (!isRecord(rawItems)) throw new VaultIntegrityError();
+function requireSafeRevision(revision) {
+  if (!Number.isSafeInteger(revision) || revision < 0) throw new VaultIntegrityError();
+}
 
+function parseBlob(json) {
+  const blob = JSON.parse(json);
+  if (!isRecord(blob) || typeof blob.v !== "number" || typeof blob.nonce !== "string" || typeof blob.ct !== "string") {
+    throw new VaultIntegrityError();
+  }
+  return blob;
+}
+
+function requireIntactReport(reportJson) {
+  const report = JSON.parse(reportJson);
+  if (
+    !isRecord(report) ||
+    ["missing", "unexpected", "corrupted", "duplicates"].some(
+      (field) => !Array.isArray(report[field]) || report[field].length !== 0
+    )
+  ) {
+    throw new VaultIntegrityError();
+  }
+}
+
+function decryptVaultItems(account, rawItems) {
+  if (!isRecord(rawItems)) throw new VaultIntegrityError();
   const items = new Map();
   let contacts = [];
   const lockedRecords = [];
-  try {
-    for (const [id, blob] of Object.entries(rawItems)) {
-      if (id === SEND_IDENTITY_ID) {
-        account.load_send_identity(JSON.stringify(blob));
-        continue;
-      }
-
-      const plaintext = account.decrypt_item(JSON.stringify(blob), id);
-      const parsed = JSON.parse(plaintext);
-      if (id === SEND_CONTACTS_ID) {
-        if (!Array.isArray(parsed) || !parsed.every(isContact)) throw new VaultIntegrityError();
-        contacts = parsed;
-      } else if (id.startsWith(SEND_LOCKED_PREFIX)) {
-        if (!isRecord(parsed)) throw new VaultIntegrityError();
-        lockedRecords.push(parsed);
-      } else if (id.startsWith(SEND_RESERVED_PREFIX)) {
-        throw new VaultIntegrityError();
-      } else {
-        if (!isVaultItem(parsed, id)) throw new VaultIntegrityError();
-        items.set(id, parsed);
-      }
+  for (const [id, blob] of Object.entries(rawItems)) {
+    if (id === SEND_IDENTITY_ID) {
+      account.load_send_identity(JSON.stringify(blob));
+      continue;
     }
+
+    const plaintext = account.decrypt_item(JSON.stringify(blob), id);
+    const parsed = JSON.parse(plaintext);
+    if (id === SEND_CONTACTS_ID) {
+      if (!Array.isArray(parsed) || !parsed.every(isContact)) throw new VaultIntegrityError();
+      contacts = parsed;
+    } else if (id.startsWith(SEND_LOCKED_PREFIX)) {
+      if (!isRecord(parsed)) throw new VaultIntegrityError();
+      lockedRecords.push(parsed);
+    } else if (id.startsWith(SEND_RESERVED_PREFIX)) {
+      throw new VaultIntegrityError();
+    } else {
+      if (!isVaultItem(parsed, id)) throw new VaultIntegrityError();
+      items.set(id, parsed);
+    }
+  }
+  return { items, contacts, lockedRecords };
+}
+
+/** Verify manifest + complete encrypted set before decrypting any item. */
+export function loadVaultState(account, vault, { lastSeenSeq, minimumRevision } = {}) {
+  try {
+    if (!isRecord(vault) || !isRecord(vault.items) || !isRecord(vault.manifest)) {
+      throw new VaultIntegrityError();
+    }
+    requireSafeRevision(vault.revision);
+    if (minimumRevision !== undefined) {
+      requireSafeRevision(minimumRevision);
+      if (vault.revision < minimumRevision) throw new VaultIntegrityError();
+    }
+    const sealedJson = JSON.stringify(vault.manifest);
+    const manifestJson =
+      lastSeenSeq === undefined
+        ? account.open_manifest(sealedJson)
+        : account.open_manifest_checked(sealedJson, lastSeenSeq);
+    requireIntactReport(account.check_manifest(manifestJson, JSON.stringify(vault.items)));
+    const decrypted = decryptVaultItems(account, vault.items);
+    return {
+      ...decrypted,
+      integrity: {
+        revision: vault.revision,
+        manifestJson,
+        manifestSeq: account.manifest_seq(manifestJson),
+        encryptedItems: { ...vault.items },
+      },
+    };
   } catch (error) {
     if (error instanceof VaultIntegrityError) throw error;
     throw new VaultIntegrityError();
   }
-  return { items, contacts, lockedRecords };
+}
+
+/** Decrypt a legacy manifest-less vault before its one-time TOFU bootstrap. */
+export function loadLegacyVaultState(account, vault) {
+  try {
+    if (!isRecord(vault) || !isRecord(vault.items) || vault.manifest !== null) {
+      throw new VaultIntegrityError();
+    }
+    requireSafeRevision(vault.revision);
+    return decryptVaultItems(account, vault.items);
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
+}
+
+export function prepareBootstrapManifest(account, vault) {
+  try {
+    if (!isRecord(vault) || !isRecord(vault.items) || vault.manifest !== null) {
+      throw new VaultIntegrityError();
+    }
+    requireSafeRevision(vault.revision);
+    const manifestJson = account.manifest_from_items(JSON.stringify(vault.items));
+    requireIntactReport(account.check_manifest(manifestJson, JSON.stringify(vault.items)));
+    return { manifestJson, manifest: parseBlob(account.seal_manifest(manifestJson)) };
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
+}
+
+export function completeBootstrap(account, vault, bootstrap, revision) {
+  try {
+    requireSafeRevision(revision);
+    if (revision !== vault.revision + 1) throw new VaultIntegrityError();
+    return {
+      revision,
+      manifestJson: bootstrap.manifestJson,
+      manifestSeq: account.manifest_seq(bootstrap.manifestJson),
+      encryptedItems: { ...vault.items },
+    };
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
+}
+
+export function prepareVaultMutation(account, current, operations) {
+  try {
+    if (!operations.length) throw new VaultIntegrityError();
+    const seen = new Set();
+    const encryptedItems = { ...current.encryptedItems };
+    let manifestJson = current.manifestJson;
+    for (const operation of operations) {
+      if (!isRecord(operation) || typeof operation.id !== "string" || seen.has(operation.id)) {
+        throw new VaultIntegrityError();
+      }
+      seen.add(operation.id);
+      if (operation.op === "put") {
+        manifestJson = account.manifest_set_item(manifestJson, operation.id, JSON.stringify(operation.blob));
+        encryptedItems[operation.id] = operation.blob;
+      } else if (operation.op === "delete") {
+        manifestJson = account.manifest_remove_item(manifestJson, operation.id);
+        delete encryptedItems[operation.id];
+      } else {
+        throw new VaultIntegrityError();
+      }
+    }
+    requireIntactReport(account.check_manifest(manifestJson, JSON.stringify(encryptedItems)));
+    return {
+      operations,
+      manifestJson,
+      manifest: parseBlob(account.seal_manifest(manifestJson)),
+      encryptedItems,
+    };
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
+}
+
+export function completeVaultMutation(account, current, prepared, revision) {
+  try {
+    requireSafeRevision(revision);
+    if (revision !== current.revision + 1) throw new VaultIntegrityError();
+    return {
+      revision,
+      manifestJson: prepared.manifestJson,
+      manifestSeq: account.manifest_seq(prepared.manifestJson),
+      encryptedItems: prepared.encryptedItems,
+    };
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
 }

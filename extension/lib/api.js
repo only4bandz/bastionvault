@@ -61,9 +61,12 @@ export function makeApi(base, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
       call("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),
     logout: (token) => call("DELETE", "/sessions", token),
     getVault: (token) => call("GET", "/vault", token),
-    putItem: (token, id, blob) =>
-      call("PUT", `/vault/items/${encodeURIComponent(id)}`, token, { blob }),
-    deleteItem: (token, id) => call("DELETE", `/vault/items/${encodeURIComponent(id)}`, token),
+    mutateVault: (token, expectedRevision, operations, manifest) =>
+      call("PUT", "/vault/transaction", token, {
+        expected_revision: expectedRevision,
+        operations,
+        manifest,
+      }),
 
     // ── Bastion Send ──
     publishIdentity: (token, publicIdentity) =>
