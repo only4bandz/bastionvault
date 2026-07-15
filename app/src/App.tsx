@@ -39,6 +39,7 @@ export default function App(): JSX.Element {
   const [sendContacts, setSendContacts] = useState<Contact[]>([]);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
+  const sessionEpoch = useRef(0);
 
   const toast = useCallback((m: string) => {
     setToastMsg(m);
@@ -47,6 +48,7 @@ export default function App(): JSX.Element {
   }, []);
 
   const lock = useCallback(() => {
+    sessionEpoch.current += 1;
     if (token) api.logout(token).catch(() => {});
     account?.lock(); // drops + zeroizes the vault key in WASM
     setAccount(null);
@@ -165,59 +167,90 @@ export default function App(): JSX.Element {
     setPhase("vault");
   }, []);
 
-  // ── item mutations (optimistic local + encrypted push to server) ──
+  // ── item mutations (encrypt + persist first, then commit visible state) ──
   const upsert = useCallback(
-    (item: VaultItem) => {
-      setItems((prev) => {
-        const i = prev.findIndex((x) => x.id === item.id);
-        if (i === -1) return [item, ...prev];
-        const next = prev.slice();
-        next[i] = item;
-        return next;
-      });
-      if (account && token) {
-        try {
-          const blob = JSON.parse(account.encrypt_item(JSON.stringify(item), item.id)) as Blob;
-          api.putItem(token, item.id, blob).catch(() => toast("Saved locally — server sync failed"));
-        } catch {
-          toast("Could not encrypt item");
-        }
+    async (item: VaultItem): Promise<boolean> => {
+      if (!account || !token) {
+        toast("Vault is locked — item was not saved");
+        return false;
+      }
+      const epoch = sessionEpoch.current;
+      try {
+        const blob = JSON.parse(account.encrypt_item(JSON.stringify(item), item.id)) as Blob;
+        await api.putItem(token, item.id, blob);
+        if (sessionEpoch.current !== epoch) return true;
+        setItems((prev) => {
+          const i = prev.findIndex((x) => x.id === item.id);
+          if (i === -1) return [item, ...prev];
+          const next = prev.slice();
+          next[i] = item;
+          return next;
+        });
+        return true;
+      } catch {
+        toast("Save failed — item was not changed");
+        return false;
       }
     },
     [account, token, toast]
   );
 
   const remove = useCallback(
-    (id: string) => {
-      setItems((prev) => prev.filter((x) => x.id !== id));
-      if (token) api.deleteItem(token, id).catch(() => toast("Deleted locally — server sync failed"));
+    async (id: string): Promise<boolean> => {
+      if (!token) {
+        toast("Vault is locked — item was not deleted");
+        return false;
+      }
+      const epoch = sessionEpoch.current;
+      try {
+        await api.deleteItem(token, id);
+        if (sessionEpoch.current !== epoch) return true;
+        setItems((prev) => prev.filter((x) => x.id !== id));
+        return true;
+      } catch {
+        toast("Delete failed — item was not changed");
+        return false;
+      }
     },
     [token, toast]
   );
 
-  // ── bulk import (CSV): add locally, then encrypt + sync with bounded concurrency ──
+  // ── bulk import (CSV): expose only items confirmed by the server ──
   const importItems = useCallback(
     async ({ items: imported }: { items: VaultItem[] }) => {
       if (imported.length === 0) return;
-      setItems((prev) => [...imported, ...prev]);
-      if (!account || !token) return;
+      if (!account || !token) {
+        toast("Vault is locked — nothing was imported");
+        return;
+      }
       toast(`Importing ${imported.length} items…`);
+      const epoch = sessionEpoch.current;
       const queue = imported.slice();
-      let ok = 0;
+      const persisted: VaultItem[] = [];
       const worker = async () => {
         while (queue.length) {
           const it = queue.shift()!;
           try {
             const blob = JSON.parse(account.encrypt_item(JSON.stringify(it), it.id)) as Blob;
             await api.putItem(token, it.id, blob);
-            ok++;
+            persisted.push(it);
           } catch {
             /* keep going; report total at the end */
           }
         }
       };
       await Promise.all(Array.from({ length: 8 }, worker));
-      toast(ok === imported.length ? `Imported ${ok} items` : `Imported ${ok}/${imported.length} (some failed to sync)`);
+      if (sessionEpoch.current !== epoch) return;
+      setItems((prev) => {
+        const next = new Map(prev.map((item) => [item.id, item]));
+        persisted.forEach((item) => next.set(item.id, item));
+        return [...next.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+      });
+      toast(
+        persisted.length === imported.length
+          ? `Imported ${persisted.length} items`
+          : `Imported ${persisted.length}/${imported.length} (failed items were not added)`
+      );
     },
     [account, token, toast]
   );
