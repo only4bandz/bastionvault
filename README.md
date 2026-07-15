@@ -83,7 +83,9 @@ Zero-knowledge: stores only opaque blobs + an **Argon2id hash** of the auth
 secret (never the raw secret), persisted to **SQLite**. Reuses the types from
 `crypto-core`. Persisted Send identities, routing fields, envelopes, and
 timestamps are revalidated on read; corruption fails the request instead of
-returning partial or synthetic data.
+returning partial or synthetic data. Persisted account identifiers, KDFs,
+wrapped keys, and bounded Argon2id credential hashes are validated before the
+server begins serving traffic.
 
 | Method | Route | Role |
 |---|---|---|

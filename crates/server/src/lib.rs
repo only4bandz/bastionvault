@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
-use argon2::Argon2;
+use argon2::{Argon2, Params as ArgonParams};
 use axum::extract::{DefaultBodyLimit, Extension, Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
@@ -37,6 +37,8 @@ const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 254;
 const AUTH_SECRET_BYTES: usize = 32;
+const AUTH_HASH_SALT_BYTES: usize = 16;
+const AUTH_HASH_OUTPUT_BYTES: usize = 32;
 const REGISTRATION_SALT_BYTES: usize = 16;
 const WRAPPED_KEY_NONCE_BYTES: usize = 24;
 const WRAPPED_KEY_CIPHERTEXT_BYTES: usize = 48;
@@ -447,6 +449,7 @@ impl Db {
                 let (email, salt, kdf_s, wrapped_s, auth_hash, vault_revision) = row?;
                 let kdf: KdfParams = serde_json::from_str(&kdf_s)?;
                 let wrapped_vault_key: EncryptedBlob = serde_json::from_str(&wrapped_s)?;
+                validate_persisted_credentials(&email, &salt, kdf, &wrapped_vault_key, &auth_hash)?;
                 let vault_revision = u64::try_from(vault_revision).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "negative vault revision")
                 })?;
@@ -1197,7 +1200,69 @@ fn is_exact_b64(value: &str, decoded_len: usize) -> bool {
         return false;
     }
     B64.decode(value)
-        .is_ok_and(|bytes| bytes.len() == decoded_len)
+        .is_ok_and(|bytes| bytes.len() == decoded_len && B64.encode(bytes) == value)
+}
+
+fn parse_valid_auth_hash(phc: &str) -> Option<PasswordHash<'_>> {
+    let parsed = PasswordHash::new(phc).ok()?;
+    if parsed.algorithm.as_str() != "argon2id"
+        || parsed.version != Some(0x13)
+        || parsed.to_string() != phc
+    {
+        return None;
+    }
+    let params = ArgonParams::try_from(&parsed).ok()?;
+    if params.m_cost() != ArgonParams::DEFAULT_M_COST
+        || params.t_cost() != ArgonParams::DEFAULT_T_COST
+        || params.p_cost() != ArgonParams::DEFAULT_P_COST
+        || !params.keyid().is_empty()
+        || !params.data().is_empty()
+        || params.output_len() != Some(AUTH_HASH_OUTPUT_BYTES)
+    {
+        return None;
+    }
+    let salt = parsed.salt?;
+    let mut salt_bytes = [0u8; 64];
+    if salt.decode_b64(&mut salt_bytes).ok()?.len() != AUTH_HASH_SALT_BYTES
+        || parsed.hash?.len() != AUTH_HASH_OUTPUT_BYTES
+    {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn validate_persisted_credentials(
+    email: &str,
+    salt: &str,
+    kdf: KdfParams,
+    wrapped: &EncryptedBlob,
+    auth_hash: &str,
+) -> Result<(), io::Error> {
+    // Unlock accepts legacy KDFs below today's creation floor, but persisted
+    // values must still be structurally valid and remain inside the anti-DoS
+    // ceiling.
+    let kdf_is_valid = kdf.validate_for_unlock().is_ok()
+        && ArgonParams::new(
+            kdf.mem_kib,
+            kdf.iterations,
+            kdf.parallelism,
+            Some(AUTH_HASH_OUTPUT_BYTES),
+        )
+        .is_ok();
+    let valid = validate_account_id(email).is_ok()
+        && is_exact_b64(salt, REGISTRATION_SALT_BYTES)
+        && kdf_is_valid
+        && wrapped.v == crypto_core::aead::FORMAT_VERSION
+        && is_exact_b64(&wrapped.nonce, WRAPPED_KEY_NONCE_BYTES)
+        && is_exact_b64(&wrapped.ct, WRAPPED_KEY_CIPHERTEXT_BYTES)
+        && parse_valid_auth_hash(auth_hash).is_some();
+    if !valid {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid persisted credentials for account {email:?}"),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_registration(registration: &Registration) -> Result<(), ApiError> {
@@ -1259,19 +1324,23 @@ fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> 
 /// Slow Argon2id hash (PHC) of the authentication secret.
 fn hash_secret(secret: &str) -> Result<String, ()> {
     let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
+    let phc = Argon2::default()
         .hash_password(secret.as_bytes(), &salt)
         .map(|h| h.to_string())
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+    if parse_valid_auth_hash(&phc).is_none() {
+        return Err(());
+    }
+    Ok(phc)
 }
 
 /// Verifies a secret against a PHC hash, in constant time (via `argon2`).
 fn verify_secret(secret: &str, phc: &str) -> bool {
-    match PasswordHash::new(phc) {
-        Ok(parsed) => Argon2::default()
+    match parse_valid_auth_hash(phc) {
+        Some(parsed) => Argon2::default()
             .verify_password(secret.as_bytes(), &parsed)
             .is_ok(),
-        Err(_) => false,
+        None => false,
     }
 }
 
