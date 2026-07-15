@@ -509,6 +509,38 @@ async fn rejects_authentication_work_when_capacity_is_exhausted() {
 }
 
 #[tokio::test]
+async fn rate_limiter_state_is_strictly_bounded_and_reclaims_expired_windows() {
+    let unknown_id = data_encoding::BASE32_NOPAD.encode(&[0u8; 16]);
+    let path = format!("/send/directory/{unknown_id}");
+    let app = server::app_in_memory_with_rate_limits(2, std::time::Duration::from_secs(60));
+    let alice = signup_login(&app, "rate-alice@example.com").await;
+    let bob = signup_login(&app, "rate-bob@example.com").await;
+    let carol = signup_login(&app, "rate-carol@example.com").await;
+
+    let (status, _) = send(&app, "GET", &path, Some(&alice), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(&app, "GET", &path, Some(&bob), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Existing keys remain serviceable at capacity, but a third live key is
+    // rejected before it can grow the map past its configured bound.
+    let (status, _) = send(&app, "GET", &path, Some(&alice), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(&app, "GET", &path, Some(&carol), None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    // A zero-length deterministic test window makes the previous entry
+    // immediately reclaimable for a different subject.
+    let reclaiming = server::app_in_memory_with_rate_limits(1, std::time::Duration::ZERO);
+    let first = signup_login(&reclaiming, "rate-first@example.com").await;
+    let second = signup_login(&reclaiming, "rate-second@example.com").await;
+    let (status, _) = send(&reclaiming, "GET", &path, Some(&first), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(&reclaiming, "GET", &path, Some(&second), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn caps_active_sessions_per_account_by_revoking_the_oldest() {
     let app = server::app_in_memory();
     let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
