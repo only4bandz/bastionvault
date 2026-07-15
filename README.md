@@ -34,13 +34,15 @@ master password ──Argon2id(salt, 64MiB)──► master key
   digest of each item. On sync, it detects whether a malicious server has
   deleted, injected, or rolled back an item (which per-item AEAD alone cannot
   catch). A monotonic `seq` counter blocks manifest rollback relative to the
-  latest trusted state. The web client persists only a non-secret rollback
-  checkpoint (server revision, manifest sequence, and manifest SHA-256), scoped
-  to the account and API origin, so the guarantee survives a browser restart.
+  latest trusted state. The web client and extension persist only a non-secret
+  rollback checkpoint (server revision, manifest sequence, and manifest
+  SHA-256), scoped to the account and API origin, so the guarantee survives a
+  browser restart.
   Checkpoints are compared and advanced under a cross-tab lock and are never
   cleared automatically. Trusting a verified recovery snapshot requires the
-  explicit reset of site data. Legacy vaults without a manifest use one explicit
-  trust-on-first-use bootstrap after every encrypted item validates.
+  explicit reset of the relevant client storage. Legacy vaults without a
+  manifest use one explicit trust-on-first-use bootstrap after every encrypted
+  item validates.
 - Browser vault mutations publish local plaintext state only after a successful
   CAS response or a fresh authenticated snapshot that exactly matches the
   prepared next revision. Every other ambiguous result locks the vault.

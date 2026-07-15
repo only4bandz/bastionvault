@@ -30,10 +30,13 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
 - Before decrypting any item, the worker opens the sealed integrity manifest
   and verifies it against the complete encrypted item set. Legacy vaults use a
   one-time trust-on-first-use bootstrap only after every encrypted payload
-  validates. The latest manifest sequence and server revision are checkpointed
-  in trusted `chrome.storage.session`, so rollback remains detectable across
-  service-worker eviction. The checkpoint does not survive a full browser
-  restart, and no cross-restart rollback guarantee is claimed.
+  validates. The latest server revision, manifest sequence, and SHA-256 digest
+  are persisted as a non-secret checkpoint in `chrome.storage.local`, restricted
+  to trusted extension contexts. Rollback therefore remains detectable across
+  both service-worker eviction and a full browser restart. Checkpoints are
+  scoped to the normalized server and exact account, and are never removed by
+  ordinary vault locking. Trusting an intentionally restored older snapshot
+  requires an explicit reset of the extension's stored data.
 - Vault mutations are serialized, copy-on-write CAS transactions. After an
   ambiguous response, the worker advances session state only when a fresh
   manifest-verified encrypted snapshot exactly matches the prepared next

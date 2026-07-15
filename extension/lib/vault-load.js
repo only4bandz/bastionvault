@@ -96,7 +96,7 @@ function decryptVaultItems(account, rawItems) {
   return { items, contacts, lockedRecords };
 }
 
-function verifyVaultSnapshot(account, vault, { lastSeenSeq, minimumRevision } = {}) {
+export function verifyVaultSnapshot(account, vault, { lastSeenSeq, minimumRevision } = {}) {
   try {
     if (!isRecord(vault) || !isRecord(vault.items) || !isRecord(vault.manifest)) {
       throw new VaultIntegrityError();
@@ -124,11 +124,30 @@ function verifyVaultSnapshot(account, vault, { lastSeenSeq, minimumRevision } = 
   }
 }
 
+/** Decrypt only the exact encrypted set covered by a previously verified snapshot. */
+export function decryptVerifiedVaultState(account, vault, integrity) {
+  try {
+    if (
+      !isRecord(vault) ||
+      !isRecord(vault.items) ||
+      !isRecord(integrity) ||
+      integrity.revision !== vault.revision ||
+      !encryptedItemsEqual(integrity.encryptedItems, vault.items)
+    ) {
+      throw new VaultIntegrityError();
+    }
+    return decryptVaultItems(account, vault.items);
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
+  }
+}
+
 /** Verify manifest + complete encrypted set before decrypting any item. */
 export function loadVaultState(account, vault, options = {}) {
   try {
     const integrity = verifyVaultSnapshot(account, vault, options);
-    const decrypted = decryptVaultItems(account, vault.items);
+    const decrypted = decryptVerifiedVaultState(account, vault, integrity);
     return { ...decrypted, integrity };
   } catch (error) {
     if (error instanceof VaultIntegrityError) throw error;

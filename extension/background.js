@@ -13,6 +13,8 @@
 // worker can rehydrate WITHOUT re-deriving Argon2id — never the master password.
 // Everything is cleared on lock or at expiry; nothing secret touches any
 // disk-backed web storage (enforced by scripts/check-no-browser-secret-storage.sh).
+// Only a non-secret rollback checkpoint is persisted separately so manifest
+// rollback remains detectable across a complete browser restart.
 
 import init, { unlock, rehydrate, send_safety_number, send_lock_open, send_lock_new_params } from "./pkg/crypto_wasm.js";
 import { autofillPolicyError } from "./lib/autofill-policy.js";
@@ -22,13 +24,23 @@ import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js"
 import {
   completeBootstrap,
   completeVaultMutation,
+  decryptVerifiedVaultState,
   loadLegacyVaultState,
-  loadVaultState,
   prepareBootstrapManifest,
   prepareVaultMutation,
   reconcileVaultMutation,
+  verifyVaultSnapshot,
   VaultIntegrityError,
 } from "./lib/vault-load.js";
+import {
+  VaultRollbackError,
+  assertVaultRollbackProgress,
+  createVaultRollbackAnchor,
+  readVaultRollbackAnchor,
+  vaultRollbackAnchorKey,
+  withVaultRollbackLock,
+  writeVaultRollbackAnchor,
+} from "./lib/vault-anchor.js";
 import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
 import { SIGNING_UNAVAILABLE, senderIdForMode } from "./lib/send-policy.js";
 
@@ -93,6 +105,7 @@ const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
 // scripts); set it explicitly so a future code change can't silently widen it
 // and expose the in-RAM vault key / staged passwords to page-injected scripts.
 chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch(() => {});
+chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch(() => {});
 
 // Messages a content script (running on arbitrary web pages) is allowed to send.
 // Everything else (LIST/ITEM/REVEAL/FILL/UNLOCK/LOCK/STATE) is for extension
@@ -120,37 +133,101 @@ function ensureWasm() {
 // { account, token, email, server, items: Map<id, item>, integrity, mutationTail }
 let session = null;
 
-function checkpointFromStored(stored) {
+function legacyCheckpointFromStored(stored) {
   if (stored.revision === undefined && stored.manifestSeq === undefined) return null;
   if (
     !Number.isSafeInteger(stored.revision) ||
     stored.revision < 0 ||
     typeof stored.manifestSeq !== "string" ||
-    !/^\d+$/.test(stored.manifestSeq)
+    !/^(0|[1-9][0-9]{0,19})$/.test(stored.manifestSeq)
   ) {
     throw new VaultIntegrityError();
   }
-  return { revision: stored.revision, manifestSeq: BigInt(stored.manifestSeq) };
+  const manifestSeq = BigInt(stored.manifestSeq);
+  if (manifestSeq > (1n << 64n) - 1n) throw new VaultIntegrityError();
+  return { revision: stored.revision, manifestSeq };
 }
 
-async function loadSessionVault(account, api, token, vault, checkpoint = null) {
+async function trustedAnchorArea() {
+  if (typeof chrome.storage.local.setAccessLevel !== "function") {
+    throw new VaultRollbackError("Trusted extension storage isolation is unavailable.");
+  }
+  try {
+    await chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
+  } catch {
+    throw new VaultRollbackError("Trusted extension storage isolation could not be enforced.");
+  }
+  return chrome.storage.local; // storage-guard:allow -- non-secret rollback metadata only
+}
+
+async function loadSessionVault(account, api, token, vault, checkpoint = null, trusted = null) {
   if (vault?.manifest) {
-    return loadVaultState(account, vault, {
+    const integrity = verifyVaultSnapshot(account, vault, {
       lastSeenSeq: checkpoint?.manifestSeq,
       minimumRevision: checkpoint?.revision,
     });
+    const rollbackAnchor = await createVaultRollbackAnchor(integrity);
+    assertVaultRollbackProgress(rollbackAnchor, trusted);
+    return {
+      ...decryptVerifiedVaultState(account, vault, integrity),
+      integrity,
+      rollbackAnchor,
+    };
   }
-  // A manifest disappearing while a trusted RAM checkpoint exists is a
+  // A manifest disappearing while any trusted checkpoint exists is a
   // rollback, never a legacy bootstrap.
   if (checkpoint) throw new VaultIntegrityError();
   const decrypted = loadLegacyVaultState(account, vault);
   const bootstrap = prepareBootstrapManifest(account, vault);
   const result = await api.mutateVault(token, vault.revision, [], bootstrap.manifest);
+  const integrity = completeBootstrap(account, vault, bootstrap, result.revision);
   return {
     ...decrypted,
-    integrity: completeBootstrap(account, vault, bootstrap, result.revision),
+    integrity,
+    rollbackAnchor: await createVaultRollbackAnchor(integrity),
     bootstrapped: true,
   };
+}
+
+function combineCheckpointFloors(persisted, legacy) {
+  if (!persisted) return legacy;
+  if (!legacy) return persisted;
+  return {
+    revision: Math.max(persisted.revision, legacy.revision),
+    manifestSeq:
+      persisted.manifestSeq > legacy.manifestSeq
+        ? persisted.manifestSeq
+        : legacy.manifestSeq,
+  };
+}
+
+async function loadSessionVaultAnchored(
+  account,
+  api,
+  token,
+  vault,
+  email,
+  server,
+  legacyCheckpoint = null
+) {
+  const key = vaultRollbackAnchorKey(server, email);
+  return withVaultRollbackLock(key, async () => {
+    const area = await trustedAnchorArea();
+    const trusted = await readVaultRollbackAnchor(area, key);
+    const checkpoint = combineCheckpointFloors(trusted, legacyCheckpoint);
+    const loaded = await loadSessionVault(account, api, token, vault, checkpoint, trusted);
+    await writeVaultRollbackAnchor(area, key, loaded.rollbackAnchor);
+    return loaded;
+  });
+}
+
+async function persistVaultIntegrityAnchor(currentSession) {
+  const key = vaultRollbackAnchorKey(currentSession.server, currentSession.email);
+  await withVaultRollbackLock(key, async () => {
+    const area = await trustedAnchorArea();
+    const candidate = await createVaultRollbackAnchor(currentSession.integrity);
+    await writeVaultRollbackAnchor(area, key, candidate);
+  });
 }
 
 async function commitVaultOperations(s, operations) {
@@ -249,6 +326,7 @@ async function touchSession() {
 async function persistSession() {
   if (!session) return;
   if (!session.integrity) throw new VaultIntegrityError();
+  await persistVaultIntegrityAnchor(session);
   const minutes = await getKeepMinutes();
   if (!session.expiresAt) session.expiresAt = Date.now() + minutes * 60_000;
   await chrome.storage.session.set({
@@ -257,8 +335,6 @@ async function persistSession() {
       email: session.email,
       server: session.server,
       expiresAt: session.expiresAt,
-      revision: session.integrity.revision,
-      manifestSeq: session.integrity.manifestSeq.toString(),
     },
   });
 }
@@ -354,12 +430,14 @@ async function ensureSession() {
     api = makeApi(server);
     token = await api.login(stored.email, account.auth_secret);
     const vault = await api.getVault(token);
-    const checkpoint = checkpointFromStored(stored);
-    const { items, contacts, lockedRecords, integrity } = await loadSessionVault(
+    const checkpoint = legacyCheckpointFromStored(stored);
+    const { items, contacts, lockedRecords, integrity } = await loadSessionVaultAnchored(
       account,
       api,
       token,
       vault,
+      stored.email,
+      server,
       checkpoint
     );
     session = {
@@ -381,11 +459,11 @@ async function ensureSession() {
   } catch (error) {
     if (token && api) api.logout(token).catch(() => {});
     try { account?.lock(); } catch { /* already locked */ }
-    if (error instanceof VaultIntegrityError) {
+    if (error instanceof VaultIntegrityError || error instanceof VaultRollbackError) {
       await chrome.storage.session.remove(SESSION_KEY);
     }
-    // Rehydration failed (server unreachable, expired data…) — stay locked but
-    // keep the stored blob so a later attempt can retry until it actually expires.
+    // Integrity failures discard the rehydration blob. Transient failures keep
+    // it so a later attempt can retry until the bounded session expires.
     return null;
   }
 }
@@ -428,7 +506,7 @@ async function doUnlock(email, password, secretKey) {
   try {
     token = await api.login(email, account.auth_secret);
     const vault = await api.getVault(token);
-    loaded = await loadSessionVault(account, api, token, vault);
+    loaded = await loadSessionVaultAnchored(account, api, token, vault, email, server);
   } catch (error) {
     if (token) api.logout(token).catch(() => {});
     account.lock();
