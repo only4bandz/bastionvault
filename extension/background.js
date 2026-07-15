@@ -17,7 +17,7 @@
 // rollback remains detectable across a complete browser restart.
 
 import init, { unlock, rehydrate, send_safety_number, send_lock_open, send_lock_new_params } from "./pkg/crypto_wasm.js";
-import { autofillPolicyError } from "./lib/autofill-policy.js";
+import { autofillPolicyError, credentialPageError } from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
@@ -627,6 +627,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   const senderHost = isExtPage ? null : hostFromSender(sender);
+  const senderCredentialError = isExtPage ? "forbidden" : credentialPageError(sender?.url);
 
   (async () => {
     try {
@@ -668,7 +669,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // from the SENDER frame, not the message. Passive — does NOT extend the
           // keep-unlock window.
           const s = await ensureSession();
-          if (!s || !senderHost) return sendResponse({ ok: true, items: [] });
+          if (!s || !senderHost || senderCredentialError) return sendResponse({ ok: true, items: [] });
           sendResponse({ ok: true, items: suggestionsFor(s, senderHost) });
           break;
         }
@@ -677,6 +678,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // Password leaves WASM only here, for the field the user explicitly
           // picked — and ONLY if the item's site matches the sender frame's host
           // (so a frame can't pull credentials for an unrelated site by id).
+          if (senderCredentialError) return sendResponse({ ok: false, error: "forbidden" });
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
           const it = s.items.get(msg.id);
