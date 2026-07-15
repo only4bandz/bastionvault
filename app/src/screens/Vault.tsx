@@ -3,10 +3,11 @@ import { Brand } from "../components/Brand";
 import { Generator } from "../components/Generator";
 import { ItemEditor } from "../components/ItemEditor";
 import { ImportModal } from "../components/ImportModal";
+import { Dialog } from "../components/Dialog";
 import { Favicon } from "../components/Favicon";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
-  IcLock, IcMask, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault, IcX,
+  IcLock, IcMask, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { strength } from "../lib/generator";
@@ -376,15 +377,33 @@ function ItemDetailView({
         : [];
 
   return (
-    <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <Favicon item={item} size={32} />
-          <h3>{item.title}</h3>
-          <span className="pill" style={{ marginLeft: 8 }}>{typeIcon(item.type, 12)} {TYPE_LABEL[item.type]}</span>
-          <button className="icon-btn x" onClick={onClose}><IcX size={18} /></button>
-        </div>
-        <div className="modal-body">
+    <Dialog
+      title={item.title}
+      onClose={onClose}
+      closeDisabled={deleting}
+      headerLeading={<Favicon item={item} size={32} />}
+      headerMeta={<span className="pill" style={{ marginLeft: 8 }}>{typeIcon(item.type, 12)} {TYPE_LABEL[item.type]}</span>}
+      footer={
+        <>
+          <button
+            className="btn btn-danger"
+            disabled={deleting}
+            onClick={() => {
+              setDeleting(true);
+              void onDelete().then((deleted) => {
+                if (!deleted) setDeleting(false);
+              });
+            }}
+          >
+            <IcTrash size={16} /> {deleting ? "Deleting…" : "Delete"}
+          </button>
+          <span className="spacer" />
+          <button className="btn btn-primary" onClick={onEdit} disabled={deleting}>
+            <IcEdit size={16} /> Edit
+          </button>
+        </>
+      }
+    >
           {rows.filter(([, v]) => v).map(([k, v, secret]) => (
             <div className="row-copy" key={k}>
               <span className="k">{k}</span>
@@ -401,25 +420,7 @@ function ItemDetailView({
               <span className="v" style={{ whiteSpace: "pre-wrap" }}>{item.notes}</span>
             </div>
           )}
-        </div>
-        <div className="modal-foot">
-          <button
-            className="btn btn-danger"
-            disabled={deleting}
-            onClick={() => {
-              setDeleting(true);
-              void onDelete().then((deleted) => {
-                if (!deleted) setDeleting(false);
-              });
-            }}
-          >
-            <IcTrash size={16} /> {deleting ? "Deleting…" : "Delete"}
-          </button>
-          <span className="spacer" />
-          <button className="btn btn-primary" onClick={onEdit}><IcEdit size={16} /> Edit</button>
-        </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
 

@@ -1,7 +1,8 @@
 import { useRef, useState, type JSX } from "react";
 import { csvToItems, type ImportResult } from "../lib/import";
 import { TYPE_LABEL, type ItemType } from "../lib/types";
-import { IcUpload, IcX } from "./icons";
+import { IcUpload } from "./icons";
+import { Dialog } from "./Dialog";
 
 export function ImportModal({
   onImport,
@@ -14,6 +15,7 @@ export function ImportModal({
   const [fileName, setFileName] = useState("");
   const [err, setErr] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const chooseRef = useRef<HTMLButtonElement>(null);
 
   function handleFile(file: File) {
     setErr("");
@@ -45,13 +47,24 @@ export function ImportModal({
     : null;
 
   return (
-    <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h3>Import from CSV</h3>
-          <button className="icon-btn x" onClick={onClose}><IcX size={18} /></button>
-        </div>
-        <div className="modal-body">
+    <Dialog
+      title="Import from CSV"
+      onClose={onClose}
+      initialFocusRef={chooseRef}
+      footer={
+        <>
+          <span className="spacer" />
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            disabled={!result}
+            onClick={() => result && onImport(result)}
+          >
+            Import {result ? result.items.length : ""} items
+          </button>
+        </>
+      }
+    >
           <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
             Import a CSV export from NordPass, Bitwarden, 1Password, LastPass and
             others. Everything is encrypted on this device before syncing — the
@@ -65,7 +78,7 @@ export function ImportModal({
             style={{ display: "none" }}
             onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
           />
-          <button className="btn btn-block" onClick={() => inputRef.current?.click()}>
+          <button ref={chooseRef} className="btn btn-block" onClick={() => inputRef.current?.click()}>
             <IcUpload size={16} /> {fileName || "Choose a CSV file"}
           </button>
 
@@ -90,19 +103,6 @@ export function ImportModal({
               )}
             </div>
           )}
-        </div>
-        <div className="modal-foot">
-          <span className="spacer" />
-          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-          <button
-            className="btn btn-primary"
-            disabled={!result}
-            onClick={() => result && onImport(result)}
-          >
-            Import {result ? result.items.length : ""} items
-          </button>
-        </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
