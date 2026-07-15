@@ -5,6 +5,13 @@ zero-knowledge `crypto-core` (compiled to WebAssembly). All cryptography runs in
 the browser; secrets live in WASM memory only and never touch browser storage
 (enforced by `scripts/check-no-browser-secret-storage.sh`).
 
+The document CSP denies all resources by default. It permits same-origin
+scripts, API calls, fonts and images plus the minimum `wasm-unsafe-eval`
+capability required to compile WebAssembly. JavaScript eval and inline scripts
+remain forbidden. Inline styles are temporarily allowed because the current
+React components use style props; this exception does not permit script
+execution. `scripts/check-app-csp.sh` enforces these directives in CI.
+
 ## Run
 
 ```bash
