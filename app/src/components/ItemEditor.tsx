@@ -1,8 +1,9 @@
-import { useEffect, useState, type JSX } from "react";
+import { useEffect, useRef, useState, type JSX } from "react";
 import type { ItemType, VaultItem } from "../lib/types";
 import { generatePassword } from "../lib/generator";
 import { detectScheme, lookupBin } from "../lib/bin";
-import { IcCard, IcKey, IcNote, IcRefresh, IcX } from "./icons";
+import { IcCard, IcKey, IcNote, IcRefresh } from "./icons";
+import { Dialog } from "./Dialog";
 
 const NEW = (): VaultItem => ({
   id: crypto.randomUUID(),
@@ -22,6 +23,7 @@ export function ItemEditor({
 }): JSX.Element {
   const [item, setItem] = useState<VaultItem>(initial ?? NEW());
   const [saving, setSaving] = useState(false);
+  const titleRef = useRef<HTMLInputElement>(null);
   const set = <K extends keyof VaultItem>(k: K, v: VaultItem[K]) => setItem((p) => ({ ...p, [k]: v }));
 
   // Detect the card network locally (instant) and the issuing bank from the BIN
@@ -59,13 +61,25 @@ export function ItemEditor({
   }
 
   return (
-    <div className="overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-head">
-          <h3>{initial ? "Edit item" : "New item"}</h3>
-          <button className="icon-btn x" onClick={onClose}><IcX size={18} /></button>
-        </div>
-        <div className="modal-body">
+    <Dialog
+      title={initial ? "Edit item" : "New item"}
+      onClose={onClose}
+      closeDisabled={saving}
+      initialFocusRef={titleRef}
+      footer={
+        <>
+          <span className="spacer" />
+          <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+          <button
+            className="btn btn-primary"
+            onClick={() => void save()}
+            disabled={!item.title.trim() || saving}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </>
+      }
+    >
           {!initial && (
             <div className="type-pick">
               {([
@@ -83,7 +97,7 @@ export function ItemEditor({
 
           <div className="field">
             <label>Name</label>
-            <input className="input" autoFocus value={item.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. GitHub" />
+            <input ref={titleRef} className="input" value={item.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. GitHub" />
           </div>
 
           {item.type === "login" && (
@@ -138,19 +152,6 @@ export function ItemEditor({
             <label>Notes</label>
             <textarea className="textarea" value={item.notes ?? ""} onChange={(e) => set("notes", e.target.value)} />
           </div>
-        </div>
-        <div className="modal-foot">
-          <span className="spacer" />
-          <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
-          <button
-            className="btn btn-primary"
-            onClick={() => void save()}
-            disabled={!item.title.trim() || saving}
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </div>
-    </div>
+    </Dialog>
   );
 }
