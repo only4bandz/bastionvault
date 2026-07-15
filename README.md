@@ -82,9 +82,10 @@ secret (never the raw secret), persisted to **SQLite**. Reuses the types from
 | `POST` | `/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
 | `GET` | `/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
 | `POST` / `DELETE` | `/sessions` | Login (Argon2id) → bearer token (TTL 30 min) / logout |
-| `GET` | `/vault` | Encrypted items + manifest (auth) |
-| `PUT`/`DELETE` | `/vault/items/:id` | Upsert / delete an encrypted item (auth) |
-| `PUT` | `/vault/manifest` | Stores the integrity manifest (auth) |
+| `GET` | `/vault` | Encrypted items + manifest + CAS revision (auth) |
+| `PUT` | `/vault/transaction` | Atomically apply item operations + sealed manifest at an expected revision |
+| `PUT`/`DELETE` | `/vault/items/:id` | Deprecated compatibility endpoint; use `/vault/transaction` |
+| `PUT` | `/vault/manifest` | Deprecated compatibility endpoint; use `/vault/transaction` |
 | `PUT` | `/send/identity` | Publish/rotate a Send identity → stable Bastion address |
 | `GET` | `/send/whoami` · `/send/directory/:id` | Your address · resolve a contact (exact-match, rate-limited) |
 | `POST` `/send` · `GET` `/send/inbox` · `DELETE` `/send/inbox/:id` | Deliver / pull / read-once delete an opaque blob |

@@ -10,7 +10,7 @@
 //! opaque blobs and the auth-secret hash are stored). An in-memory cache backs
 //! the reads and is loaded from SQLite at startup; mutations are write-through.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -18,8 +18,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -44,6 +45,15 @@ const WRAPPED_KEY_CIPHERTEXT_BYTES: usize = 48;
 const MAX_VAULT_ITEMS: usize = 10_000;
 const MAX_VAULT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VAULT_BLOB_BYTES: usize = 512 * 1024;
+/// A 10,000-entry encrypted manifest can legitimately exceed the per-item
+/// limit, especially when item ids approach their maximum length.
+const MAX_VAULT_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
+/// A transaction carries one complete sealed manifest plus a bounded batch of
+/// item operations. Authentication middleware runs before this larger body is
+/// extracted, so unauthenticated callers retain the global 1 MiB limit.
+const MAX_VAULT_TRANSACTION_BODY_BYTES: usize =
+    MAX_VAULT_MANIFEST_BYTES + (3 * MAX_VAULT_BLOB_BYTES) + (64 * 1024);
+const MAX_VAULT_TRANSACTION_OPS: usize = 256;
 const MAX_ITEM_ID_BYTES: usize = 256;
 const MAX_CONCURRENT_AUTH: usize = 4;
 const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
@@ -101,6 +111,12 @@ pub fn app_in_memory_with_auth_limit(auth_limit: usize) -> Router {
 
 fn build(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Router {
     let state = AppState::new(token_ttl, db_path, auth_limit);
+    let transaction_route = put(apply_vault_transaction)
+        .layer(DefaultBodyLimit::max(MAX_VAULT_TRANSACTION_BODY_BYTES))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            authenticate_vault_transaction,
+        ));
     Router::new()
         .route("/health", get(health))
         .route("/accounts", post(create_account))
@@ -109,6 +125,7 @@ fn build(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Router {
         .route("/vault", get(get_vault))
         .route("/vault/items/:id", put(put_item).delete(delete_item))
         .route("/vault/manifest", put(put_manifest))
+        .route("/vault/transaction", transaction_route)
         // ── Bastion Send ──
         .route("/send/identity", put(publish_identity))
         .route("/send/whoami", get(send_whoami))
@@ -164,6 +181,7 @@ struct AccountRecord {
     manifest: Option<EncryptedBlob>,
     manifest_bytes: usize,
     stored_bytes: usize,
+    vault_revision: u64,
 }
 
 impl AppState {
@@ -201,6 +219,22 @@ struct Db {
     conn: Arc<Mutex<Connection>>,
 }
 
+enum PreparedVaultOperation {
+    Put {
+        id: String,
+        blob: EncryptedBlob,
+        blob_json: String,
+    },
+    Delete {
+        id: String,
+    },
+}
+
+enum DbVaultMutation {
+    Applied,
+    Stale,
+}
+
 impl Db {
     fn open(path: &str) -> Self {
         let conn = Connection::open(path).expect("open database");
@@ -208,7 +242,8 @@ impl Db {
             "PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS accounts(
                email TEXT PRIMARY KEY, salt TEXT NOT NULL, kdf TEXT NOT NULL,
-               wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL);
+               wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL,
+               vault_revision INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE IF NOT EXISTS items(
                email TEXT NOT NULL, id TEXT NOT NULL, blob TEXT NOT NULL,
                PRIMARY KEY(email, id));
@@ -224,6 +259,24 @@ impl Db {
              CREATE INDEX IF NOT EXISTS idx_inbox_recipient ON send_inbox(recipient_id);",
         )
         .expect("init schema");
+        let has_vault_revision = {
+            let mut stmt = conn
+                .prepare("PRAGMA table_info(accounts)")
+                .expect("read schema");
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .expect("read account columns")
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .expect("read account columns")
+                .iter()
+                .any(|column| column == "vault_revision")
+        };
+        if !has_vault_revision {
+            conn.execute(
+                "ALTER TABLE accounts ADD COLUMN vault_revision INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .expect("migrate vault revision");
+        }
         Self {
             conn: Arc::new(Mutex::new(conn)),
         }
@@ -251,28 +304,49 @@ impl Db {
         Ok(inserted == 1)
     }
 
-    fn put_item(&self, email: &str, id: &str, blob_json: &str) -> rusqlite::Result<()> {
-        self.lock().execute(
-            "INSERT OR REPLACE INTO items(email,id,blob) VALUES(?1,?2,?3)",
-            params![email, id, blob_json],
+    fn commit_vault_mutation(
+        &self,
+        email: &str,
+        expected_revision: u64,
+        next_revision: u64,
+        operations: &[PreparedVaultOperation],
+        manifest_json: Option<&str>,
+    ) -> rusqlite::Result<DbVaultMutation> {
+        let expected_revision = persisted_revision(expected_revision)?;
+        let next_revision = persisted_revision(next_revision)?;
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let updated = tx.execute(
+            "UPDATE accounts SET vault_revision=?1 WHERE email=?2 AND vault_revision=?3",
+            params![next_revision, email, expected_revision],
         )?;
-        Ok(())
-    }
-
-    fn delete_item(&self, email: &str, id: &str) -> rusqlite::Result<()> {
-        self.lock().execute(
-            "DELETE FROM items WHERE email=?1 AND id=?2",
-            params![email, id],
-        )?;
-        Ok(())
-    }
-
-    fn put_manifest(&self, email: &str, blob_json: &str) -> rusqlite::Result<()> {
-        self.lock().execute(
-            "INSERT OR REPLACE INTO manifests(email,blob) VALUES(?1,?2)",
-            params![email, blob_json],
-        )?;
-        Ok(())
+        if updated != 1 {
+            return Ok(DbVaultMutation::Stale);
+        }
+        for operation in operations {
+            match operation {
+                PreparedVaultOperation::Put { id, blob_json, .. } => {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO items(email,id,blob) VALUES(?1,?2,?3)",
+                        params![email, id, blob_json],
+                    )?;
+                }
+                PreparedVaultOperation::Delete { id } => {
+                    tx.execute(
+                        "DELETE FROM items WHERE email=?1 AND id=?2",
+                        params![email, id],
+                    )?;
+                }
+            }
+        }
+        if let Some(manifest_json) = manifest_json {
+            tx.execute(
+                "INSERT OR REPLACE INTO manifests(email,blob) VALUES(?1,?2)",
+                params![email, manifest_json],
+            )?;
+        }
+        tx.commit()?;
+        Ok(DbVaultMutation::Applied)
     }
 
     /// Loads all accounts (with their items and manifest) at startup.
@@ -283,8 +357,9 @@ impl Db {
         let mut accounts: HashMap<String, AccountRecord> = HashMap::new();
 
         {
-            let mut stmt =
-                conn.prepare("SELECT email,salt,kdf,wrapped_vault_key,auth_hash FROM accounts")?;
+            let mut stmt = conn.prepare(
+                "SELECT email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision FROM accounts",
+            )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -292,12 +367,16 @@ impl Db {
                     r.get::<_, String>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
                 ))
             })?;
             for row in rows {
-                let (email, salt, kdf_s, wrapped_s, auth_hash) = row?;
+                let (email, salt, kdf_s, wrapped_s, auth_hash, vault_revision) = row?;
                 let kdf: KdfParams = serde_json::from_str(&kdf_s)?;
                 let wrapped_vault_key: EncryptedBlob = serde_json::from_str(&wrapped_s)?;
+                let vault_revision = u64::try_from(vault_revision).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "negative vault revision")
+                })?;
                 accounts.insert(
                     email,
                     AccountRecord {
@@ -310,6 +389,7 @@ impl Db {
                         manifest: None,
                         manifest_bytes: 0,
                         stored_bytes: 0,
+                        vault_revision,
                     },
                 );
             }
@@ -364,7 +444,7 @@ impl Db {
                         format!("orphaned manifest for account {email:?}"),
                     )
                 })?;
-                if blob_s.len() > MAX_VAULT_BLOB_BYTES
+                if blob_s.len() > MAX_VAULT_MANIFEST_BYTES
                     || acc
                         .stored_bytes
                         .checked_add(blob_s.len())
@@ -383,6 +463,15 @@ impl Db {
         }
         Ok(accounts)
     }
+}
+
+fn persisted_revision(revision: u64) -> rusqlite::Result<i64> {
+    i64::try_from(revision).map_err(|_| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "vault revision exceeds SQLite integer range",
+        )))
+    })
 }
 
 // ─── HTTP errors (deliberately terse messages) ───
@@ -426,12 +515,36 @@ struct LoginResponse {
 struct VaultResponse {
     items: HashMap<String, EncryptedBlob>,
     manifest: Option<EncryptedBlob>,
+    revision: u64,
 }
 
 #[derive(Deserialize)]
 struct BlobBody {
     blob: EncryptedBlob,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VaultTransactionRequest {
+    expected_revision: u64,
+    operations: Vec<VaultOperation>,
+    manifest: EncryptedBlob,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum VaultOperation {
+    Put { id: String, blob: EncryptedBlob },
+    Delete { id: String },
+}
+
+#[derive(Serialize)]
+struct VaultTransactionResponse {
+    revision: u64,
+}
+
+#[derive(Clone)]
+struct AuthenticatedAccount(String);
 
 // ─── Handlers ───
 
@@ -496,6 +609,7 @@ async fn create_account(
             manifest: None,
             manifest_bytes: 0,
             stored_bytes: 0,
+            vault_revision: 0,
         },
     );
     Ok(StatusCode::CREATED)
@@ -586,6 +700,18 @@ async fn create_session(
     Ok(Json(LoginResponse { token }))
 }
 
+/// Authenticate before Axum extracts the larger transaction body. This keeps
+/// the expanded route-specific limit unavailable to unauthenticated callers.
+async fn authenticate_vault_transaction(
+    State(st): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let email = require_auth(&st, request.headers())?;
+    request.extensions_mut().insert(AuthenticatedAccount(email));
+    Ok(next.run(request).await)
+}
+
 async fn get_vault(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -599,6 +725,123 @@ async fn get_vault(
     Ok(Json(VaultResponse {
         items: acc.items.clone(),
         manifest: acc.manifest.clone(),
+        revision: acc.vault_revision,
+    }))
+}
+
+async fn apply_vault_transaction(
+    State(st): State<AppState>,
+    Extension(AuthenticatedAccount(email)): Extension<AuthenticatedAccount>,
+    Json(body): Json<VaultTransactionRequest>,
+) -> Result<Json<VaultTransactionResponse>, ApiError> {
+    if body.operations.len() > MAX_VAULT_TRANSACTION_OPS {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too many vault operations",
+        ));
+    }
+    let manifest_json = serde_json::to_string(&body.manifest)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+    if manifest_json.len() > MAX_VAULT_MANIFEST_BYTES {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "manifest too large",
+        ));
+    }
+
+    let mut ids = HashSet::with_capacity(body.operations.len());
+    let mut operations = Vec::with_capacity(body.operations.len());
+    for operation in body.operations {
+        let prepared = match operation {
+            VaultOperation::Put { id, blob } => {
+                validate_item_id(&id)?;
+                if !ids.insert(id.clone()) {
+                    return Err(ApiError(
+                        StatusCode::BAD_REQUEST,
+                        "duplicate item operation",
+                    ));
+                }
+                let blob_json = serde_json::to_string(&blob)
+                    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+                if blob_json.len() > MAX_VAULT_BLOB_BYTES {
+                    return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "item too large"));
+                }
+                PreparedVaultOperation::Put {
+                    id,
+                    blob,
+                    blob_json,
+                }
+            }
+            VaultOperation::Delete { id } => {
+                validate_item_id(&id)?;
+                if !ids.insert(id.clone()) {
+                    return Err(ApiError(
+                        StatusCode::BAD_REQUEST,
+                        "duplicate item operation",
+                    ));
+                }
+                PreparedVaultOperation::Delete { id }
+            }
+        };
+        operations.push(prepared);
+    }
+
+    let mut inner = st.write();
+    let acc = inner
+        .accounts
+        .get_mut(&email)
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
+    if body.expected_revision != acc.vault_revision {
+        return Err(ApiError(StatusCode::CONFLICT, "stale vault revision"));
+    }
+    let next_revision = next_vault_revision(acc.vault_revision)?;
+    let (next_item_count, next_stored_bytes) =
+        projected_vault_usage(acc, &operations, manifest_json.len())?;
+    if next_item_count > MAX_VAULT_ITEMS {
+        return Err(ApiError(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "vault item quota exceeded",
+        ));
+    }
+    if next_stored_bytes > MAX_VAULT_BYTES {
+        return Err(ApiError(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "vault storage quota exceeded",
+        ));
+    }
+
+    persist_vault_mutation(
+        &st,
+        &email,
+        acc.vault_revision,
+        next_revision,
+        &operations,
+        Some(&manifest_json),
+    )?;
+
+    for operation in operations {
+        match operation {
+            PreparedVaultOperation::Put {
+                id,
+                blob,
+                blob_json,
+            } => {
+                acc.item_bytes.insert(id.clone(), blob_json.len());
+                acc.items.insert(id, blob);
+            }
+            PreparedVaultOperation::Delete { id } => {
+                acc.item_bytes.remove(&id);
+                acc.items.remove(&id);
+            }
+        }
+    }
+    acc.manifest = Some(body.manifest);
+    acc.manifest_bytes = manifest_json.len();
+    acc.stored_bytes = next_stored_bytes;
+    acc.vault_revision = next_revision;
+
+    Ok(Json(VaultTransactionResponse {
+        revision: next_revision,
     }))
 }
 
@@ -607,7 +850,7 @@ async fn put_item(
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<BlobBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
     validate_item_id(&id)?;
     let email = require_auth(&st, &headers)?;
     let blob_json = serde_json::to_string(&body.blob)
@@ -640,20 +883,32 @@ async fn put_item(
             StatusCode::INSUFFICIENT_STORAGE,
             "vault storage quota exceeded",
         ))?;
-    st.db
-        .put_item(&email, &id, &blob_json)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    let next_revision = next_vault_revision(acc.vault_revision)?;
+    let operations = [PreparedVaultOperation::Put {
+        id: id.clone(),
+        blob: body.blob.clone(),
+        blob_json: blob_json.clone(),
+    }];
+    persist_vault_mutation(
+        &st,
+        &email,
+        acc.vault_revision,
+        next_revision,
+        &operations,
+        None,
+    )?;
     acc.stored_bytes = next_bytes;
     acc.item_bytes.insert(id.clone(), blob_json.len());
     acc.items.insert(id, body.blob);
-    Ok(StatusCode::NO_CONTENT)
+    acc.vault_revision = next_revision;
+    Ok(deprecated_vault_mutation_response())
 }
 
 async fn delete_item(
     State(st): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
     validate_item_id(&id)?;
     let email = require_auth(&st, &headers)?;
     let mut inner = st.write();
@@ -661,25 +916,33 @@ async fn delete_item(
         .accounts
         .get_mut(&email)
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    st.db
-        .delete_item(&email, &id)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    let next_revision = next_vault_revision(acc.vault_revision)?;
+    let operations = [PreparedVaultOperation::Delete { id: id.clone() }];
+    persist_vault_mutation(
+        &st,
+        &email,
+        acc.vault_revision,
+        next_revision,
+        &operations,
+        None,
+    )?;
     if let Some(bytes) = acc.item_bytes.remove(&id) {
         acc.stored_bytes = acc.stored_bytes.saturating_sub(bytes);
     }
     acc.items.remove(&id);
-    Ok(StatusCode::NO_CONTENT)
+    acc.vault_revision = next_revision;
+    Ok(deprecated_vault_mutation_response())
 }
 
 async fn put_manifest(
     State(st): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<BlobBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
     let email = require_auth(&st, &headers)?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
-    if blob_json.len() > MAX_VAULT_BLOB_BYTES {
+    if blob_json.len() > MAX_VAULT_MANIFEST_BYTES {
         return Err(ApiError(
             StatusCode::PAYLOAD_TOO_LARGE,
             "manifest too large",
@@ -699,16 +962,116 @@ async fn put_manifest(
             StatusCode::INSUFFICIENT_STORAGE,
             "vault storage quota exceeded",
         ))?;
-    st.db
-        .put_manifest(&email, &blob_json)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    let next_revision = next_vault_revision(acc.vault_revision)?;
+    persist_vault_mutation(
+        &st,
+        &email,
+        acc.vault_revision,
+        next_revision,
+        &[],
+        Some(&blob_json),
+    )?;
     acc.stored_bytes = next_bytes;
     acc.manifest_bytes = blob_json.len();
     acc.manifest = Some(body.blob);
-    Ok(StatusCode::NO_CONTENT)
+    acc.vault_revision = next_revision;
+    Ok(deprecated_vault_mutation_response())
 }
 
 // ─── Helpers ───
+
+fn deprecated_vault_mutation_response() -> (StatusCode, [(&'static str, &'static str); 1]) {
+    (StatusCode::NO_CONTENT, [("deprecation", "true")])
+}
+
+fn next_vault_revision(current: u64) -> Result<u64, ApiError> {
+    current
+        .checked_add(1)
+        .filter(|revision| i64::try_from(*revision).is_ok())
+        .ok_or(ApiError(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "vault revision exhausted",
+        ))
+}
+
+fn projected_vault_usage(
+    acc: &AccountRecord,
+    operations: &[PreparedVaultOperation],
+    manifest_bytes: usize,
+) -> Result<(usize, usize), ApiError> {
+    let mut item_count = acc.items.len();
+    let mut stored_bytes = acc
+        .stored_bytes
+        .checked_sub(acc.manifest_bytes)
+        .and_then(|total| total.checked_add(manifest_bytes))
+        .ok_or(ApiError(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "vault storage quota exceeded",
+        ))?;
+    for operation in operations {
+        match operation {
+            PreparedVaultOperation::Put { id, blob_json, .. } => {
+                if !acc.items.contains_key(id) {
+                    item_count = item_count.checked_add(1).ok_or(ApiError(
+                        StatusCode::INSUFFICIENT_STORAGE,
+                        "vault item quota exceeded",
+                    ))?;
+                }
+                let previous_bytes = acc.item_bytes.get(id).copied().unwrap_or(0);
+                stored_bytes = stored_bytes
+                    .checked_sub(previous_bytes)
+                    .and_then(|total| total.checked_add(blob_json.len()))
+                    .ok_or(ApiError(
+                        StatusCode::INSUFFICIENT_STORAGE,
+                        "vault storage quota exceeded",
+                    ))?;
+            }
+            PreparedVaultOperation::Delete { id } => {
+                if let Some(previous_bytes) = acc.item_bytes.get(id) {
+                    item_count = item_count.checked_sub(1).ok_or(ApiError(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "vault accounting error",
+                    ))?;
+                    stored_bytes = stored_bytes.checked_sub(*previous_bytes).ok_or(ApiError(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "vault accounting error",
+                    ))?;
+                }
+            }
+        }
+    }
+    Ok((item_count, stored_bytes))
+}
+
+fn persist_vault_mutation(
+    st: &AppState,
+    email: &str,
+    expected_revision: u64,
+    next_revision: u64,
+    operations: &[PreparedVaultOperation],
+    manifest_json: Option<&str>,
+) -> Result<(), ApiError> {
+    match st
+        .db
+        .commit_vault_mutation(
+            email,
+            expected_revision,
+            next_revision,
+            operations,
+            manifest_json,
+        )
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+    {
+        DbVaultMutation::Applied => Ok(()),
+        // The in-memory cache is process-local. A DB-only conflict means
+        // another process changed the same account and this process must not
+        // pretend its cache can satisfy a client retry.
+        DbVaultMutation::Stale => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "vault cache out of sync",
+        )),
+    }
+}
 
 fn validate_account_id(email: &str) -> Result<(), ApiError> {
     let valid_shape = email.split_once('@').is_some_and(|(local, domain)| {
