@@ -209,20 +209,22 @@ impl Db {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn save_account(
+    /// Inserts a new account without ever replacing an existing credential.
+    /// Returns `false` when another request or process already claimed `email`.
+    fn create_account(
         &self,
         email: &str,
         salt: &str,
         kdf_json: &str,
         wrapped_json: &str,
         auth_hash: &str,
-    ) -> rusqlite::Result<()> {
-        self.lock().execute(
-            "INSERT OR REPLACE INTO accounts(email,salt,kdf,wrapped_vault_key,auth_hash) \
-             VALUES(?1,?2,?3,?4,?5)",
+    ) -> rusqlite::Result<bool> {
+        let inserted = self.lock().execute(
+            "INSERT INTO accounts(email,salt,kdf,wrapped_vault_key,auth_hash) \
+             VALUES(?1,?2,?3,?4,?5) ON CONFLICT(email) DO NOTHING",
             params![email, salt, kdf_json, wrapped_json, auth_hash],
         )?;
-        Ok(())
+        Ok(inserted == 1)
     }
 
     fn put_item(&self, email: &str, id: &str, blob_json: &str) -> rusqlite::Result<()> {
@@ -422,6 +424,11 @@ async fn create_account(
     State(st): State<AppState>,
     Json(req): Json<CreateAccount>,
 ) -> Result<StatusCode, ApiError> {
+    // Reject a known duplicate before paying the Argon2 cost. The authoritative
+    // collision check is repeated under the write lock after hashing.
+    if st.read().accounts.contains_key(&req.email) {
+        return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
+    }
     // Slow hash on a dedicated blocking thread (no starvation of the async runtime).
     let secret = req.registration.auth_secret.expose_b64().to_string();
     let auth_hash = tokio::task::spawn_blocking(move || hash_secret(&secret))
@@ -429,16 +436,19 @@ async fn create_account(
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "hash failure"))?;
 
-    if st.read().accounts.contains_key(&req.email) {
-        return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
-    }
     let kdf_json = serde_json::to_string(&req.registration.kdf)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
     let wrapped_json = serde_json::to_string(&req.registration.wrapped_vault_key)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
-    // Persist first (source of truth), then update the in-memory cache.
-    st.db
-        .save_account(
+    // Serialize the authoritative insert and cache update. SQLite's conflict
+    // clause also protects deployments with multiple processes sharing the DB.
+    let mut inner = st.write();
+    if inner.accounts.contains_key(&req.email) {
+        return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
+    }
+    let created = st
+        .db
+        .create_account(
             &req.email,
             &req.registration.salt,
             &kdf_json,
@@ -446,7 +456,10 @@ async fn create_account(
             &auth_hash,
         )
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
-    st.write().accounts.insert(
+    if !created {
+        return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
+    }
+    inner.accounts.insert(
         req.email,
         AccountRecord {
             salt: req.registration.salt,
