@@ -20,8 +20,8 @@ import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
 import { loadVaultState, VaultIntegrityError } from "./lib/vault-load.js";
+import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
 
-const DEFAULT_SERVER = "http://127.0.0.1:7777";
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
 const SESSION_KEY = "session"; // key in chrome.storage.session
@@ -111,7 +111,11 @@ let session = null;
 
 async function getServerUrl() {
   const { serverUrl } = await chrome.storage.local.get("serverUrl");
-  return serverUrl || DEFAULT_SERVER;
+  try {
+    return normalizeServerUrl(serverUrl || DEFAULT_SERVER).url;
+  } catch {
+    return DEFAULT_SERVER;
+  }
 }
 
 const MAX_KEEP_MINUTES = 12 * 60; // hard ceiling (matches the options UI max)
@@ -229,17 +233,25 @@ async function ensureSession() {
     return null;
   }
 
+  let server;
+  try {
+    server = normalizeServerUrl(stored.server).url;
+  } catch {
+    await chrome.storage.session.remove(SESSION_KEY);
+    return null;
+  }
+
   let account;
   let api;
   let token;
   try {
     await ensureWasm();
     account = rehydrate(stored.crypto); // no Argon2id; just the vault key
-    api = makeApi(stored.server);
+    api = makeApi(server);
     token = await api.login(stored.email, account.auth_secret);
     const vault = await api.getVault(token);
     const { items, contacts, lockedRecords } = loadVaultState(account, vault.items);
-    session = { account, token, email: stored.email, server: stored.server, items, contacts, lockedRecords, expiresAt: stored.expiresAt };
+    session = { account, token, email: stored.email, server, items, contacts, lockedRecords, expiresAt: stored.expiresAt };
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
     return session;
