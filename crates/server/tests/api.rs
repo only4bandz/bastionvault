@@ -925,6 +925,93 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
 }
 
 #[tokio::test]
+async fn corrupt_persisted_account_credentials_prevent_restart() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir()
+        .join(format!(
+            "bastion-corrupt-credentials-{}-{unique}.db",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let email = "persisted-credentials@example.com";
+    let app = server::app_with_db(&path);
+    let (_vault, _token) = registered_vault_session(&app, email).await;
+    drop(app);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let (salt, kdf, wrapped, auth_hash): (String, String, String, String) = conn
+        .query_row(
+            "SELECT salt,kdf,wrapped_vault_key,auth_hash FROM accounts WHERE email=?1",
+            [email],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    drop(conn);
+
+    let excessive_auth_cost = auth_hash.replacen("m=19456", "m=4294967295", 1);
+    assert_ne!(excessive_auth_cost, auth_hash);
+    let wrong_auth_algorithm = auth_hash.replacen("$argon2id$", "$argon2i$", 1);
+    assert_ne!(wrong_auth_algorithm, auth_hash);
+    let cases = [
+        ("salt", "AAAA".to_string(), salt.clone()),
+        (
+            "kdf",
+            json!({ "mem_kib": 0, "iterations": 0, "parallelism": 0 }).to_string(),
+            kdf.clone(),
+        ),
+        (
+            "wrapped_vault_key",
+            json!({ "v": 1, "nonce": "AA==", "ct": "AA==" }).to_string(),
+            wrapped.clone(),
+        ),
+        ("auth_hash", "not-a-phc".to_string(), auth_hash.clone()),
+        ("auth_hash", excessive_auth_cost, auth_hash.clone()),
+        ("auth_hash", wrong_auth_algorithm, auth_hash.clone()),
+    ];
+
+    for (column, invalid, original) in cases {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            &format!("UPDATE accounts SET {column}=?1 WHERE email=?2"),
+            rusqlite::params![invalid, email],
+        )
+        .unwrap();
+        drop(conn);
+
+        let restart = std::panic::catch_unwind(|| server::app_with_db(&path));
+        assert!(
+            restart.is_err(),
+            "corrupted persisted {column} was accepted"
+        );
+
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            &format!("UPDATE accounts SET {column}=?1 WHERE email=?2"),
+            rusqlite::params![original, email],
+        )
+        .unwrap();
+    }
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE accounts SET email=' malformed@example.com' WHERE email=?1",
+        [email],
+    )
+    .unwrap();
+    drop(conn);
+    let restart = std::panic::catch_unwind(|| server::app_with_db(&path));
+    assert!(restart.is_err(), "corrupted persisted email was accepted");
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}-wal"));
+    let _ = std::fs::remove_file(format!("{path}-shm"));
+}
+
+#[tokio::test]
 async fn corrupt_persisted_vault_state_prevents_restart() {
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
