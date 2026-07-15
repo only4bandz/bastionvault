@@ -118,6 +118,7 @@ function subtitleFor(it) {
 // ── rendering ──
 let allItems = [];
 let currentHost = null;
+let currentTabId = null;
 let currentServer = "";
 let vaultState = null;
 
@@ -229,7 +230,7 @@ function wireRows() {
         return;
       }
       if (act === "fill") {
-        const r = await send({ type: "FILL", id });
+        const r = await send({ type: "FILL", id, tabId: currentTabId });
         if (relocked(r)) return;
         if (r.ok && r.filled) window.close();
         else toast(r.ok ? "No login field found on this page" : r.error || "Error");
@@ -270,8 +271,10 @@ async function showVault(state) {
   // current tab host (activeTab grants the URL while the popup is open)
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    currentTabId = tab?.id ?? null;
     currentHost = domainOf(tab?.url || "");
   } catch {
+    currentTabId = null;
     currentHost = null;
   }
 

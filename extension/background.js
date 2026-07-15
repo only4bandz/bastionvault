@@ -15,6 +15,7 @@
 // disk-backed web storage (enforced by scripts/check-no-browser-secret-storage.sh).
 
 import init, { unlock, rehydrate, send_safety_number, send_lock_open, send_lock_new_params } from "./pkg/crypto_wasm.js";
+import { autofillPolicyError } from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
@@ -340,13 +341,10 @@ function suggestionsFor(s, host) {
 }
 
 // ── credential autofill (injected into the active tab on demand) ──
-async function fillActiveTab(item) {
+async function fillActiveTab(item, expectedTabId) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error("No active tab to fill.");
-  // Browser-internal pages (chrome://, the Web Store, etc.) can't be scripted.
-  if (!/^https?:\/\//i.test(tab.url || "")) {
-    throw new Error("Open a website to fill credentials — this page can't be filled.");
-  }
+  const policyError = autofillPolicyError(item, tab, expectedTabId);
+  if (policyError) throw new Error(policyError);
   // Top frame ONLY: filling all frames would write the password into any
   // (possibly malicious, cross-origin) embedded iframe with a password field.
   const results = await chrome.scripting.executeScript({
@@ -581,7 +579,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await touchSession();
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
-          const filled = await fillActiveTab(it);
+          const filled = await fillActiveTab(it, msg.tabId);
           sendResponse({ ok: true, filled });
           break;
         }
