@@ -1320,3 +1320,158 @@ async fn bastion_send_directory_and_inbox_flow() {
     .await;
     assert_eq!(s, StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+#[tokio::test]
+async fn corrupted_send_persistence_fails_closed() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir()
+        .join(format!(
+            "bastion-send-corruption-{}-{unique}.db",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .to_string();
+    let app = server::app_with_db(&path);
+    let alice = signup_login(&app, "send-corrupt-alice@example.com").await;
+    let bob = signup_login(&app, "send-corrupt-bob@example.com").await;
+    let alice_identity = IdentityKeys::generate(1);
+    let bob_identity = IdentityKeys::generate(1);
+
+    let (status, bob_response) = send(
+        &app,
+        "PUT",
+        "/send/identity",
+        Some(&bob),
+        Some(serde_json::to_value(bob_identity.public()).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let bob_id = bob_response["bastion_id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/send/identity",
+        Some(&alice),
+        Some(serde_json::to_value(alice_identity.public()).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let blob = send_seal(
+        b"persisted",
+        &bob_id,
+        &bob_identity.public(),
+        None,
+        Some((&alice_identity, "ALICE")),
+    )
+    .unwrap();
+    let original_message_id = blob.message_id.clone();
+    let blob_json = serde_json::to_string(&blob).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(&alice),
+        Some(json!({
+            "recipient_id": bob_id,
+            "message_id": blob.message_id,
+            "blob": blob,
+            "expires_at": null,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // Invalid persisted JSON must fail the whole response, never surface as
+    // a synthetic null envelope.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE send_inbox SET blob='{' WHERE message_id=?1",
+        [&original_message_id],
+    )
+    .unwrap();
+    let (status, _) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    // Row routing metadata is re-bound to the decoded envelope on every read.
+    conn.execute(
+        "UPDATE send_inbox SET blob=?2 WHERE message_id=?1",
+        rusqlite::params![original_message_id, blob_json],
+    )
+    .unwrap();
+    let corrupt_message_id = B64.encode([7u8; 16]);
+    conn.execute(
+        "UPDATE send_inbox SET message_id=?2 WHERE message_id=?1",
+        rusqlite::params![original_message_id, corrupt_message_id],
+    )
+    .unwrap();
+    let (status, _) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    conn.execute(
+        "UPDATE send_inbox SET message_id=?2 WHERE message_id=?1",
+        rusqlite::params![corrupt_message_id, original_message_id],
+    )
+    .unwrap();
+
+    // Invalid timestamp state is rejected rather than silently hidden by the
+    // active-row query.
+    conn.execute(
+        "UPDATE send_inbox SET expires_at=created_at + 604801 WHERE message_id=?1",
+        [&original_message_id],
+    )
+    .unwrap();
+    let (status, _) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    // Purge failures propagate and leave the row intact. Once the injected
+    // failure is removed, the valid expired row is deleted normally.
+    conn.execute(
+        "UPDATE send_inbox SET created_at=1, expires_at=2 WHERE message_id=?1",
+        [&original_message_id],
+    )
+    .unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_send_purge BEFORE DELETE ON send_inbox
+         BEGIN SELECT RAISE(ABORT, 'forced purge failure'); END;",
+    )
+    .unwrap();
+    let (status, _) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let remaining: i64 = conn
+        .query_row("SELECT COUNT(*) FROM send_inbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(remaining, 1);
+    conn.execute_batch("DROP TRIGGER reject_send_purge;")
+        .unwrap();
+    let (status, inbox) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(inbox, json!([]));
+
+    // Corrupted directory persistence also fails closed instead of returning
+    // an invented or partial public identity.
+    conn.execute(
+        "UPDATE send_directory SET public='{}' WHERE email='send-corrupt-bob@example.com'",
+        [],
+    )
+    .unwrap();
+    let (status, _) = send(&app, "GET", "/send/whoami", Some(&bob), None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let (status, _) = send(
+        &app,
+        "GET",
+        &format!("/send/directory/{bob_id}"),
+        Some(&alice),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    drop(conn);
+    drop(app);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}-wal"));
+    let _ = std::fs::remove_file(format!("{path}-shm"));
+}
