@@ -7,6 +7,7 @@
 
 #![cfg(target_arch = "wasm32")]
 
+use crypto_core::{default_lock_kdf, KdfParams};
 use crypto_wasm::{register_with, unlock};
 use wasm_bindgen_test::*;
 
@@ -14,6 +15,37 @@ use wasm_bindgen_test::*;
 const MEM_KIB: u32 = 19 * 1024;
 const ITERS: u32 = 2;
 const PAR: u32 = 1;
+
+#[wasm_bindgen_test]
+fn browser_kdf_policy_rejects_unbounded_work_before_derivation() {
+    assert_eq!(KdfParams::MAX_MEM_KIB, 128 * 1024);
+    assert_eq!(KdfParams::MAX_ITERATIONS, 6);
+    assert_eq!(KdfParams::MAX_PARALLELISM, 4);
+    assert!(KdfParams::default().validate_for_new_vault().is_ok());
+    assert!(default_lock_kdf().validate_for_unlock().is_ok());
+
+    assert!(register_with(
+        "pw",
+        KdfParams::MAX_MEM_KIB + 1,
+        KdfParams::MIN_ITERATIONS,
+        KdfParams::MIN_PARALLELISM,
+    )
+    .is_err());
+    assert!(register_with(
+        "pw",
+        KdfParams::MIN_MEM_KIB,
+        KdfParams::MAX_ITERATIONS + 1,
+        KdfParams::MIN_PARALLELISM,
+    )
+    .is_err());
+    assert!(register_with(
+        "pw",
+        KdfParams::MIN_MEM_KIB,
+        KdfParams::MIN_ITERATIONS,
+        KdfParams::MAX_PARALLELISM + 1,
+    )
+    .is_err());
+}
 
 /// Pulls the formatted Secret Key out of the one-shot `reveal_secret` JSON
 /// (`{ "secret_key": "A1-…", "emergency_kit": "…" }`).

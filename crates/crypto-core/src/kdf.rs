@@ -59,13 +59,27 @@ impl KdfParams {
     /// Minimum parallelism.
     pub const MIN_PARALLELISM: u32 = 1;
     // Ceilings: above this we refuse to even try — otherwise a malicious server
-    // or a corrupted record could exhaust the client's RAM/CPU.
-    /// Maximum tolerated memory (1 GiB).
+    // or a corrupted record could exhaust the client's RAM/CPU. WASM uses a
+    // deliberately tighter budget because an oversized linear-memory growth or
+    // long synchronous derivation can terminate the browser tab.
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Maximum tolerated native memory (1 GiB).
     pub const MAX_MEM_KIB: u32 = 1024 * 1024;
-    /// Maximum passes.
+    #[cfg(target_arch = "wasm32")]
+    /// Maximum tolerated browser memory (128 MiB).
+    pub const MAX_MEM_KIB: u32 = 128 * 1024;
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Maximum native passes.
     pub const MAX_ITERATIONS: u32 = 20;
-    /// Maximum parallelism.
+    #[cfg(target_arch = "wasm32")]
+    /// Maximum browser passes.
+    pub const MAX_ITERATIONS: u32 = 6;
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Maximum native parallelism.
     pub const MAX_PARALLELISM: u32 = 16;
+    #[cfg(target_arch = "wasm32")]
+    /// Maximum browser parallelism.
+    pub const MAX_PARALLELISM: u32 = 4;
 
     /// Policy for a **new** vault (registration / rotation):
     /// security floor AND anti-DoS ceiling.

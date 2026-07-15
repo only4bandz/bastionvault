@@ -23,6 +23,9 @@ master password ──Argon2id(salt, 64MiB)──► master key
 ```
 
 - **Argon2id** (64 MiB, 3 passes) protects against offline brute-force.
+- Browser WASM rejects attacker-supplied Argon2 parameters above 128 MiB,
+  6 passes, or parallelism 4 before attempting derivation; native tooling keeps
+  a larger compatibility ceiling.
 - **Secret Key** (128 bits, 1Password model): a second factor held by the user,
   mixed in as an HKDF salt. Offline brute-force becomes infeasible **even with a
   weak password** — the server never sees it. Shown once via an **Emergency
