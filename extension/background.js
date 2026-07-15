@@ -17,15 +17,13 @@
 import init, { unlock, rehydrate, send_safety_number, send_lock_open, send_lock_new_params } from "./pkg/crypto_wasm.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { matchesSite } from "./lib/match.js";
+import { loadVaultState, VaultIntegrityError } from "./lib/vault-load.js";
 
 const DEFAULT_SERVER = "http://127.0.0.1:7777";
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
 const SESSION_KEY = "session"; // key in chrome.storage.session
 
-// Vault items under this prefix hold Bastion Send state (identity, contacts) —
-// never user entries; they must never surface in the vault list.
-const isReservedItem = (id) => id.startsWith("bastion:send-");
 // Reserved id for the encrypted Send identity (must match crypto-wasm
 // send_identity_item_id()).
 const SEND_IDENTITY_ID = "bastion:send-identity";
@@ -213,40 +211,26 @@ async function ensureSession() {
     return null;
   }
 
+  let account;
+  let api;
+  let token;
   try {
     await ensureWasm();
-    const account = rehydrate(stored.crypto); // no Argon2id; just the vault key
-    const api = makeApi(stored.server);
-    const token = await api.login(stored.email, account.auth_secret);
+    account = rehydrate(stored.crypto); // no Argon2id; just the vault key
+    api = makeApi(stored.server);
+    token = await api.login(stored.email, account.auth_secret);
     const vault = await api.getVault(token);
-    const items = new Map();
-    let contacts = [];
-    const lockedRecords = [];
-    for (const [id, blob] of Object.entries(vault.items || {})) {
-      if (id === SEND_IDENTITY_ID) {
-        try { account.load_send_identity(JSON.stringify(blob)); } catch { /* malformed */ }
-        continue;
-      }
-      if (id === SEND_CONTACTS_ID) {
-        try { contacts = JSON.parse(account.decrypt_item(JSON.stringify(blob), id)); } catch { /* malformed */ }
-        continue;
-      }
-      if (id.startsWith(SEND_LOCKED_PREFIX)) {
-        try { lockedRecords.push(JSON.parse(account.decrypt_item(JSON.stringify(blob), id))); } catch { /* malformed */ }
-        continue;
-      }
-      if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
-      try {
-        items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
-      } catch {
-        /* skip corrupt/tampered item */
-      }
-    }
+    const { items, contacts, lockedRecords } = loadVaultState(account, vault.items);
     session = { account, token, email: stored.email, server: stored.server, items, contacts, lockedRecords, expiresAt: stored.expiresAt };
     chrome.action.setBadgeText({ text: "✓" });
     chrome.action.setBadgeBackgroundColor({ color: "#5a47e6" });
     return session;
-  } catch {
+  } catch (error) {
+    if (error instanceof VaultIntegrityError) {
+      if (token && api) api.logout(token).catch(() => {});
+      try { account?.lock(); } catch { /* already locked */ }
+      await chrome.storage.session.remove(SESSION_KEY);
+    }
     // Rehydration failed (server unreachable, expired data…) — stay locked but
     // keep the stored blob so a later attempt can retry until it actually expires.
     return null;
@@ -288,30 +272,16 @@ async function doUnlock(email, password, secretKey) {
 
   const token = await api.login(email, account.auth_secret);
   const vault = await api.getVault(token);
-
-  const items = new Map();
-  let contacts = [];
-  const lockedRecords = [];
-  for (const [id, blob] of Object.entries(vault.items || {})) {
-    if (id === SEND_IDENTITY_ID) {
-      try { account.load_send_identity(JSON.stringify(blob)); } catch { /* malformed */ }
-      continue;
-    }
-    if (id === SEND_CONTACTS_ID) {
-      try { contacts = JSON.parse(account.decrypt_item(JSON.stringify(blob), id)); } catch { /* malformed */ }
-      continue;
-    }
-    if (id.startsWith(SEND_LOCKED_PREFIX)) {
-      try { lockedRecords.push(JSON.parse(account.decrypt_item(JSON.stringify(blob), id))); } catch { /* malformed */ }
-      continue;
-    }
-    if (isReservedItem(id)) continue; // Bastion Send state, not a vault entry
-    try {
-      items.set(id, JSON.parse(account.decrypt_item(JSON.stringify(blob), id)));
-    } catch {
-      // Skip an item that fails to decrypt (corrupt / tampered).
-    }
+  let loaded;
+  try {
+    loaded = loadVaultState(account, vault.items);
+  } catch (error) {
+    api.logout(token).catch(() => {});
+    account.lock();
+    if (error instanceof VaultIntegrityError) throw error;
+    throw new VaultIntegrityError();
   }
+  const { items, contacts, lockedRecords } = loaded;
 
   session = { account, token, email, server, items, contacts, lockedRecords };
   await persistSession();
