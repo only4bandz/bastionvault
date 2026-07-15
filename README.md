@@ -66,6 +66,8 @@ non-enumerable **Bastion address** (128-bit, base32). Available in both the
 - **Safety number** (60 digits, Signal-style): compare it out-of-band to pin a
   contact and defeat a malicious directory. Trust is shown explicitly —
   **Verified ✓ / Unverified / Anonymous**, and a **key-change** is flagged.
+  For verified contacts, sender discovery and pinned signature verification
+  stay inside WASM; a failed pin releases no note plaintext to JavaScript.
 - The identity and verified contacts live as **encrypted reserved vault items**,
   so they **sync across surfaces** (verify a contact in the extension, it's
   verified in the web app too).

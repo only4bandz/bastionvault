@@ -255,6 +255,8 @@ minimal logged upload metadata. State this plainly in the UI.
    rate-limited.
 3. **Safety number**: iterate over `bastion_id‖enc_pub‖sig_pub‖key_version`
    (both keys, not just enc); 60-digit + QR; verified/unverified/changed UI.
+   Browser clients resolve verified pins inside WASM and return no plaintext if
+   strict signature verification fails.
 4. **Anonymous + read-once**: sign-then-encrypt (sender hidden from server) +
    size-bucket padding; v0.1 authed POST ⇒ anon = anon-to-recipient only;
    server-anon = v0.2.

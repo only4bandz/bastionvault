@@ -43,6 +43,7 @@ import {
 } from "./lib/vault-anchor.js";
 import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
 import { SIGNING_UNAVAILABLE, senderIdForMode } from "./lib/send-policy.js";
+import { openMessage as openSendMessage } from "./lib/send-open.js";
 
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
@@ -73,31 +74,8 @@ async function saveContacts(s, contacts = s.contacts || []) {
   s.contacts = contacts;
 }
 
-// Open one inbox blob (BR5 two-pass): pass 1 with no verifier discovers the
-// sender (the claimed id lives *inside* the ciphertext); for a known VERIFIED
-// contact, re-open against the PINNED public to reach "verified" — a signature
-// failure there means the key changed since we verified them.
 function openMessage(s, blob, passphrase) {
-  let r1;
-  try {
-    r1 = JSON.parse(s.account.send_open(JSON.stringify(blob), passphrase || undefined, undefined));
-  } catch {
-    return passphrase ? { error: "Wrong passphrase or corrupted message." } : { needsPass: true };
-  }
-  let sender = r1.sender; // { state, id }
-  let keyChanged = false;
-  if (sender.state === "unverified" && sender.id) {
-    const v = (s.contacts || []).find((c) => c.bastion_id === sender.id && c.verified);
-    if (v) {
-      try {
-        sender = JSON.parse(s.account.send_open(JSON.stringify(blob), passphrase || undefined, JSON.stringify(v.public))).sender;
-      } catch {
-        keyChanged = true; // signature failed against the pinned key
-      }
-    }
-  }
-  const known = (s.contacts || []).find((c) => c.bastion_id === sender.id);
-  return { plaintext: r1.plaintext, sender, display: known?.display || null, keyChanged };
+  return openSendMessage(s.account, s.contacts || [], blob, passphrase);
 }
 const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
 

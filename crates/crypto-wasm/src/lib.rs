@@ -44,6 +44,28 @@ fn js_err<E: core::fmt::Display>(e: E) -> JsError {
     JsError::new(&e.to_string())
 }
 
+fn serialize_opened_message(opened: send::OpenedMessage) -> Result<String, JsError> {
+    let plaintext = String::from_utf8(opened.plaintext.to_vec()).map_err(js_err)?;
+    let (state, id) = match opened.sender {
+        Sender::Anonymous => ("anonymous", None),
+        Sender::Unverified(id) => ("unverified", Some(id)),
+        Sender::Verified(id) => ("verified", Some(id)),
+    };
+    serde_json::to_string(&serde_json::json!({
+        "plaintext": plaintext,
+        "sender": { "state": state, "id": id },
+    }))
+    .map_err(js_err)
+}
+
+fn serialize_key_change(sender_id: &str) -> Result<String, JsError> {
+    serde_json::to_string(&serde_json::json!({
+        "sender": { "state": "unverified", "id": sender_id },
+        "keyChanged": true,
+    }))
+    .map_err(js_err)
+}
+
 /// Decode a 16-byte lock salt from base64.
 fn decode_salt(b64: &str) -> Result<[u8; kdf::SALT_LEN], JsError> {
     B64.decode(b64)
@@ -350,17 +372,51 @@ impl Account {
             verifier.as_ref(),
         )
         .map_err(js_err)?;
-        let plaintext = String::from_utf8(opened.plaintext.to_vec()).map_err(js_err)?;
-        let (state, id) = match opened.sender {
-            Sender::Anonymous => ("anonymous", None),
-            Sender::Unverified(id) => ("unverified", Some(id)),
-            Sender::Verified(id) => ("verified", Some(id)),
+        serialize_opened_message(opened)
+    }
+
+    /// Open a Send blob while enforcing every verified sender pin inside WASM.
+    /// `pinned_senders_json` is an object mapping Bastion IDs to their pinned
+    /// `PublicIdentity`. Discovery plaintext is zeroized in Rust before a
+    /// strict second open. If that verification fails, the result contains
+    /// `{ keyChanged: true, sender: ... }` and deliberately no plaintext.
+    pub fn send_open_with_pins(
+        &self,
+        blob_json: &str,
+        passphrase: Option<String>,
+        pinned_senders_json: &str,
+    ) -> Result<String, JsError> {
+        let blob: send::SendBlob = serde_json::from_str(blob_json).map_err(js_err)?;
+        let pinned: HashMap<String, PublicIdentity> =
+            serde_json::from_str(pinned_senders_json).map_err(js_err)?;
+        let opened = send::open(
+            &blob,
+            self.identity()?,
+            passphrase.as_deref().map(str::as_bytes),
+            None,
+        )
+        .map_err(js_err)?;
+        let sender_id = match &opened.sender {
+            Sender::Unverified(sender_id) if pinned.contains_key(sender_id) => sender_id.clone(),
+            _ => return serialize_opened_message(opened),
         };
-        let out = serde_json::json!({
-            "plaintext": plaintext,
-            "sender": { "state": state, "id": id },
-        });
-        serde_json::to_string(&out).map_err(js_err)
+        let verifier = &pinned[&sender_id];
+        drop(opened); // zeroize discovery plaintext before strict verification
+        match send::open(
+            &blob,
+            self.identity()?,
+            passphrase.as_deref().map(str::as_bytes),
+            Some(verifier),
+        ) {
+            Ok(verified) if matches!(&verified.sender, Sender::Verified(id) if id == &sender_id) => {
+                serialize_opened_message(verified)
+            }
+            Ok(unverified) => {
+                drop(unverified);
+                serialize_key_change(&sender_id)
+            }
+            Err(_) => serialize_key_change(&sender_id),
+        }
     }
 
     /// Open a received `SendBlob` with this identity and **immediately**
