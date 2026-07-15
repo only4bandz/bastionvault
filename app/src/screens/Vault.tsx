@@ -17,6 +17,7 @@ import type { Account } from "../lib/wasm";
 import type { Contact } from "../lib/send";
 import type { Blob } from "../lib/api";
 import { filterVaultItems } from "../lib/vault-search";
+import { copyWithFeedback } from "../lib/clipboard";
 import { Send } from "./Send";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
@@ -164,8 +165,7 @@ export function Vault({
   }, [mobileNavOpen]);
 
   function copy(text: string, what: string) {
-    navigator.clipboard?.writeText(text);
-    toast(`${what} copied`);
+    void copyWithFeedback(text, what, toast);
   }
 
   const counts = {
