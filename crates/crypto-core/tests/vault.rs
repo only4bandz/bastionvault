@@ -357,6 +357,15 @@ fn account_secret_parse_rejects_invalid() {
 }
 
 #[test]
+fn account_secret_rejects_oversized_input_before_normalizing() {
+    let oversized = "A".repeat(1024 * 1024);
+    assert!(matches!(
+        AccountSecret::parse(&oversized),
+        Err(CryptoError::Malformed)
+    ));
+}
+
+#[test]
 fn emergency_kit_contains_secret_and_label() {
     let s = AccountSecret::generate();
     let kit = s.emergency_kit("alice@example.com");
