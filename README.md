@@ -64,7 +64,8 @@ non-enumerable **Bastion address** (128-bit, base32). Available in both the
 - Server-side: strict public-key/envelope routing validation, per-recipient
   inbox quotas, fixed-window rate limits with strictly bounded state, size
   caps, message dedupe, bounded expiry, and **read-once delete** — all without
-  learning any plaintext.
+  learning any plaintext. Account creation and login are also globally and
+  per-account rate-limited before any server-side Argon2 work begins.
 
 Design + threat model: [`docs/bastion-send-design.md`](docs/bastion-send-design.md).
 
@@ -140,5 +141,6 @@ cd extension && ./build.sh                   # build the WASM module
 # then load `extension/` unpacked at chrome://extensions
 ```
 
-> ⚠️ The server is **not production-ready** (no TLS/CORS, and rate limiting only
-> on the Send endpoints). It's a zero-knowledge reference backend for development.
+> ⚠️ The server is **not production-ready** (no TLS/CORS, and its bounded rate
+> limits are process-local rather than coordinated across instances). It's a
+> zero-knowledge reference backend for development.

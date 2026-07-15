@@ -509,6 +509,201 @@ async fn rejects_authentication_work_when_capacity_is_exhausted() {
 }
 
 #[tokio::test]
+async fn rate_limits_account_creation_globally_and_per_account_before_hashing() {
+    let app = server::app_in_memory_with_auth_rate_limits(server::AuthRateLimits {
+        max_entries: 16,
+        window: std::time::Duration::from_secs(60),
+        account_creations_global: 2,
+        account_creations_per_account: 1,
+        login_attempts_global: 10,
+        login_attempts_per_account: 10,
+    });
+    let (_, first, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let first = serde_json::to_value(first).unwrap();
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "limited-signup@example.com",
+            "registration": first
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // The second request consumes the remaining global allowance, then the
+    // account-specific limiter rejects it before duplicate lookup or Argon2.
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "limited-signup@example.com",
+            "registration": first
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (_, second, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "globally-limited-signup@example.com",
+            "registration": serde_json::to_value(second).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/accounts/globally-limited-signup@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn rate_limits_login_globally_and_per_account_before_verification() {
+    let app = server::app_in_memory_with_auth_rate_limits(server::AuthRateLimits {
+        max_entries: 16,
+        window: std::time::Duration::from_secs(60),
+        account_creations_global: 10,
+        account_creations_per_account: 2,
+        login_attempts_global: 3,
+        login_attempts_per_account: 1,
+    });
+    for email in ["login-alice@example.com", "login-bob@example.com"] {
+        let (_, registration, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/accounts",
+            None,
+            Some(json!({
+                "email": email,
+                "registration": serde_json::to_value(registration).unwrap()
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let wrong_secret = B64.encode([0u8; 32]);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": "login-alice@example.com",
+            "auth_secret": wrong_secret
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": "login-alice@example.com",
+            "auth_secret": wrong_secret
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": "login-bob@example.com",
+            "auth_secret": wrong_secret
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": "another-account@example.com",
+            "auth_secret": wrong_secret
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn authentication_rate_state_is_strictly_bounded() {
+    let app = server::app_in_memory_with_auth_rate_limits(server::AuthRateLimits {
+        max_entries: 2,
+        window: std::time::Duration::from_secs(60),
+        account_creations_global: 10,
+        account_creations_per_account: 10,
+        login_attempts_global: 10,
+        login_attempts_per_account: 10,
+    });
+    let (_, first, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "rate-capacity-first@example.com",
+            "registration": serde_json::to_value(first).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (_, second, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "rate-capacity-second@example.com",
+            "registration": serde_json::to_value(second).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/accounts/rate-capacity-second@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn rate_limiter_state_is_strictly_bounded_and_reclaims_expired_windows() {
     let unknown_id = data_encoding::BASE32_NOPAD.encode(&[0u8; 16]);
     let path = format!("/send/directory/{unknown_id}");
