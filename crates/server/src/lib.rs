@@ -38,6 +38,12 @@ const AUTH_SECRET_BYTES: usize = 32;
 const REGISTRATION_SALT_BYTES: usize = 16;
 const WRAPPED_KEY_NONCE_BYTES: usize = 24;
 const WRAPPED_KEY_CIPHERTEXT_BYTES: usize = 48;
+/// Per-account vault quotas. These bound SQLite growth, the in-memory cache,
+/// and the size of a full `/vault` response independently of request size.
+const MAX_VAULT_ITEMS: usize = 10_000;
+const MAX_VAULT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_VAULT_BLOB_BYTES: usize = 512 * 1024;
+const MAX_ITEM_ID_BYTES: usize = 256;
 /// Bastion Send: max stored blob size, per-recipient inbox cap, and per-account
 /// fixed-window rate limits (abuse controls — see docs/bastion-send-design.md §8).
 const MAX_SEND_BLOB: usize = 256 * 1024;
@@ -60,9 +66,9 @@ fn now_secs() -> i64 {
 /// (default `bastion.db` in the working directory).
 ///
 /// ⚠️ NON-PRODUCTION: this server still has NO TLS or CORS. The Bastion Send
-/// endpoints have per-account rate limits + inbox quotas + size caps; the
-/// account/vault endpoints still rely only on the body-size guardrail. Add
-/// TLS/CORS and broader rate limiting before deployment.
+/// endpoints have per-account rate limits + inbox quotas + size caps. Vault
+/// writes also have per-item, item-count, and aggregate encrypted-byte quotas.
+/// Add TLS/CORS and broader rate limiting before deployment.
 pub fn app() -> Router {
     let db_path = std::env::var("BASTION_DB").unwrap_or_else(|_| "bastion.db".to_string());
     build(DEFAULT_TOKEN_TTL, &db_path)
@@ -142,7 +148,10 @@ struct AccountRecord {
     /// Argon2id hash (PHC) of the authentication secret.
     auth_hash: String,
     items: HashMap<String, EncryptedBlob>,
+    item_bytes: HashMap<String, usize>,
     manifest: Option<EncryptedBlob>,
+    manifest_bytes: usize,
+    stored_bytes: usize,
 }
 
 impl AppState {
@@ -284,7 +293,10 @@ impl Db {
                         wrapped_vault_key,
                         auth_hash,
                         items: HashMap::new(),
+                        item_bytes: HashMap::new(),
                         manifest: None,
+                        manifest_bytes: 0,
+                        stored_bytes: 0,
                     },
                 );
             }
@@ -307,6 +319,22 @@ impl Db {
                         format!("orphaned item {id:?} for account {email:?}"),
                     )
                 })?;
+                if !is_valid_item_id(&id)
+                    || blob_s.len() > MAX_VAULT_BLOB_BYTES
+                    || acc.items.len() >= MAX_VAULT_ITEMS
+                    || acc
+                        .stored_bytes
+                        .checked_add(blob_s.len())
+                        .is_none_or(|total| total > MAX_VAULT_BYTES)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("vault quota exceeded for account {email:?}"),
+                    )
+                    .into());
+                }
+                acc.stored_bytes += blob_s.len();
+                acc.item_bytes.insert(id.clone(), blob_s.len());
                 acc.items.insert(id, blob);
             }
         }
@@ -323,6 +351,20 @@ impl Db {
                         format!("orphaned manifest for account {email:?}"),
                     )
                 })?;
+                if blob_s.len() > MAX_VAULT_BLOB_BYTES
+                    || acc
+                        .stored_bytes
+                        .checked_add(blob_s.len())
+                        .is_none_or(|total| total > MAX_VAULT_BYTES)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("vault quota exceeded for account {email:?}"),
+                    )
+                    .into());
+                }
+                acc.stored_bytes += blob_s.len();
+                acc.manifest_bytes = blob_s.len();
                 acc.manifest = Some(blob);
             }
         }
@@ -433,7 +475,10 @@ async fn create_account(
             wrapped_vault_key: req.registration.wrapped_vault_key,
             auth_hash,
             items: HashMap::new(),
+            item_bytes: HashMap::new(),
             manifest: None,
+            manifest_bytes: 0,
+            stored_bytes: 0,
         },
     );
     Ok(StatusCode::CREATED)
@@ -513,9 +558,13 @@ async fn put_item(
     Path(id): Path<String>,
     Json(body): Json<BlobBody>,
 ) -> Result<StatusCode, ApiError> {
+    validate_item_id(&id)?;
     let email = require_auth(&st, &headers)?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+    if blob_json.len() > MAX_VAULT_BLOB_BYTES {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "item too large"));
+    }
     // Keep persistence and the read cache in one ordered critical section. If
     // concurrent requests write the same id, the cache winner must be the same
     // request as the SQLite winner.
@@ -524,9 +573,28 @@ async fn put_item(
         .accounts
         .get_mut(&email)
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
+    let is_new = !acc.items.contains_key(&id);
+    if is_new && acc.items.len() >= MAX_VAULT_ITEMS {
+        return Err(ApiError(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "vault item quota exceeded",
+        ));
+    }
+    let previous_bytes = acc.item_bytes.get(&id).copied().unwrap_or(0);
+    let next_bytes = acc
+        .stored_bytes
+        .checked_sub(previous_bytes)
+        .and_then(|total| total.checked_add(blob_json.len()))
+        .filter(|total| *total <= MAX_VAULT_BYTES)
+        .ok_or(ApiError(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "vault storage quota exceeded",
+        ))?;
     st.db
         .put_item(&email, &id, &blob_json)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    acc.stored_bytes = next_bytes;
+    acc.item_bytes.insert(id.clone(), blob_json.len());
     acc.items.insert(id, body.blob);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -536,6 +604,7 @@ async fn delete_item(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    validate_item_id(&id)?;
     let email = require_auth(&st, &headers)?;
     let mut inner = st.write();
     let acc = inner
@@ -545,6 +614,9 @@ async fn delete_item(
     st.db
         .delete_item(&email, &id)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    if let Some(bytes) = acc.item_bytes.remove(&id) {
+        acc.stored_bytes = acc.stored_bytes.saturating_sub(bytes);
+    }
     acc.items.remove(&id);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -557,14 +629,31 @@ async fn put_manifest(
     let email = require_auth(&st, &headers)?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+    if blob_json.len() > MAX_VAULT_BLOB_BYTES {
+        return Err(ApiError(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "manifest too large",
+        ));
+    }
     let mut inner = st.write();
     let acc = inner
         .accounts
         .get_mut(&email)
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
+    let next_bytes = acc
+        .stored_bytes
+        .checked_sub(acc.manifest_bytes)
+        .and_then(|total| total.checked_add(blob_json.len()))
+        .filter(|total| *total <= MAX_VAULT_BYTES)
+        .ok_or(ApiError(
+            StatusCode::INSUFFICIENT_STORAGE,
+            "vault storage quota exceeded",
+        ))?;
     st.db
         .put_manifest(&email, &blob_json)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    acc.stored_bytes = next_bytes;
+    acc.manifest_bytes = blob_json.len();
     acc.manifest = Some(body.blob);
     Ok(StatusCode::NO_CONTENT)
 }
@@ -587,6 +676,22 @@ fn validate_account_id(email: &str) -> Result<(), ApiError> {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid account id"));
     }
     Ok(())
+}
+
+fn validate_item_id(id: &str) -> Result<(), ApiError> {
+    if !is_valid_item_id(id) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid item id"));
+    }
+    Ok(())
+}
+
+fn is_valid_item_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ITEM_ID_BYTES
+        && id.is_ascii()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b'/' | b'\\' | b'?' | b'#'))
 }
 
 fn is_exact_b64(value: &str, decoded_len: usize) -> bool {

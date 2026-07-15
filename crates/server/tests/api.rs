@@ -367,6 +367,54 @@ async fn bad_token_is_rejected() {
 }
 
 #[tokio::test]
+async fn rejects_invalid_item_ids_and_oversized_blobs() {
+    let app = server::app_in_memory();
+    let token = signup_login(&app, "quota@example.com").await;
+
+    let long_id = "a".repeat(257);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        &format!("/vault/items/{long_id}"),
+        Some(&token),
+        Some(json!({
+            "blob": { "v": 1, "nonce": B64.encode([0u8; 24]), "ct": "AA==" }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let oversized = "A".repeat(600 * 1024);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/items/oversized",
+        Some(&token),
+        Some(json!({
+            "blob": { "v": 1, "nonce": B64.encode([0u8; 24]), "ct": oversized }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let oversized_manifest = "A".repeat(600 * 1024);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/manifest",
+        Some(&token),
+        Some(json!({
+            "blob": { "v": 1, "nonce": B64.encode([0u8; 24]), "ct": oversized_manifest }
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    let (_, vault) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(vault["items"], json!({}));
+}
+
+#[tokio::test]
 async fn health_ok() {
     let app = server::app_in_memory();
     let (s, _) = send(&app, "GET", "/health", None, None).await;
