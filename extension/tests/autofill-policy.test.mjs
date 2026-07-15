@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { autofillPolicyError, credentialPageError } from "../lib/autofill-policy.js";
+import {
+  autofillPolicyError,
+  credentialPageError,
+  validatedAutofillTarget,
+} from "../lib/autofill-policy.js";
 
 const login = { type: "login", title: "Example", url: "https://accounts.example.com/login" };
 
@@ -40,4 +44,44 @@ test("rejects unrelated and non-login items", () => {
     /not saved/i
   );
   assert.match(autofillPolicyError({ type: "card" }, { id: 7, url: "https://example.com" }, 7), /only login/i);
+});
+
+test("binds credential injection to the exact validated top-level document", () => {
+  const target = validatedAutofillTarget(login, { id: 7 }, 7, [
+    { frameId: 0, documentId: "document-uuid", result: "https://www.example.com/sign-in" },
+  ]);
+
+  assert.deepEqual(target, { tabId: 7, documentIds: ["document-uuid"] });
+  assert.equal("frameIds" in target, false);
+});
+
+test("rejects a probe that navigated to an unrelated or insecure document", () => {
+  assert.throws(
+    () =>
+      validatedAutofillTarget(login, { id: 7 }, 7, [
+        { frameId: 0, documentId: "new-document", result: "https://attacker.example.net/login" },
+      ]),
+    /not saved/i
+  );
+  assert.throws(
+    () =>
+      validatedAutofillTarget(login, { id: 7 }, 7, [
+        { frameId: 0, documentId: "new-document", result: "http://example.com/login" },
+      ]),
+    /insecure HTTP/i
+  );
+});
+
+test("fails closed when Chrome cannot identify one top-level document", () => {
+  for (const results of [
+    [],
+    [{ frameId: 0, result: "https://example.com" }],
+    [{ frameId: 1, documentId: "child", result: "https://example.com" }],
+    [
+      { frameId: 0, documentId: "one", result: "https://example.com" },
+      { frameId: 1, documentId: "two", result: "https://example.com" },
+    ],
+  ]) {
+    assert.throws(() => validatedAutofillTarget(login, { id: 7 }, 7, results), /could not be verified/i);
+  }
 });
