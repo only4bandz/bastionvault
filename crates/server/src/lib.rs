@@ -23,6 +23,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +33,11 @@ use crypto_core::{EncryptedBlob, KdfParams, Registration};
 const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
 /// Maximum request body size (1 MiB) — guardrail against memory DoS.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_ACCOUNT_ID_BYTES: usize = 254;
+const AUTH_SECRET_BYTES: usize = 32;
+const REGISTRATION_SALT_BYTES: usize = 16;
+const WRAPPED_KEY_NONCE_BYTES: usize = 24;
+const WRAPPED_KEY_CIPHERTEXT_BYTES: usize = 48;
 /// Bastion Send: max stored blob size, per-recipient inbox cap, and per-account
 /// fixed-window rate limits (abuse controls — see docs/bastion-send-design.md §8).
 const MAX_SEND_BLOB: usize = 256 * 1024;
@@ -382,6 +388,8 @@ async fn create_account(
     State(st): State<AppState>,
     Json(req): Json<CreateAccount>,
 ) -> Result<StatusCode, ApiError> {
+    validate_account_id(&req.email)?;
+    validate_registration(&req.registration)?;
     // Reject a known duplicate before paying the Argon2 cost. The authoritative
     // collision check is repeated under the write lock after hashing.
     if st.read().accounts.contains_key(&req.email) {
@@ -435,6 +443,7 @@ async fn prelogin(
     State(st): State<AppState>,
     Path(email): Path<String>,
 ) -> Result<Json<Prelogin>, ApiError> {
+    validate_account_id(&email)?;
     let inner = st.read();
     let acc = inner
         .accounts
@@ -451,6 +460,10 @@ async fn create_session(
     State(st): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
+    validate_account_id(&req.email)?;
+    if !is_exact_b64(&req.auth_secret, AUTH_SECRET_BYTES) {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
+    }
     // We copy the hash, then release the lock before the slow verification.
     let phc = st
         .read()
@@ -557,6 +570,55 @@ async fn put_manifest(
 }
 
 // ─── Helpers ───
+
+fn validate_account_id(email: &str) -> Result<(), ApiError> {
+    let valid_shape = email.split_once('@').is_some_and(|(local, domain)| {
+        !local.is_empty() && !domain.is_empty() && !domain.contains('@')
+    });
+    if email.is_empty()
+        || email.len() > MAX_ACCOUNT_ID_BYTES
+        || !email.is_ascii()
+        || email.trim() != email
+        || email
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || !valid_shape
+    {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid account id"));
+    }
+    Ok(())
+}
+
+fn is_exact_b64(value: &str, decoded_len: usize) -> bool {
+    if value.len()
+        > decoded_len
+            .saturating_mul(4)
+            .saturating_div(3)
+            .saturating_add(8)
+    {
+        return false;
+    }
+    B64.decode(value)
+        .is_ok_and(|bytes| bytes.len() == decoded_len)
+}
+
+fn validate_registration(registration: &Registration) -> Result<(), ApiError> {
+    let wrapped = &registration.wrapped_vault_key;
+    let valid = registration.version == crypto_core::aead::FORMAT_VERSION
+        && registration.kdf.validate_for_new_vault().is_ok()
+        && is_exact_b64(&registration.salt, REGISTRATION_SALT_BYTES)
+        && is_exact_b64(registration.auth_secret.expose_b64(), AUTH_SECRET_BYTES)
+        && wrapped.v == crypto_core::aead::FORMAT_VERSION
+        && is_exact_b64(&wrapped.nonce, WRAPPED_KEY_NONCE_BYTES)
+        && is_exact_b64(&wrapped.ct, WRAPPED_KEY_CIPHERTEXT_BYTES);
+    if !valid {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid registration data",
+        ));
+    }
+    Ok(())
+}
 
 /// Revokes the current session (logout).
 async fn delete_session(
