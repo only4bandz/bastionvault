@@ -16,6 +16,7 @@ import {
   type PersistEncryptedItem,
 } from "../lib/send";
 import { IcCopy, IcShared, IcPlus, IcTrash, IcEdit } from "../components/icons";
+import { copyWithFeedback } from "../lib/clipboard";
 
 type View = "home" | "contacts" | "add" | "verify" | "compose" | "inbox";
 
@@ -185,10 +186,7 @@ export function Send({
                         <button
                           className="faint contact-addr mono"
                           aria-label={`Copy address for ${contactLabel(c)}`}
-                          onClick={() => {
-                            navigator.clipboard?.writeText(c.bastion_id);
-                            toast("Bastion address copied");
-                          }}
+                          onClick={() => void copyWithFeedback(c.bastion_id, "Bastion address", toast)}
                         >
                           {shortId(c.bastion_id)}
                         </button>
@@ -301,10 +299,7 @@ export function Send({
           <button
             className="icon-btn"
             aria-label="Copy your Bastion address"
-            onClick={() => {
-              navigator.clipboard?.writeText(bastionId!);
-              toast("Bastion address copied");
-            }}
+            onClick={() => void copyWithFeedback(bastionId!, "Bastion address", toast)}
           >
             <IcCopy size={16} />
           </button>

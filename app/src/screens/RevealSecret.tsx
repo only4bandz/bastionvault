@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
 import { IcCopy } from "../components/icons";
+import { copyWithFeedback } from "../lib/clipboard";
 import type { Account, RevealedSecret } from "../lib/wasm";
 
 export function RevealSecret({
@@ -34,10 +35,7 @@ export function RevealSecret({
   }, [account]);
 
   function copy() {
-    if (data) {
-      navigator.clipboard?.writeText(data.secret_key);
-      toast("Secret Key copied");
-    }
+    if (data) void copyWithFeedback(data.secret_key, "Secret Key", toast);
   }
 
   async function finish() {
