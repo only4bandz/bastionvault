@@ -86,7 +86,6 @@ fn build(token_ttl: Duration, db_path: &str) -> Router {
         .route("/vault", get(get_vault))
         .route("/vault/items/:id", put(put_item).delete(delete_item))
         .route("/vault/manifest", put(put_manifest))
-        .route("/bin/:bin", get(get_bin))
         // ── Bastion Send ──
         .route("/send/identity", put(publish_identity))
         .route("/send/whoami", get(send_whoami))
@@ -186,8 +185,6 @@ impl Db {
                PRIMARY KEY(email, id));
              CREATE TABLE IF NOT EXISTS manifests(
                email TEXT PRIMARY KEY, blob TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS bins(
-               bin TEXT PRIMARY KEY, scheme TEXT, bank_name TEXT);
              CREATE TABLE IF NOT EXISTS send_directory(
                email TEXT PRIMARY KEY, bastion_id TEXT UNIQUE NOT NULL,
                public TEXT NOT NULL, created_at INTEGER NOT NULL);
@@ -198,8 +195,6 @@ impl Db {
              CREATE INDEX IF NOT EXISTS idx_inbox_recipient ON send_inbox(recipient_id);",
         )
         .expect("init schema");
-        // Add the debit/credit column to pre-existing bin caches (no-op if present).
-        let _ = conn.execute("ALTER TABLE bins ADD COLUMN card_type TEXT", []);
         Self {
             conn: Arc::new(Mutex::new(conn)),
         }
@@ -247,32 +242,6 @@ impl Db {
         self.lock().execute(
             "INSERT OR REPLACE INTO manifests(email,blob) VALUES(?1,?2)",
             params![email, blob_json],
-        )?;
-        Ok(())
-    }
-
-    fn get_bin(&self, bin: &str) -> Option<BinInfo> {
-        self.lock()
-            .query_row(
-                "SELECT scheme,bank_name,card_type FROM bins WHERE bin=?1",
-                params![bin],
-                |r| {
-                    Ok(BinInfo {
-                        scheme: r.get::<_, Option<String>>(0)?,
-                        bank_name: r.get::<_, Option<String>>(1)?,
-                        card_type: r.get::<_, Option<String>>(2)?,
-                    })
-                },
-            )
-            .optional()
-            .ok()
-            .flatten()
-    }
-
-    fn put_bin(&self, bin: &str, info: &BinInfo) -> rusqlite::Result<()> {
-        self.lock().execute(
-            "INSERT OR REPLACE INTO bins(bin,scheme,bank_name,card_type) VALUES(?1,?2,?3,?4)",
-            params![bin, info.scheme, info.bank_name, info.card_type],
         )?;
         Ok(())
     }
@@ -403,15 +372,6 @@ struct VaultResponse {
 #[derive(Deserialize)]
 struct BlobBody {
     blob: EncryptedBlob,
-}
-
-/// Issuing-bank info for a card BIN (network + bank name + debit/credit).
-/// Never the full card.
-#[derive(Serialize, Clone, Default)]
-struct BinInfo {
-    scheme: Option<String>,
-    bank_name: Option<String>,
-    card_type: Option<String>, // "debit" | "credit"
 }
 
 // ─── Handlers ───
@@ -596,51 +556,6 @@ async fn put_manifest(
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
     acc.manifest = Some(body.blob);
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Resolves a card BIN to its network + issuing bank, cached in SQLite so any
-/// given BIN hits the upstream service at most once. Unauthenticated — BIN data
-/// is not secret, and only the BIN (never the full card) is involved.
-async fn get_bin(State(st): State<AppState>, Path(bin): Path<String>) -> Json<BinInfo> {
-    let bin: String = bin.chars().filter(|c| c.is_ascii_digit()).take(8).collect();
-    if bin.len() < 6 {
-        return Json(BinInfo::default());
-    }
-    if let Some(info) = st.db.get_bin(&bin) {
-        return Json(info);
-    }
-    match fetch_binlist(&bin).await {
-        Some(info) => {
-            let _ = st.db.put_bin(&bin, &info);
-            Json(info)
-        }
-        // Don't cache failures (e.g. upstream rate limit) — retry next time.
-        None => Json(BinInfo::default()),
-    }
-}
-
-/// Best-effort upstream BIN lookup (binlist). Returns `None` on any non-success.
-async fn fetch_binlist(bin: &str) -> Option<BinInfo> {
-    let url = format!("https://lookup.binlist.net/{bin}");
-    let resp = reqwest::Client::new()
-        .get(&url)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let j: serde_json::Value = resp.json().await.ok()?;
-    Some(BinInfo {
-        scheme: j.get("scheme").and_then(|v| v.as_str()).map(String::from),
-        bank_name: j
-            .get("bank")
-            .and_then(|b| b.get("name"))
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        card_type: j.get("type").and_then(|v| v.as_str()).map(String::from),
-    })
 }
 
 // ─── Helpers ───

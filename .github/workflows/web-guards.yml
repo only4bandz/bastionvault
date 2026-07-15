@@ -16,3 +16,5 @@ jobs:
       - uses: actions/checkout@v4
       - name: Forbid browser-side secret storage in web/
         run: bash scripts/check-no-browser-secret-storage.sh
+      - name: Forbid vault metadata egress
+        run: bash scripts/check-no-vault-metadata-egress.sh
