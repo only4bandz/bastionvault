@@ -14,6 +14,7 @@ import {
 } from "./lib/api";
 import { SEND_CONTACTS_ID, SEND_IDENTITY_ID, loadContacts, type Contact } from "./lib/send";
 import type { VaultItem } from "./lib/types";
+import type { ImportOutcome, ImportProgress, ImportResult } from "./lib/import";
 import {
   completeBootstrap,
   completeVaultMutation,
@@ -473,15 +474,20 @@ export default function App(): JSX.Element {
 
   // ── bulk import (CSV): expose only items confirmed by the server ──
   const importItems = useCallback(
-    async ({ items: imported }: { items: VaultItem[] }) => {
-      if (imported.length === 0) return;
+    async (
+      { items: imported }: ImportResult,
+      onProgress: ImportProgress = () => {}
+    ): Promise<ImportOutcome> => {
+      const deduplicated = [...new Map(imported.map((item) => [item.id, item])).values()];
+      const requested = deduplicated.length;
+      onProgress(0, requested);
+      if (requested === 0) return { requested, imported: 0 };
       if (!account || !token) {
         toast("Vault is locked — nothing was imported");
-        return;
+        return { requested, imported: 0 };
       }
-      toast(`Importing ${imported.length} items…`);
+      toast(`Importing ${requested} items…`);
       const epoch = sessionEpoch.current;
-      const deduplicated = [...new Map(imported.map((item) => [item.id, item])).values()];
       const persisted: VaultItem[] = [];
       // The server reserves room for a complete maximum-size manifest plus
       // three maximum-size item blobs. Keep imports within that deterministic
@@ -496,21 +502,24 @@ export default function App(): JSX.Element {
           }));
           await commitVaultOperations(operations);
           persisted.push(...batch);
+          onProgress(persisted.length, requested);
         } catch {
           break;
         }
       }
-      if (sessionEpoch.current !== epoch) return;
+      const outcome = { requested, imported: persisted.length };
+      if (sessionEpoch.current !== epoch) return outcome;
       setItems((prev) => {
         const next = new Map(prev.map((item) => [item.id, item]));
         persisted.forEach((item) => next.set(item.id, item));
         return [...next.values()].sort((a, b) => b.updatedAt - a.updatedAt);
       });
       toast(
-        persisted.length === deduplicated.length
+        persisted.length === requested
           ? `Imported ${persisted.length} items`
-          : `Imported ${persisted.length}/${deduplicated.length} (remaining items were not added)`
+          : `Imported ${persisted.length}/${requested} (remaining items were not added)`
       );
+      return outcome;
     },
     [account, commitVaultOperations, token, toast]
   );

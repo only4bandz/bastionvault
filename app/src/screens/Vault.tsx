@@ -13,7 +13,7 @@ import {
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { strength } from "../lib/generator";
 import { lookupBin } from "../lib/bin";
-import type { ImportResult } from "../lib/import";
+import type { ImportOutcome, ImportProgress, ImportResult } from "../lib/import";
 import type { Account } from "../lib/wasm";
 import type { Contact } from "../lib/send";
 import type { Blob } from "../lib/api";
@@ -92,7 +92,7 @@ export function Vault({
   persistEncryptedItem: (id: string, blob: Blob) => Promise<void>;
   onUpsert: (i: VaultItem) => Promise<boolean>;
   onDelete: (id: string) => Promise<boolean>;
-  onImport: (r: ImportResult) => Promise<void>;
+  onImport: (r: ImportResult, onProgress: ImportProgress) => Promise<ImportOutcome>;
   onLock: () => void;
   toast: (m: string) => void;
 }): JSX.Element {
@@ -520,11 +520,11 @@ export function Vault({
       {importing && (
         <ImportModal
           onClose={() => setImporting(false)}
-          onImport={(r) => {
-            void onImport(r);
-            setImporting(false);
+          onImport={async (result, onProgress) => {
+            const outcome = await onImport(result, onProgress);
             setNav("vault");
             setTab("all");
+            return outcome;
           }}
         />
       )}
