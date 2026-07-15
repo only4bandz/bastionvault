@@ -60,6 +60,11 @@ const MAX_ITEM_ID_BYTES: usize = 256;
 const MAX_CONCURRENT_AUTH: usize = 4;
 const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 const MAX_ACTIVE_SESSIONS: usize = 100_000;
+const MAX_AUTH_RATE_ENTRIES: usize = 10_000;
+const MAX_ACCOUNT_CREATIONS_GLOBAL_PER_MIN: u32 = 20;
+const MAX_ACCOUNT_CREATIONS_PER_ACCOUNT_PER_MIN: u32 = 2;
+const MAX_LOGIN_ATTEMPTS_GLOBAL_PER_MIN: u32 = 120;
+const MAX_LOGIN_ATTEMPTS_PER_ACCOUNT_PER_MIN: u32 = 10;
 /// Bastion Send: max stored blob size, per-recipient inbox cap, and per-account
 /// fixed-window rate limits (abuse controls — see docs/bastion-send-design.md §8).
 const MAX_SEND_BLOB: usize = 256 * 1024;
@@ -149,6 +154,44 @@ pub fn app_in_memory_with_rate_limits(max_entries: usize, window: Duration) -> R
         MAX_CONCURRENT_AUTH,
         max_entries,
         window,
+        AuthRateLimits::default(),
+    )
+}
+
+/// Authentication rate policy override used by deterministic integration
+/// tests and embedders that need stricter process-local limits.
+#[derive(Clone, Copy, Debug)]
+pub struct AuthRateLimits {
+    pub max_entries: usize,
+    pub window: Duration,
+    pub account_creations_global: u32,
+    pub account_creations_per_account: u32,
+    pub login_attempts_global: u32,
+    pub login_attempts_per_account: u32,
+}
+
+impl Default for AuthRateLimits {
+    fn default() -> Self {
+        Self {
+            max_entries: MAX_AUTH_RATE_ENTRIES,
+            window: RATE_WINDOW,
+            account_creations_global: MAX_ACCOUNT_CREATIONS_GLOBAL_PER_MIN,
+            account_creations_per_account: MAX_ACCOUNT_CREATIONS_PER_ACCOUNT_PER_MIN,
+            login_attempts_global: MAX_LOGIN_ATTEMPTS_GLOBAL_PER_MIN,
+            login_attempts_per_account: MAX_LOGIN_ATTEMPTS_PER_ACCOUNT_PER_MIN,
+        }
+    }
+}
+
+/// In-memory variant with an explicit authentication rate policy.
+pub fn app_in_memory_with_auth_rate_limits(limits: AuthRateLimits) -> Router {
+    build_with_rate_limits(
+        DEFAULT_TOKEN_TTL,
+        ":memory:",
+        MAX_CONCURRENT_AUTH,
+        MAX_RATE_ENTRIES,
+        RATE_WINDOW,
+        limits,
     )
 }
 
@@ -159,6 +202,7 @@ fn build(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Router {
         auth_limit,
         MAX_RATE_ENTRIES,
         RATE_WINDOW,
+        AuthRateLimits::default(),
     )
 }
 
@@ -168,6 +212,7 @@ fn build_with_rate_limits(
     auth_limit: usize,
     max_rate_entries: usize,
     rate_window: Duration,
+    auth_rate_limits: AuthRateLimits,
 ) -> Router {
     let state = AppState::new(
         token_ttl,
@@ -175,6 +220,7 @@ fn build_with_rate_limits(
         auth_limit,
         max_rate_entries,
         rate_window,
+        auth_rate_limits,
     );
     let transaction_route = put(apply_vault_transaction)
         .layer(DefaultBodyLimit::max(MAX_VAULT_TRANSACTION_BODY_BYTES))
@@ -215,12 +261,14 @@ struct AppState {
     auth_slots: Arc<Semaphore>,
     max_rate_entries: usize,
     rate_window: Duration,
+    auth_rate_limits: AuthRateLimits,
 }
 
 struct Inner {
     accounts: HashMap<String, AccountRecord>, // email -> account
     sessions: HashMap<String, Session>,       // token -> session
     rate: HashMap<String, RateState>,         // "email:bucket" -> fixed-window counter
+    auth_rate: HashMap<String, RateState>,    // pre-Argon2 account/global counters
 }
 
 /// Fixed-window rate counter.
@@ -258,6 +306,7 @@ impl AppState {
         auth_limit: usize,
         max_rate_entries: usize,
         rate_window: Duration,
+        auth_rate_limits: AuthRateLimits,
     ) -> Self {
         let db = Db::open(db_path);
         let accounts = db.load_accounts().expect("load persisted vault state");
@@ -266,12 +315,14 @@ impl AppState {
                 accounts,
                 sessions: HashMap::new(),
                 rate: HashMap::new(),
+                auth_rate: HashMap::new(),
             })),
             db,
             token_ttl,
             auth_slots: Arc::new(Semaphore::new(auth_limit)),
             max_rate_entries,
             rate_window,
+            auth_rate_limits,
         }
     }
 
@@ -634,6 +685,18 @@ async fn create_account(
 ) -> Result<StatusCode, ApiError> {
     validate_account_id(&req.email)?;
     validate_registration(&req.registration)?;
+    auth_rate_limit(
+        &st,
+        "global",
+        "account-create-global",
+        st.auth_rate_limits.account_creations_global,
+    )?;
+    auth_rate_limit(
+        &st,
+        &req.email,
+        "account-create-account",
+        st.auth_rate_limits.account_creations_per_account,
+    )?;
     // Reject a known duplicate before paying the Argon2 cost. The authoritative
     // collision check is repeated under the write lock after hashing.
     if st.read().accounts.contains_key(&req.email) {
@@ -716,6 +779,18 @@ async fn create_session(
     if !is_exact_b64(&req.auth_secret, AUTH_SECRET_BYTES) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
+    auth_rate_limit(
+        &st,
+        "global",
+        "login-global",
+        st.auth_rate_limits.login_attempts_global,
+    )?;
+    auth_rate_limit(
+        &st,
+        &req.email,
+        "login-account",
+        st.auth_rate_limits.login_attempts_per_account,
+    )?;
     // We copy the hash, then release the lock before the slow verification.
     let phc = st
         .read()
@@ -1364,19 +1439,24 @@ fn new_bastion_id() -> String {
     data_encoding::BASE32_NOPAD.encode(&bytes)
 }
 
-/// Fixed-window per-key rate limit. `bucket` separates send, inbound, and
-/// lookup counters. New keys are rejected when the strictly bounded state map
-/// is full and no expired window can be reclaimed.
-fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
+/// Fixed-window per-key rate limit. New keys are rejected when the strictly
+/// bounded state map is full and no expired window can be reclaimed.
+fn rate_limit_map(
+    rate: &mut HashMap<String, RateState>,
+    max_entries: usize,
+    window: Duration,
+    subject: &str,
+    bucket: &str,
+    max: u32,
+) -> Result<(), ApiError> {
     if max == 0 {
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
-    let key = format!("{subject}:{bucket}");
-    let mut inner = st.write();
+    let key = format!("{bucket}\0{subject}");
     let now = Instant::now();
 
-    if let Some(entry) = inner.rate.get_mut(&key) {
-        if now.saturating_duration_since(entry.window_start) >= st.rate_window {
+    if let Some(entry) = rate.get_mut(&key) {
+        if now.saturating_duration_since(entry.window_start) >= window {
             entry.window_start = now;
             entry.count = 0;
         }
@@ -1387,20 +1467,18 @@ fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<()
         return Ok(());
     }
 
-    if inner.rate.len() >= st.max_rate_entries {
-        inner
-            .rate
-            .retain(|_, entry| now.saturating_duration_since(entry.window_start) < st.rate_window);
+    if rate.len() >= max_entries {
+        rate.retain(|_, entry| now.saturating_duration_since(entry.window_start) < window);
     }
 
-    if inner.rate.len() >= st.max_rate_entries {
+    if rate.len() >= max_entries {
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "rate limiter capacity reached",
         ));
     }
 
-    inner.rate.insert(
+    rate.insert(
         key,
         RateState {
             window_start: now,
@@ -1408,6 +1486,32 @@ fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<()
         },
     );
     Ok(())
+}
+
+/// Send abuse limits are kept separate from unauthenticated auth limits so an
+/// attacker cannot consume one subsystem's counter capacity through the other.
+fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
+    let mut inner = st.write();
+    rate_limit_map(
+        &mut inner.rate,
+        st.max_rate_entries,
+        st.rate_window,
+        subject,
+        bucket,
+        max,
+    )
+}
+
+fn auth_rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
+    let mut inner = st.write();
+    rate_limit_map(
+        &mut inner.auth_rate,
+        st.auth_rate_limits.max_entries,
+        st.auth_rate_limits.window,
+        subject,
+        bucket,
+        max,
+    )
 }
 
 impl Db {
