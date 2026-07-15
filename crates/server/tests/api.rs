@@ -242,6 +242,80 @@ async fn rejects_malformed_login_credentials_without_hashing() {
 }
 
 #[tokio::test]
+async fn rejects_authentication_work_when_capacity_is_exhausted() {
+    let app = server::app_in_memory_with_auth_limit(0);
+    let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "busy@example.com",
+            "registration": serde_json::to_value(&reg).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/accounts/busy@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn caps_active_sessions_per_account_by_revoking_the_oldest() {
+    let app = server::app_in_memory();
+    let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let auth = reg.auth_secret.expose_b64().to_string();
+    let email = "session-cap@example.com";
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": email,
+            "registration": serde_json::to_value(&reg).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut tokens = Vec::new();
+    for _ in 0..9 {
+        let (status, login) = send(
+            &app,
+            "POST",
+            "/sessions",
+            None,
+            Some(json!({ "email": email, "auth_secret": auth })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        tokens.push(login["token"].as_str().unwrap().to_string());
+    }
+
+    let (status, _) = send(&app, "GET", "/vault", Some(&tokens[0]), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/vault",
+        tokens.last().map(String::as_str),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn concurrent_registration_never_replaces_account_credentials() {
     let app = server::app_in_memory();
     let email = "registration-race@example.com";

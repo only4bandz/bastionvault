@@ -26,6 +26,7 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crypto_core::{EncryptedBlob, KdfParams, Registration};
 
@@ -44,6 +45,9 @@ const MAX_VAULT_ITEMS: usize = 10_000;
 const MAX_VAULT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VAULT_BLOB_BYTES: usize = 512 * 1024;
 const MAX_ITEM_ID_BYTES: usize = 256;
+const MAX_CONCURRENT_AUTH: usize = 4;
+const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
+const MAX_ACTIVE_SESSIONS: usize = 100_000;
 /// Bastion Send: max stored blob size, per-recipient inbox cap, and per-account
 /// fixed-window rate limits (abuse controls — see docs/bastion-send-design.md §8).
 const MAX_SEND_BLOB: usize = 256 * 1024;
@@ -71,26 +75,32 @@ fn now_secs() -> i64 {
 /// Add TLS/CORS and broader rate limiting before deployment.
 pub fn app() -> Router {
     let db_path = std::env::var("BASTION_DB").unwrap_or_else(|_| "bastion.db".to_string());
-    build(DEFAULT_TOKEN_TTL, &db_path)
+    build(DEFAULT_TOKEN_TTL, &db_path, MAX_CONCURRENT_AUTH)
 }
 
 /// Variant with an explicit SQLite path (used to test persistence).
 pub fn app_with_db(db_path: &str) -> Router {
-    build(DEFAULT_TOKEN_TTL, db_path)
+    build(DEFAULT_TOKEN_TTL, db_path, MAX_CONCURRENT_AUTH)
 }
 
 /// In-memory (non-persistent) variant — used by tests for isolation.
 pub fn app_in_memory() -> Router {
-    build(DEFAULT_TOKEN_TTL, ":memory:")
+    build(DEFAULT_TOKEN_TTL, ":memory:", MAX_CONCURRENT_AUTH)
 }
 
 /// In-memory variant with an explicit TTL (tests for token expiration).
 pub fn app_in_memory_with_ttl(token_ttl: Duration) -> Router {
-    build(token_ttl, ":memory:")
+    build(token_ttl, ":memory:", MAX_CONCURRENT_AUTH)
 }
 
-fn build(token_ttl: Duration, db_path: &str) -> Router {
-    let state = AppState::new(token_ttl, db_path);
+/// In-memory variant with an explicit authentication concurrency limit. A zero
+/// limit is useful for deterministic overload tests.
+pub fn app_in_memory_with_auth_limit(auth_limit: usize) -> Router {
+    build(DEFAULT_TOKEN_TTL, ":memory:", auth_limit)
+}
+
+fn build(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Router {
+    let state = AppState::new(token_ttl, db_path, auth_limit);
     Router::new()
         .route("/health", get(health))
         .route("/accounts", post(create_account))
@@ -120,6 +130,7 @@ struct AppState {
     inner: Arc<RwLock<Inner>>,
     db: Db,
     token_ttl: Duration,
+    auth_slots: Arc<Semaphore>,
 }
 
 struct Inner {
@@ -137,6 +148,7 @@ struct RateState {
 /// Active session: the token's owner and its expiration instant.
 struct Session {
     email: String,
+    created_at: Instant,
     expires_at: Instant,
 }
 
@@ -155,7 +167,7 @@ struct AccountRecord {
 }
 
 impl AppState {
-    fn new(token_ttl: Duration, db_path: &str) -> Self {
+    fn new(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Self {
         let db = Db::open(db_path);
         let accounts = db.load_accounts().expect("load persisted vault state");
         Self {
@@ -166,6 +178,7 @@ impl AppState {
             })),
             db,
             token_ttl,
+            auth_slots: Arc::new(Semaphore::new(auth_limit)),
         }
     }
 
@@ -439,10 +452,14 @@ async fn create_account(
     }
     // Slow hash on a dedicated blocking thread (no starvation of the async runtime).
     let secret = req.registration.auth_secret.expose_b64().to_string();
-    let auth_hash = tokio::task::spawn_blocking(move || hash_secret(&secret))
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "hash failure"))?;
+    let permit = auth_permit(&st)?;
+    let auth_hash = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        hash_secret(&secret)
+    })
+    .await
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "hash failure"))?;
 
     let kdf_json = serde_json::to_string(&req.registration.kdf)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
@@ -518,18 +535,51 @@ async fn create_session(
     // Same response for "unknown account" and "wrong secret".
     let phc = phc.ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"))?;
     let secret = req.auth_secret.clone();
-    let ok = tokio::task::spawn_blocking(move || verify_secret(&secret, &phc))
-        .await
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?;
+    let permit = auth_permit(&st)?;
+    let ok = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify_secret(&secret, &phc)
+    })
+    .await
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?;
     if !ok {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
-    let token = new_token();
-    let expires_at = Instant::now() + st.token_ttl;
-    st.write().sessions.insert(
+    let now = Instant::now();
+    let expires_at = now + st.token_ttl;
+    let mut inner = st.write();
+    inner.sessions.retain(|_, session| now < session.expires_at);
+    let oldest = inner
+        .sessions
+        .iter()
+        .filter(|(_, session)| session.email == req.email)
+        .min_by_key(|(_, session)| session.created_at)
+        .map(|(token, _)| token.clone());
+    let account_sessions = inner
+        .sessions
+        .values()
+        .filter(|session| session.email == req.email)
+        .count();
+    if account_sessions >= MAX_SESSIONS_PER_ACCOUNT {
+        if let Some(token) = oldest {
+            inner.sessions.remove(&token);
+        }
+    }
+    if inner.sessions.len() >= MAX_ACTIVE_SESSIONS {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session capacity reached",
+        ));
+    }
+    let mut token = new_token();
+    while inner.sessions.contains_key(&token) {
+        token = new_token();
+    }
+    inner.sessions.insert(
         token.clone(),
         Session {
             email: req.email,
+            created_at: now,
             expires_at,
         },
     );
@@ -676,6 +726,13 @@ fn validate_account_id(email: &str) -> Result<(), ApiError> {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid account id"));
     }
     Ok(())
+}
+
+fn auth_permit(st: &AppState) -> Result<OwnedSemaphorePermit, ApiError> {
+    st.auth_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError(StatusCode::TOO_MANY_REQUESTS, "authentication busy"))
 }
 
 fn validate_item_id(id: &str) -> Result<(), ApiError> {
