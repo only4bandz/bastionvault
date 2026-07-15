@@ -136,12 +136,20 @@ export function Vault({
   return (
     <div className="shell">
       {/* ── Sidebar ── */}
-      <aside className="sidebar">
+      <aside className="sidebar" aria-label="Vault navigation">
         <Brand size={30} />
-        <button className={`nav-item${nav === "vault" ? " active" : ""}`} onClick={() => go("vault")}>
+        <button
+          className={`nav-item${nav === "vault" ? " active" : ""}`}
+          aria-current={nav === "vault" ? "page" : undefined}
+          onClick={() => go("vault")}
+        >
           <span className="ico"><IcVault /></span> Vault
         </button>
-        <button className={`nav-item${nav === "send" ? " active" : ""}`} onClick={() => go("send")}>
+        <button
+          className={`nav-item${nav === "send" ? " active" : ""}`}
+          aria-current={nav === "send" ? "page" : undefined}
+          onClick={() => go("send")}
+        >
           <span className="ico"><IcShared /></span> Send
         </button>
         <button className="nav-item" onClick={() => go("soon", "Trash")}>
@@ -155,10 +163,18 @@ export function Vault({
 
         <div className="nav-sep" />
         <div className="nav-label">Tools</div>
-        <button className={`nav-item${nav === "generator" ? " active" : ""}`} onClick={() => go("generator")}>
+        <button
+          className={`nav-item${nav === "generator" ? " active" : ""}`}
+          aria-current={nav === "generator" ? "page" : undefined}
+          onClick={() => go("generator")}
+        >
           <span className="ico"><IcGen /></span> Password Generator
         </button>
-        <button className={`nav-item${nav === "health" ? " active" : ""}`} onClick={() => go("health")}>
+        <button
+          className={`nav-item${nav === "health" ? " active" : ""}`}
+          aria-current={nav === "health" ? "page" : undefined}
+          onClick={() => go("health")}
+        >
           <span className="ico"><IcHealth /></span> Password Health
         </button>
         <button className="nav-item" onClick={() => go("soon", "Email Masking")}>
@@ -178,20 +194,20 @@ export function Vault({
 
       {/* ── Main ── */}
       <div className="main">
-        <div className="topbar">
+        <header className="topbar">
           <div className="search">
             <IcSearch size={17} />
-            <input placeholder="Search all items" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <input aria-label="Search vault items" placeholder="Search all items" value={query} onChange={(e) => setQuery(e.target.value)} />
             <span className="kbd">Ctrl F</span>
           </div>
           <div className="topbar-right">
             <span className="pill">🔒 Zero-knowledge</span>
             <span className="faint" style={{ fontSize: 13 }}>{email}</span>
-            <div className="avatar" title={email}>{(email[0] || "B").toUpperCase()}</div>
+            <div className="avatar" aria-hidden="true">{(email[0] || "B").toUpperCase()}</div>
           </div>
-        </div>
+        </header>
 
-        <div className="content">
+        <main className="content">
           {nav === "vault" && (
             <>
               <div className="page-head">
@@ -206,10 +222,15 @@ export function Vault({
                 </div>
               </div>
 
-              <div className="tabs">
+              <div className="tabs" aria-label="Vault item type">
                 {([["all", "All Items"], ["login", "Passwords"], ["note", "Secure Notes"], ["card", "Credit Cards"]] as [typeof tab, string][]).map(
                   ([t, label]) => (
-                    <button key={t} className={`tab${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>
+                    <button
+                      key={t}
+                      className={`tab${tab === t ? " active" : ""}`}
+                      aria-pressed={tab === t}
+                      onClick={() => setTab(t)}
+                    >
                       {label} <span className="faint">{counts[t]}</span>
                     </button>
                   )
@@ -226,30 +247,36 @@ export function Vault({
                 <div className="list">
                   <div className="list-head"><span>Title</span><span>Last updated</span><span style={{ textAlign: "right" }}>Type</span></div>
                   {paged.map((i) => (
-                    <div className="row" key={i.id} onClick={() => setDetail(i)}>
-                      <div className="title">
-                        <Favicon item={i} size={36} />
-                        <div style={{ minWidth: 0 }}>
-                          <div className="ttl">{i.title}</div>
-                          <div className="sub">
-                            {i.type === "login" ? (
-                              i.username || i.url || "—"
-                            ) : i.type === "card" ? (
-                              <CardSubtitle item={i} />
-                            ) : (
-                              TYPE_LABEL[i.type]
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="when">{timeAgo(i.updatedAt)}</div>
+                    <div className="row" key={i.id}>
+                      <button
+                        className="row-open"
+                        aria-label={`Open ${i.title}`}
+                        onClick={() => setDetail(i)}
+                      >
+                        <span className="title">
+                          <Favicon item={i} size={36} />
+                          <span style={{ minWidth: 0 }}>
+                            <span className="ttl">{i.title}</span>
+                            <span className="sub">
+                              {i.type === "login" ? (
+                                i.username || i.url || "—"
+                              ) : i.type === "card" ? (
+                                <CardSubtitle item={i} />
+                              ) : (
+                                TYPE_LABEL[i.type]
+                              )}
+                            </span>
+                          </span>
+                        </span>
+                        <span className="when">{timeAgo(i.updatedAt)}</span>
+                      </button>
                       <div className="actions">
                         {i.type === "login" && i.password && (
-                          <button className="icon-btn" title="Copy password" onClick={(e) => { e.stopPropagation(); copy(i.password!, "Password"); }}>
+                          <button className="icon-btn" aria-label={`Copy password for ${i.title}`} onClick={() => copy(i.password!, "Password")}>
                             <IcCopy size={16} />
                           </button>
                         )}
-                        <button className="icon-btn" title="Edit" onClick={(e) => { e.stopPropagation(); setEditor(i); }}>
+                        <button className="icon-btn" aria-label={`Edit ${i.title}`} onClick={() => setEditor(i)}>
                           <IcEdit size={16} />
                         </button>
                       </div>
@@ -269,7 +296,15 @@ export function Vault({
                       p === "…" ? (
                         <span key={`e${idx}`} className="pg-gap">…</span>
                       ) : (
-                        <button key={p} className={`pg${p === safePage ? " active" : ""}`} onClick={() => setPage(p)}>{p}</button>
+                        <button
+                          key={p}
+                          className={`pg${p === safePage ? " active" : ""}`}
+                          aria-label={`Page ${p}`}
+                          aria-current={p === safePage ? "page" : undefined}
+                          onClick={() => setPage(p)}
+                        >
+                          {p}
+                        </button>
                       )
                     )}
                     <button className="pg" disabled={safePage === pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button>
@@ -307,7 +342,7 @@ export function Vault({
               <div style={{ marginTop: 6 }}>Coming soon.</div>
             </div>
           )}
-        </div>
+        </main>
       </div>
 
       {editor && (
@@ -409,9 +444,16 @@ function ItemDetailView({
               <span className="k">{k}</span>
               <span className="v mono">{secret && !reveal ? "•".repeat(Math.min(14, (v || "").length)) : v}</span>
               {secret && (
-                <button className="icon-btn" title="Reveal" onClick={() => setReveal((r) => !r)}><IcEye size={16} /></button>
+                <button
+                  className="icon-btn"
+                  aria-label={`${reveal ? "Hide" : "Reveal"} ${k.toLowerCase()}`}
+                  aria-pressed={reveal}
+                  onClick={() => setReveal((r) => !r)}
+                >
+                  <IcEye size={16} />
+                </button>
               )}
-              <button className="icon-btn" title="Copy" onClick={() => copy(v!, k)}><IcCopy size={16} /></button>
+              <button className="icon-btn" aria-label={`Copy ${k.toLowerCase()}`} onClick={() => copy(v!, k)}><IcCopy size={16} /></button>
             </div>
           ))}
           {item.notes && (
@@ -438,11 +480,11 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
       <div className="card-section" style={{ maxWidth: 640, marginBottom: 16 }}>
         <div style={{ fontWeight: 700, marginBottom: 10, color }}>{title} · {list.length}</div>
         {list.map((i) => (
-          <div className="row-copy" key={i.id} style={{ cursor: "pointer" }} onClick={() => onOpen(i)}>
+          <button className="row-copy health-row" key={i.id} onClick={() => onOpen(i)}>
             <Favicon item={i} size={28} />
             <span className="v">{i.title}</span>
             <span className="faint" style={{ fontSize: 12 }}>{i.username}</span>
-          </div>
+          </button>
         ))}
       </div>
     );

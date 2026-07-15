@@ -128,7 +128,7 @@ export function Send({
           <button className="btn btn-primary" disabled={busy} onClick={enable}>
             {busy ? "Working…" : enabled ? "Publish my address" : "Enable Send"}
           </button>
-          {error && <div className="callout" style={{ marginTop: 12 }}>{error}</div>}
+          {error && <div className="callout" role="alert" style={{ marginTop: 12 }}>{error}</div>}
         </div>
       </>
     );
@@ -182,26 +182,26 @@ export function Send({
                     ) : (
                       <>
                         <div className="contact-name">{contactLabel(c)}</div>
-                        <code
-                          className="faint contact-addr"
-                          title="Copy full address"
+                        <button
+                          className="faint contact-addr mono"
+                          aria-label={`Copy address for ${contactLabel(c)}`}
                           onClick={() => {
                             navigator.clipboard?.writeText(c.bastion_id);
                             toast("Bastion address copied");
                           }}
                         >
                           {shortId(c.bastion_id)}
-                        </code>
+                        </button>
                       </>
                     )}
                   </div>
                   <span className={`badge ${c.verified ? "badge-ok" : "badge-warn"}`}>{c.verified ? "Verified" : "Unverified"}</span>
                   {editing ? (
-                    <button className="icon-btn icon-btn-ok" title="Save name" onClick={() => void saveName()}>✓</button>
+                    <button className="icon-btn icon-btn-ok" aria-label={`Save name for ${contactLabel(c)}`} onClick={() => void saveName()}>✓</button>
                   ) : (
                     <button
                       className="icon-btn"
-                      title="Rename"
+                      aria-label={`Rename ${contactLabel(c)}`}
                       onClick={() => {
                         setEditingId(c.bastion_id);
                         setEditName(c.display === c.bastion_id ? "" : c.display);
@@ -212,7 +212,7 @@ export function Send({
                   )}
                   <button
                     className="icon-btn"
-                    title="Remove"
+                    aria-label={`Remove ${contactLabel(c)}`}
                     onClick={() => void persist(contacts.filter((x) => x.bastion_id !== c.bastion_id))}
                   >
                     <IcTrash size={16} />
@@ -300,7 +300,7 @@ export function Send({
           <code>{bastionId}</code>
           <button
             className="icon-btn"
-            title="Copy address"
+            aria-label="Copy your Bastion address"
             onClick={() => {
               navigator.clipboard?.writeText(bastionId!);
               toast("Bastion address copied");
@@ -414,7 +414,7 @@ function Compose({
           <option value="604800">7 days</option>
         </select>
 
-        {error && <div className="callout" style={{ marginTop: 14 }}>{error}</div>}
+        {error && <div className="callout" role="alert" style={{ marginTop: 14 }}>{error}</div>}
         <button className="btn btn-primary" style={{ marginTop: 16 }} disabled={busy} onClick={submit}>
           {busy ? "Sending…" : "Send encrypted note"}
         </button>
@@ -448,7 +448,7 @@ function AddContact({
           autoFocus
           onKeyDown={(e) => e.key === "Enter" && onFind(addr)}
         />
-        {error && <div className="callout" style={{ marginTop: 12 }}>{error}</div>}
+        {error && <div className="callout" role="alert" style={{ marginTop: 12 }}>{error}</div>}
         <button className="btn btn-primary" style={{ marginTop: 14 }} disabled={busy} onClick={() => onFind(addr)}>
           {busy ? "Finding…" : "Find"}
         </button>
@@ -575,18 +575,18 @@ function Inbox({
         {loading ? (
           <div className="faint">Loading…</div>
         ) : error ? (
-          <div className="callout">{error}</div>
+          <div className="callout" role="alert">{error}</div>
         ) : rows.length === 0 ? (
           <div className="faint">No messages.</div>
         ) : (
           rows.map((r) => (
-            <div className="msg-row" key={r.item.message_id} onClick={() => setOpen(r)}>
-              <div className="msg-meta">
-                <div className="msg-from">{senderName(r.opened)}</div>
-                <div className="faint msg-prev">{r.opened.needsPass ? "🔒 Passphrase required" : (r.opened.plaintext || "").slice(0, 70)}</div>
-              </div>
-              <div className="msg-right">{senderChip(r.opened)}<div className="faint msg-time">{fmtTime(r.item.created_at)}</div></div>
-            </div>
+            <button className="msg-row" key={r.item.message_id} onClick={() => setOpen(r)}>
+              <span className="msg-meta">
+                <span className="msg-from">{senderName(r.opened)}</span>
+                <span className="faint msg-prev">{r.opened.needsPass ? "🔒 Passphrase required" : (r.opened.plaintext || "").slice(0, 70)}</span>
+              </span>
+              <span className="msg-right">{senderChip(r.opened)}<span className="faint msg-time">{fmtTime(r.item.created_at)}</span></span>
+            </button>
           ))
         )}
       </div>
@@ -614,7 +614,7 @@ function Message({
   const [error, setError] = useState<string | null>(null);
 
   const banner = data.keyChanged ? (
-    <div className="trust trust-danger">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>
+    <div className="trust trust-danger" role="alert">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>
   ) : data.sender?.state === "verified" ? (
     <div className="trust trust-ok">Verified — from {data.display || shortId(data.sender.id!)}</div>
   ) : data.sender?.state === "anonymous" ? (
@@ -647,7 +647,7 @@ function Message({
                 else { setData(o); setError(null); }
               }}
             />
-            {error && <div className="callout" style={{ marginTop: 12 }}>{error}</div>}
+            {error && <div className="callout" role="alert" style={{ marginTop: 12 }}>{error}</div>}
             <button
               className="btn btn-primary"
               style={{ marginTop: 14 }}

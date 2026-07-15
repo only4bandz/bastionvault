@@ -11,8 +11,8 @@ const DEFAULTS: GenOptions = {
   avoidAmbiguous: true,
 };
 
-function Toggle({ on, onClick }: { on: boolean; onClick: () => void }) {
-  return <button className={`switch${on ? " on" : ""}`} onClick={onClick} aria-pressed={on} />;
+function Toggle({ label, on, onClick }: { label: string; on: boolean; onClick: () => void }) {
+  return <button className={`switch${on ? " on" : ""}`} aria-label={label} onClick={onClick} aria-pressed={on} />;
 }
 
 export function Generator({
@@ -47,12 +47,12 @@ export function Generator({
     <div className="gen">
       <div className="gen-out">
         <span className="val mono">{pw || "—"}</span>
-        <button className="icon-btn" title="Regenerate" onClick={() => regen()}>
+        <button className="icon-btn" aria-label="Regenerate password" onClick={() => regen()}>
           <IcRefresh size={17} />
         </button>
         <button
           className="icon-btn"
-          title="Copy"
+          aria-label="Copy generated password"
           onClick={() => {
             navigator.clipboard?.writeText(pw);
             toast("Password copied");
@@ -70,6 +70,7 @@ export function Generator({
         <span className="muted" style={{ fontSize: 13 }}>Length</span>
         <input
           type="range"
+          aria-label="Password length"
           min={8}
           max={64}
           value={opts.length}
@@ -79,11 +80,11 @@ export function Generator({
       </div>
 
       <div>
-        <div className="toggle-row"><span>Uppercase (A–Z)</span><Toggle on={opts.upper} onClick={() => set("upper", !opts.upper)} /></div>
-        <div className="toggle-row"><span>Lowercase (a–z)</span><Toggle on={opts.lower} onClick={() => set("lower", !opts.lower)} /></div>
-        <div className="toggle-row"><span>Digits (0–9)</span><Toggle on={opts.digits} onClick={() => set("digits", !opts.digits)} /></div>
-        <div className="toggle-row"><span>Symbols (!@#…)</span><Toggle on={opts.symbols} onClick={() => set("symbols", !opts.symbols)} /></div>
-        <div className="toggle-row"><span>Avoid ambiguous (0/O, 1/l)</span><Toggle on={opts.avoidAmbiguous} onClick={() => set("avoidAmbiguous", !opts.avoidAmbiguous)} /></div>
+        <div className="toggle-row"><span>Uppercase (A–Z)</span><Toggle label="Include uppercase letters" on={opts.upper} onClick={() => set("upper", !opts.upper)} /></div>
+        <div className="toggle-row"><span>Lowercase (a–z)</span><Toggle label="Include lowercase letters" on={opts.lower} onClick={() => set("lower", !opts.lower)} /></div>
+        <div className="toggle-row"><span>Digits (0–9)</span><Toggle label="Include digits" on={opts.digits} onClick={() => set("digits", !opts.digits)} /></div>
+        <div className="toggle-row"><span>Symbols (!@#…)</span><Toggle label="Include symbols" on={opts.symbols} onClick={() => set("symbols", !opts.symbols)} /></div>
+        <div className="toggle-row"><span>Avoid ambiguous (0/O, 1/l)</span><Toggle label="Avoid ambiguous characters" on={opts.avoidAmbiguous} onClick={() => set("avoidAmbiguous", !opts.avoidAmbiguous)} /></div>
       </div>
 
       {onUse && (
