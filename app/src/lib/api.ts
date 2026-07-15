@@ -2,6 +2,7 @@
 // Vite proxy (/api -> http://127.0.0.1:7777). The server only ever sees opaque
 // encrypted blobs + a hash of the auth secret — never plaintext.
 const BASE = "/api";
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export interface Blob {
   v: number;
@@ -50,18 +51,35 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = `Bearer ${token}`;
-  let res: Response;
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    res = await fetch(BASE + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-  } catch {
+    const res = await fetch(BASE + path, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new ApiError(res.status, text || res.statusText);
+    }
+    const ct = res.headers.get("content-type") || "";
+    if (!ct.includes("application/json")) return undefined as T;
+    try {
+      return (await res.json()) as T;
+    } catch {
+      throw new ApiError(res.status, "Server returned invalid JSON.");
+    }
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new ApiError(0, "Server request timed out. The result is unknown; refresh before retrying.");
+    }
+    if (error instanceof ApiError) throw error;
     throw new ApiError(0, "Cannot reach the server. Is it running? (cargo run -p server)");
+  } finally {
+    window.clearTimeout(timer);
   }
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new ApiError(res.status, text || res.statusText);
-  }
-  const ct = res.headers.get("content-type") || "";
-  return (ct.includes("application/json") ? await res.json() : (undefined as T)) as T;
 }
 
 export const api = {

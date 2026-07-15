@@ -4,7 +4,7 @@ import { RevealSecret } from "./screens/RevealSecret";
 import { Unlock } from "./screens/Unlock";
 import { Vault } from "./screens/Vault";
 import { ensureWasm, register, unlock, type Account } from "./lib/wasm";
-import { api, ApiError, type Blob, type Registration } from "./lib/api";
+import { api, ApiError, type Blob, type Registration, type VaultData } from "./lib/api";
 import { SEND_CONTACTS_ID, SEND_IDENTITY_ID, loadContacts, type Contact } from "./lib/send";
 import type { VaultItem } from "./lib/types";
 
@@ -173,8 +173,21 @@ export default function App(): JSX.Element {
     } catch {
       throw new Error("Invalid master password or Secret Key.");
     }
-    const tok = await api.login(em, acc.auth_secret);
-    const vault = await api.getVault(tok);
+    let tok: string;
+    try {
+      tok = await api.login(em, acc.auth_secret);
+    } catch (error) {
+      acc.lock();
+      throw error;
+    }
+    let vault: VaultData;
+    try {
+      vault = await api.getVault(tok);
+    } catch (error) {
+      api.logout(tok).catch(() => {});
+      acc.lock();
+      throw error;
+    }
     let loadedItems: VaultItem[];
     let contacts: Contact[];
     try {
