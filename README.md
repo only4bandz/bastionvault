@@ -58,8 +58,9 @@ non-enumerable **Bastion address** (128-bit, base32). Available in both the
 - The identity and verified contacts live as **encrypted reserved vault items**,
   so they **sync across surfaces** (verify a contact in the extension, it's
   verified in the web app too).
-- Server-side: per-recipient inbox quotas, rate limits, size caps, message
-  dedupe, expiry, and **read-once delete** — all without learning any plaintext.
+- Server-side: strict public-key/envelope routing validation, per-recipient
+  inbox quotas, rate limits, size caps, message dedupe, bounded expiry, and
+  **read-once delete** — all without learning any plaintext.
 
 Design + threat model: [`docs/bastion-send-design.md`](docs/bastion-send-design.md).
 
@@ -92,7 +93,7 @@ secret (never the raw secret), persisted to **SQLite**. Reuses the types from
 | `PUT` | `/vault/manifest` | Deprecated compatibility endpoint; use `/vault/transaction` |
 | `PUT` | `/send/identity` | Publish/rotate a Send identity → stable Bastion address |
 | `GET` | `/send/whoami` · `/send/directory/:id` | Your address · resolve a contact (exact-match, rate-limited) |
-| `POST` `/send` · `GET` `/send/inbox` · `DELETE` `/send/inbox/:id` | Deliver / pull / read-once delete an opaque blob |
+| `POST` `/send` · `GET` `/send/inbox` · `DELETE` `/send/inbox/:id` | Validate and deliver / pull / read-once delete an opaque blob (explicit expiry ≤ 7 days) |
 
 ```bash
 cargo run -p server          # listens on http://127.0.0.1:7777

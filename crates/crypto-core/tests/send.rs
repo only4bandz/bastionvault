@@ -201,3 +201,75 @@ fn identity_serialization_roundtrips() {
         b"persisted"
     );
 }
+
+#[test]
+fn delivery_validation_binds_routing_and_current_recipient_key() {
+    let recipient = bob();
+    let public = recipient.public();
+    let blob = seal(b"deliver", "BOB-ID", &public, None, None).unwrap();
+    blob.validate_for_delivery("BOB-ID", &public).unwrap();
+
+    assert!(blob.validate_for_delivery("OTHER-ID", &public).is_err());
+    assert!(blob
+        .validate_for_delivery("BOB-ID", &IdentityKeys::generate(2).public())
+        .is_err());
+
+    let mut bad_message_id = blob.clone();
+    bad_message_id.message_id = "not-canonical-base64".into();
+    assert!(bad_message_id
+        .validate_for_delivery("BOB-ID", &public)
+        .is_err());
+
+    let mut low_order_ephemeral = blob;
+    low_order_ephemeral.eph_pub = {
+        use base64::{engine::general_purpose::STANDARD as B, Engine};
+        B.encode([0u8; 32])
+    };
+    assert!(low_order_ephemeral
+        .validate_for_delivery("BOB-ID", &public)
+        .is_err());
+}
+
+#[test]
+fn delivery_validation_rejects_weak_identities_and_kdf_policy_bypass() {
+    let recipient = bob();
+    let public = recipient.public();
+    let mut weak_signing_key = public.clone();
+    weak_signing_key.sig_pub = [0u8; 32];
+    assert!(weak_signing_key.validate().is_err());
+
+    let mut zero_version = public.clone();
+    zero_version.key_version = 0;
+    assert!(zero_version.validate().is_err());
+
+    let mut blob = seal(
+        b"password protected",
+        "BOB-ID",
+        &public,
+        Some(b"factor"),
+        None,
+    )
+    .unwrap();
+    blob.pw.as_mut().unwrap().mem_kib = 1;
+    assert!(blob.validate_for_delivery("BOB-ID", &public).is_err());
+}
+
+#[test]
+fn send_wire_types_reject_unknown_fields() {
+    let recipient = bob();
+    let public = recipient.public();
+    let mut public_json = serde_json::to_value(&public).unwrap();
+    public_json
+        .as_object_mut()
+        .unwrap()
+        .insert("unexpected".into(), serde_json::json!(true));
+    assert!(serde_json::from_value::<PublicIdentity>(public_json).is_err());
+
+    let blob = seal(b"strict", "BOB-ID", &public, None, None).unwrap();
+    let mut blob_json = serde_json::to_value(blob).unwrap();
+    blob_json
+        .as_object_mut()
+        .unwrap()
+        .insert("unexpected".into(), serde_json::json!(true));
+    assert!(serde_json::from_value::<crypto_core::SendBlob>(blob_json).is_err());
+}

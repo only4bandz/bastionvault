@@ -47,6 +47,11 @@ const D_FP: &[u8] = b"pm:v1:send/fp/v1";
 const SEND_V: u8 = 1;
 const SEND_TYPE: &[u8] = b"send";
 const MSG_ID_LEN: usize = 16;
+const AEAD_NONCE_LEN: usize = 24;
+const AEAD_TAG_LEN: usize = 16;
+const WRAPPED_CEK_LEN: usize = KEY_LEN + AEAD_TAG_LEN;
+/// Keep structural validation bounded independently of transport limits.
+const MAX_SEND_FIELD_BYTES: usize = 6 * 1024 * 1024;
 const SAFETY_ITERS: usize = 5200; // Signal-style: taxes short-compare grinding
 /// Size buckets for body padding (hide content length / signed-vs-anon).
 const BUCKETS: [usize; 6] = [256, 1024, 4096, 16384, 65536, 262144];
@@ -89,6 +94,35 @@ fn unb64_32(s: &str) -> Result<[u8; 32]> {
     unb64_exact(s, 32)?
         .try_into()
         .map_err(|_| CryptoError::Malformed)
+}
+
+fn unb64_exact_canonical(s: &str, n: usize) -> Result<Vec<u8>> {
+    let decoded = unb64_exact(s, n)?;
+    if b64(&decoded) != s {
+        return Err(CryptoError::Malformed);
+    }
+    Ok(decoded)
+}
+
+fn unb64_cap_canonical(s: &str, max: usize) -> Result<Vec<u8>> {
+    let decoded = unb64_cap(s, max)?;
+    if b64(&decoded) != s {
+        return Err(CryptoError::Malformed);
+    }
+    Ok(decoded)
+}
+
+fn validate_x25519_public(bytes: [u8; 32]) -> Result<()> {
+    // A fixed, non-zero probe scalar is sufficient to reject low-order public
+    // points. The probe is not an identity or a secret used by the protocol.
+    let probe = StaticSecret::from([0x42; 32]);
+    if !probe
+        .diffie_hellman(&XPublicKey::from(bytes))
+        .was_contributory()
+    {
+        return Err(CryptoError::Malformed);
+    }
+    Ok(())
 }
 
 fn hkdf32(ikm: &[u8], salt: &[u8], info: &[u8]) -> [u8; 32] {
@@ -162,10 +196,27 @@ pub struct IdentityKeys {
 
 /// The published, non-secret half of an identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublicIdentity {
     pub enc_pub: [u8; 32],
     pub sig_pub: [u8; 32],
     pub key_version: u32,
+}
+
+impl PublicIdentity {
+    /// Validate a newly published identity before it crosses a trust boundary.
+    pub fn validate(&self) -> Result<()> {
+        if self.key_version == 0 {
+            return Err(CryptoError::Malformed);
+        }
+        validate_x25519_public(self.enc_pub)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&self.sig_pub).map_err(|_| CryptoError::Malformed)?;
+        if verifying_key.is_weak() {
+            return Err(CryptoError::Malformed);
+        }
+        Ok(())
+    }
 }
 
 impl IdentityKeys {
@@ -220,6 +271,7 @@ impl IdentityKeys {
 
 /// The opaque, serializable Send envelope (what the server stores).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SendBlob {
     pub v: u8,
     #[serde(rename = "type")]
@@ -236,8 +288,81 @@ pub struct SendBlob {
     pub pw: Option<PwParams>, // present iff a passphrase was used
 }
 
+impl SendBlob {
+    /// Validate the public, server-visible envelope fields for delivery.
+    ///
+    /// This cannot authenticate ciphertext without the recipient's private
+    /// key, but it rejects malformed encodings and ensures the routing fields,
+    /// recipient key, and key version match the current directory entry.
+    pub fn validate_for_delivery(
+        &self,
+        recipient_id: &str,
+        recipient: &PublicIdentity,
+    ) -> Result<()> {
+        recipient.validate()?;
+        if self.v != SEND_V
+            || self.typ.as_bytes() != SEND_TYPE
+            || self.recipient_id != recipient_id
+            || self.recipient_key_version != recipient.key_version
+        {
+            return Err(CryptoError::Malformed);
+        }
+
+        unb64_exact_canonical(&self.message_id, MSG_ID_LEN)?;
+        let recipient_enc_pub: [u8; 32] = unb64_exact_canonical(&self.recipient_enc_pub, 32)?
+            .try_into()
+            .map_err(|_| CryptoError::Malformed)?;
+        if recipient_enc_pub != recipient.enc_pub {
+            return Err(CryptoError::Malformed);
+        }
+
+        let eph_pub: [u8; 32] = unb64_exact_canonical(&self.eph_pub, 32)?
+            .try_into()
+            .map_err(|_| CryptoError::Malformed)?;
+        validate_x25519_public(eph_pub)?;
+        unb64_exact_canonical(&self.cek_commit, 32)?;
+        validate_encrypted_field(&self.wrapped_cek, Some(WRAPPED_CEK_LEN))?;
+        let body_len = validate_encrypted_field(&self.body, None)?;
+        let padded_len = body_len
+            .checked_sub(AEAD_TAG_LEN)
+            .ok_or(CryptoError::Malformed)?;
+        if !BUCKETS.contains(&padded_len)
+            && (padded_len <= BUCKETS[BUCKETS.len() - 1]
+                || !padded_len.is_multiple_of(BUCKETS[BUCKETS.len() - 1]))
+        {
+            return Err(CryptoError::Malformed);
+        }
+
+        if let Some(pw) = &self.pw {
+            unb64_exact_canonical(&pw.salt, SALT_LEN)?;
+            KdfParams {
+                mem_kib: pw.mem_kib,
+                iterations: pw.iterations,
+                parallelism: pw.parallelism,
+            }
+            .validate_for_new_vault()?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_encrypted_field(blob: &EncryptedBlob, exact_ct_len: Option<usize>) -> Result<usize> {
+    if blob.v != aead::FORMAT_VERSION {
+        return Err(CryptoError::Malformed);
+    }
+    unb64_exact_canonical(&blob.nonce, AEAD_NONCE_LEN)?;
+    let ciphertext = unb64_cap_canonical(&blob.ct, MAX_SEND_FIELD_BYTES)?;
+    if ciphertext.len() < AEAD_TAG_LEN
+        || exact_ct_len.is_some_and(|expected| ciphertext.len() != expected)
+    {
+        return Err(CryptoError::Malformed);
+    }
+    Ok(ciphertext.len())
+}
+
 /// Argon2id parameters + salt for the optional passphrase factor.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PwParams {
     pub salt: String, // base64, 16 bytes
     pub mem_kib: u32,
