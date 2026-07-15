@@ -153,6 +153,59 @@ async fn full_account_and_vault_flow() {
     assert!(body["items"].get("github.com").is_none());
 }
 
+#[tokio::test]
+async fn concurrent_registration_never_replaces_account_credentials() {
+    let app = server::app_in_memory();
+    let email = "registration-race@example.com";
+    let (_, first, _) = Vault::register_with(b"first", fast_kdf()).unwrap();
+    let (_, second, _) = Vault::register_with(b"second", fast_kdf()).unwrap();
+    let first_auth = first.auth_secret.expose_b64().to_string();
+    let second_auth = second.auth_secret.expose_b64().to_string();
+    let first_body =
+        json!({ "email": email, "registration": serde_json::to_value(&first).unwrap() });
+    let second_body =
+        json!({ "email": email, "registration": serde_json::to_value(&second).unwrap() });
+
+    let (first_result, second_result) = tokio::join!(
+        send(&app, "POST", "/accounts", None, Some(first_body)),
+        send(&app, "POST", "/accounts", None, Some(second_body)),
+    );
+    let statuses = [first_result.0, second_result.0];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CREATED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+
+    let login = |auth_secret: String| {
+        send(
+            &app,
+            "POST",
+            "/sessions",
+            None,
+            Some(json!({ "email": email, "auth_secret": auth_secret })),
+        )
+    };
+    let (first_login, second_login) = tokio::join!(login(first_auth), login(second_auth));
+    assert_eq!(
+        [first_login.0, second_login.0]
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1,
+        "exactly the winning registration must remain valid"
+    );
+}
+
 /// Registers an account and returns a valid session token.
 async fn registered_session(app: &Router, email: &str) -> String {
     let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
