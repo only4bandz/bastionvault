@@ -4,6 +4,7 @@ import { Generator } from "../components/Generator";
 import { ItemEditor } from "../components/ItemEditor";
 import { ImportModal } from "../components/ImportModal";
 import { Dialog } from "../components/Dialog";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Favicon } from "../components/Favicon";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
@@ -542,7 +543,7 @@ function ItemDetailView({
   copy: (t: string, w: string) => void;
 }): JSX.Element {
   const [reveal, setReveal] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const rows: [string, string | undefined, boolean][] =
     item.type === "login"
       ? [["Username", item.username, false], ["Password", item.password, true], ["Website", item.url, false]]
@@ -551,33 +552,25 @@ function ItemDetailView({
         : [];
 
   return (
-    <Dialog
-      title={item.title}
-      onClose={onClose}
-      closeDisabled={deleting}
-      headerLeading={<Favicon item={item} size={32} />}
-      headerMeta={<span className="pill" style={{ marginLeft: 8 }}>{typeIcon(item.type, 12)} {TYPE_LABEL[item.type]}</span>}
-      footer={
-        <>
-          <button
-            className="btn btn-danger"
-            disabled={deleting}
-            onClick={() => {
-              setDeleting(true);
-              void onDelete().then((deleted) => {
-                if (!deleted) setDeleting(false);
-              });
-            }}
-          >
-            <IcTrash size={16} /> {deleting ? "Deleting…" : "Delete"}
-          </button>
-          <span className="spacer" />
-          <button className="btn btn-primary" onClick={onEdit} disabled={deleting}>
-            <IcEdit size={16} /> Edit
-          </button>
-        </>
-      }
-    >
+    <>
+      <Dialog
+        title={item.title}
+        onClose={onClose}
+        inactive={confirmingDelete}
+        headerLeading={<Favicon item={item} size={32} />}
+        headerMeta={<span className="pill" style={{ marginLeft: 8 }}>{typeIcon(item.type, 12)} {TYPE_LABEL[item.type]}</span>}
+        footer={
+          <>
+            <button className="btn btn-danger" onClick={() => setConfirmingDelete(true)}>
+              <IcTrash size={16} /> Delete
+            </button>
+            <span className="spacer" />
+            <button className="btn btn-primary" onClick={onEdit}>
+              <IcEdit size={16} /> Edit
+            </button>
+          </>
+        }
+      >
           {rows.filter(([, v]) => v).map(([k, v, secret]) => (
             <div className="row-copy" key={k}>
               <span className="k">{k}</span>
@@ -601,7 +594,19 @@ function ItemDetailView({
               <span className="v" style={{ whiteSpace: "pre-wrap" }}>{item.notes}</span>
             </div>
           )}
-    </Dialog>
+      </Dialog>
+      {confirmingDelete && (
+        <ConfirmDialog
+          title={`Delete ${item.title}?`}
+          confirmLabel="Delete item"
+          pendingLabel="Deleting…"
+          onClose={() => setConfirmingDelete(false)}
+          onConfirm={onDelete}
+        >
+          This permanently removes the item from your encrypted vault. This action cannot be undone.
+        </ConfirmDialog>
+      )}
+    </>
   );
 }
 
