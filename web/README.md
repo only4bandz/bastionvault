@@ -30,6 +30,15 @@ cd web && python3 -m http.server 8080
 
 The same `crypto-core` will power the full web app and the Chrome extension.
 
+## Browser isolation
+
+The demo loads JavaScript and CSS only from external same-origin files. Its CSP
+allows same-origin modules and the minimum `wasm-unsafe-eval` capability needed
+to compile WebAssembly, while refusing inline script/style, JavaScript eval,
+objects, base-tag changes, and form submission. Dynamic status and recovery-key
+content is inserted with `textContent`, never as HTML. The invariant is enforced
+by `scripts/check-web-demo-csp.sh` in the `web-guards` workflow.
+
 ## Invariant — no browser-side secret storage
 
 Secrets live in WASM memory only, and only as briefly as possible (the demo
