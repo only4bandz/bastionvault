@@ -239,6 +239,11 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .row-copy .v { flex: 1; font-size: 14px; word-break: break-all; }
 .health-row { width: 100%; background: none; color: inherit; text-align: left; border-top: 0; border-right: 0; border-left: 0; }
 .health-row:hover { background: var(--surface-2); }
+.health-section-title { margin-bottom: 10px; font-weight: 700; }
+.health-meta { max-width: 230px; font-size: 12px; text-align: right; }
+.reuse-group { padding-top: 8px; border-top: 1px solid var(--line); }
+.health-section-title + .reuse-group { border-top: 0; }
+.reuse-group-title { padding: 6px 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 
 /* ── Bastion Send ── */
 .send-enable { text-align: center; }

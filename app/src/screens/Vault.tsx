@@ -11,7 +11,7 @@ import {
   IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
-import { strength } from "../lib/generator";
+import { analyzePasswordHealth } from "../lib/password-health";
 import { lookupBin } from "../lib/bin";
 import type { ImportOutcome, ImportProgress, ImportResult } from "../lib/import";
 import type { Account } from "../lib/wasm";
@@ -612,24 +612,41 @@ function ItemDetailView({
 
 // ── Password Health ──
 function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) => void }): JSX.Element {
-  const logins = items.filter((i) => i.type === "login" && i.password);
-  const counts = new Map<string, number>();
-  logins.forEach((i) => counts.set(i.password!, (counts.get(i.password!) || 0) + 1));
-  const weak = logins.filter((i) => strength(i.password!).score < 2);
-  const reused = logins.filter((i) => (counts.get(i.password!) || 0) > 1);
-  const score = logins.length === 0 ? 100 : Math.round(100 * (1 - (weak.length + reused.length) / (logins.length * 2)));
+  const analysis = useMemo(() => analyzePasswordHealth(items), [items]);
+  const score = analysis.score;
+  const scoreColor =
+    score === null
+      ? "var(--text-faint)"
+      : score >= 80
+        ? "var(--ok)"
+        : score >= 50
+          ? "var(--warn)"
+          : "var(--danger)";
 
-  const Section = ({ title, list, color }: { title: string; list: VaultItem[]; color: string }) =>
-    list.length === 0 ? null : (
+  const Finding = ({ item, detail }: { item: VaultItem; detail: string }) => (
+    <button className="row-copy health-row" onClick={() => onOpen(item)}>
+      <Favicon item={item} size={28} />
+      <span className="v">{item.title}</span>
+      <span className="faint health-meta">{detail}</span>
+    </button>
+  );
+
+  const WeakSection = () =>
+    analysis.weakItems.length === 0 ? null : (
       <div className="card-section" style={{ maxWidth: 640, marginBottom: 16 }}>
-        <div style={{ fontWeight: 700, marginBottom: 10, color }}>{title} · {list.length}</div>
-        {list.map((i) => (
-          <button className="row-copy health-row" key={i.id} onClick={() => onOpen(i)}>
-            <Favicon item={i} size={28} />
-            <span className="v">{i.title}</span>
-            <span className="faint" style={{ fontSize: 12 }}>{i.username}</span>
-          </button>
-        ))}
+        <div className="health-section-title" style={{ color: "var(--danger)" }}>
+          Weak passwords · {analysis.weakItems.length}
+        </div>
+        {analysis.weakItems.map((item) => {
+          const assessment = analysis.assessments.get(item.id)!;
+          return (
+            <Finding
+              key={item.id}
+              item={item}
+              detail={`${assessment.label} · ${assessment.reasons[0]}`}
+            />
+          );
+        })}
       </div>
     );
 
@@ -638,21 +655,55 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
       <div className="page-head"><h2>Password Health</h2></div>
       <div className="card-section" style={{ maxWidth: 640, marginBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
-          <div style={{ fontSize: 40, fontWeight: 800, color: score >= 80 ? "var(--ok)" : score >= 50 ? "var(--warn)" : "var(--danger)" }}>{score}</div>
-          <div className="muted">vault health score</div>
+          <div style={{ fontSize: 40, fontWeight: 800, color: scoreColor }}>{score ?? "—"}</div>
+          <div className="muted">{score === null ? "not scored" : "vault health score"}</div>
         </div>
-        <div className="strength" style={{ marginTop: 10 }}>
-          <i style={{ width: `${score}%`, background: score >= 80 ? "var(--ok)" : score >= 50 ? "var(--warn)" : "var(--danger)" }} />
-        </div>
+        {score !== null && (
+          <div
+            className="strength"
+            role="progressbar"
+            aria-label="Vault health score"
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={score}
+            style={{ marginTop: 10 }}
+          >
+            <i style={{ width: `${score}%`, background: scoreColor }} />
+          </div>
+        )}
         <div className="faint" style={{ marginTop: 10, fontSize: 13 }}>
-          {logins.length} logins · {weak.length} weak · {reused.length} reused
+          {analysis.assessedCount}/{analysis.loginCount} login passwords assessed · {analysis.weakItems.length} weak · {analysis.reusedGroups.length} reused {analysis.reusedGroups.length === 1 ? "group" : "groups"}
+        </div>
+        <div className="faint" style={{ marginTop: 6, fontSize: 12 }}>
+          Offline analysis only: length, character variety, obvious patterns, and exact reuse.
         </div>
       </div>
-      <Section title="Weak passwords" list={weak} color="var(--danger)" />
-      <Section title="Reused passwords" list={reused} color="var(--warn)" />
-      {weak.length === 0 && reused.length === 0 && (
+      <WeakSection />
+      {analysis.reusedGroups.length > 0 && (
+        <div className="card-section" style={{ maxWidth: 640, marginBottom: 16 }}>
+          <div className="health-section-title" style={{ color: "var(--warn)" }}>
+            Reused password groups · {analysis.reusedGroups.length}
+          </div>
+          {analysis.reusedGroups.map((group, index) => (
+            <div className="reuse-group" key={group.items.map((item) => item.id).join(":")}>
+              <div className="faint reuse-group-title">
+                Group {index + 1} · {group.items.length} accounts
+              </div>
+              {group.items.map((item) => (
+                <Finding key={item.id} item={item} detail={item.username || "No username"} />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {analysis.assessedCount === 0 && (
         <div className="card-section" style={{ maxWidth: 640 }}>
-          <span className="muted">No weak or reused passwords found. 🎉</span>
+          <span className="muted">Add a login with a password to calculate vault health.</span>
+        </div>
+      )}
+      {analysis.assessedCount > 0 && analysis.atRiskItems.length === 0 && (
+        <div className="card-section" style={{ maxWidth: 640 }}>
+          <span className="muted">No weak or reused passwords found by the offline checks. 🎉</span>
         </div>
       )}
     </>
