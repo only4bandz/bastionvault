@@ -113,7 +113,7 @@ owner-only mode.
 | `PUT` | `/vault/transaction` | Atomically apply item operations + sealed manifest at an expected revision |
 | `PUT`/`DELETE` | `/vault/items/:id` | Deprecated compatibility endpoint; use `/vault/transaction` |
 | `PUT` | `/vault/manifest` | Deprecated compatibility endpoint; use `/vault/transaction` |
-| `PUT` | `/send/identity` | Publish/rotate a Send identity → stable Bastion address |
+| `PUT` | `/send/identity` | Publish a Send identity once (identical retries allowed) → stable Bastion address |
 | `GET` | `/send/whoami` · `/send/directory/:id` | Your address · resolve a contact (exact-match, rate-limited) |
 | `POST` `/send` · `GET` `/send/inbox` · `DELETE` `/send/inbox/:id` | Validate and deliver / pull / read-once delete an opaque blob (explicit expiry ≤ 7 days) |
 

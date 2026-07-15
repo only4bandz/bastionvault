@@ -1488,7 +1488,8 @@ async fn bastion_send_directory_and_inbox_flow() {
 
     // Bob publishes a validated public identity → stable Bastion ID.
     let bob_v1 = IdentityKeys::generate(1);
-    let bob_pub = serde_json::to_value(bob_v1.public()).unwrap();
+    let bob_v1_public = bob_v1.public();
+    let bob_pub = serde_json::to_value(&bob_v1_public).unwrap();
     let (s, b) = send(
         &app,
         "PUT",
@@ -1501,12 +1502,18 @@ async fn bastion_send_directory_and_inbox_flow() {
     let bob_id = b["bastion_id"].as_str().unwrap().to_string();
     assert!(!bob_id.is_empty());
 
-    // whoami echoes it; re-publishing keeps the same id.
+    // whoami echoes it; an identical retry keeps the same id.
     let (_s, w) = send(&app, "GET", "/send/whoami", Some(&bob), None).await;
     assert_eq!(w["bastion_id"], bob_id);
+    let (s, retry) = send(&app, "PUT", "/send/identity", Some(&bob), Some(bob_pub)).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(retry["bastion_id"], bob_id);
+
+    // A bearer token is not rotation authority. Changed keys are rejected and
+    // the originally published directory entry remains authoritative.
     let bob_v2 = IdentityKeys::generate(2);
     let bob_v2_public = bob_v2.public();
-    let (s, b2) = send(
+    let (s, _) = send(
         &app,
         "PUT",
         "/send/identity",
@@ -1514,11 +1521,7 @@ async fn bastion_send_directory_and_inbox_flow() {
         Some(serde_json::to_value(&bob_v2_public).unwrap()),
     )
     .await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(
-        b2["bastion_id"], bob_id,
-        "rotation keeps the bastion_id stable"
-    );
+    assert_eq!(s, StatusCode::CONFLICT);
     let (s, _) = send(
         &app,
         "PUT",
@@ -1532,7 +1535,7 @@ async fn bastion_send_directory_and_inbox_flow() {
     assert_eq!(s, StatusCode::OK);
     assert_eq!(
         whoami["public"],
-        serde_json::to_value(&bob_v2_public).unwrap()
+        serde_json::to_value(&bob_v1_public).unwrap()
     );
 
     // Alice publishes too (so she has an inbox of her own).
@@ -1562,7 +1565,7 @@ async fn bastion_send_directory_and_inbox_flow() {
     )
     .await;
     assert_eq!(s, StatusCode::OK);
-    assert_eq!(dir, serde_json::to_value(&bob_v2_public).unwrap());
+    assert_eq!(dir, serde_json::to_value(&bob_v1_public).unwrap());
     let unknown_id = data_encoding::BASE32_NOPAD.encode(&[0u8; 16]);
     let (s, _) = send(
         &app,
@@ -1580,7 +1583,7 @@ async fn bastion_send_directory_and_inbox_flow() {
     let blob = send_seal(
         b"hello bob",
         &bob_id,
-        &bob_v2_public,
+        &bob_v1_public,
         None,
         Some((&alice_identity, "ALICE")),
     )
@@ -1596,7 +1599,8 @@ async fn bastion_send_directory_and_inbox_flow() {
 
     // Routing metadata and the current directory key must agree with the
     // authenticated envelope header before anything is stored.
-    let stale_key_blob = send_seal(b"old key", &bob_id, &bob_v1.public(), None, None).unwrap();
+    let stale_key_blob =
+        send_seal(b"unpublished key", &bob_id, &bob_v2_public, None, None).unwrap();
     let (s, _) = send(
         &app,
         "POST",
@@ -1606,7 +1610,7 @@ async fn bastion_send_directory_and_inbox_flow() {
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let other = send_seal(b"other", &bob_id, &bob_v2_public, None, None).unwrap();
+    let other = send_seal(b"other", &bob_id, &bob_v1_public, None, None).unwrap();
     let mismatched_id = json!({
         "recipient_id": blob.recipient_id,
         "message_id": other.message_id,
@@ -1635,7 +1639,7 @@ async fn bastion_send_directory_and_inbox_flow() {
     assert_eq!(s, StatusCode::CONFLICT);
 
     // A well-formed but unknown recipient remains a 404.
-    let unknown_blob = send_seal(b"unknown", &unknown_id, &bob_v2_public, None, None).unwrap();
+    let unknown_blob = send_seal(b"unknown", &unknown_id, &bob_v1_public, None, None).unwrap();
     let (s, _) = send(
         &app,
         "POST",
@@ -1651,7 +1655,7 @@ async fn bastion_send_directory_and_inbox_flow() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let expired = send_seal(b"expired", &bob_id, &bob_v2_public, None, None).unwrap();
+    let expired = send_seal(b"expired", &bob_id, &bob_v1_public, None, None).unwrap();
     let (s, _) = send(
         &app,
         "POST",
@@ -1661,7 +1665,7 @@ async fn bastion_send_directory_and_inbox_flow() {
     )
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let too_long = send_seal(b"too long", &bob_id, &bob_v2_public, None, None).unwrap();
+    let too_long = send_seal(b"too long", &bob_id, &bob_v1_public, None, None).unwrap();
     let (s, _) = send(
         &app,
         "POST",
@@ -1704,7 +1708,7 @@ async fn bastion_send_directory_and_inbox_flow() {
     assert_eq!(inbox.as_array().unwrap().len(), 0);
 
     // Oversized blob → 413.
-    let mut oversized = send_seal(b"large", &bob_id, &bob_v2_public, None, None).unwrap();
+    let mut oversized = send_seal(b"large", &bob_id, &bob_v1_public, None, None).unwrap();
     oversized.body.ct = "A".repeat(300 * 1024);
     let (s, _) = send(
         &app,

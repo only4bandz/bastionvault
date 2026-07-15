@@ -366,6 +366,11 @@ enum DbVaultMutation {
     Stale,
 }
 
+enum IdentityPublication {
+    Published(String),
+    Conflict,
+}
+
 fn sqlite_artifact_path(path: &FsPath, suffix: &str) -> PathBuf {
     let mut artifact = path.as_os_str().to_os_string();
     artifact.push(suffix);
@@ -1634,23 +1639,41 @@ fn auth_rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Resu
 }
 
 impl Db {
-    /// Upsert the caller's published identity, keeping a stable bastion_id.
-    fn publish_identity(&self, email: &str, public_json: &str) -> rusqlite::Result<String> {
+    fn classify_existing_identity(
+        bastion_id: String,
+        stored_public: &str,
+        requested_public: &PublicIdentity,
+    ) -> rusqlite::Result<IdentityPublication> {
+        let stored = serde_json::from_str::<PublicIdentity>(stored_public)
+            .map_err(|error| stored_data_error(1, rusqlite::types::Type::Text, error))?;
+        stored
+            .validate()
+            .map_err(|error| stored_data_error(1, rusqlite::types::Type::Text, error))?;
+        Ok(if stored == *requested_public {
+            IdentityPublication::Published(bastion_id)
+        } else {
+            IdentityPublication::Conflict
+        })
+    }
+
+    /// Publish once. Identical retries are idempotent; changing either key or
+    /// the version requires a future proof-authorized rotation protocol.
+    fn publish_identity(
+        &self,
+        email: &str,
+        public: &PublicIdentity,
+        public_json: &str,
+    ) -> rusqlite::Result<IdentityPublication> {
         let conn = self.lock();
-        let existing: Option<String> = conn
+        let existing: Option<(String, String)> = conn
             .query_row(
-                "SELECT bastion_id FROM send_directory WHERE email=?1",
+                "SELECT bastion_id, public FROM send_directory WHERE email=?1",
                 [email],
-                |r| r.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if let Some(id) = existing {
-            // Rotation: keep the stable bastion_id, just replace the public part.
-            conn.execute(
-                "UPDATE send_directory SET public=?2 WHERE email=?1",
-                params![email, public_json],
-            )?;
-            return Ok(id);
+        if let Some((bastion_id, stored_public)) = existing {
+            return Self::classify_existing_identity(bastion_id, &stored_public, public);
         }
         // New account: retry generation on the (astronomically rare) id collision.
         for _ in 0..8 {
@@ -1659,11 +1682,28 @@ impl Db {
                 "INSERT INTO send_directory(email, bastion_id, public, created_at) VALUES(?1,?2,?3,?4)",
                 params![email, id, public_json, now_secs()],
             ) {
-                Ok(_) => return Ok(id),
+                Ok(_) => return Ok(IdentityPublication::Published(id)),
                 Err(rusqlite::Error::SqliteFailure(e, _))
                     if e.code == rusqlite::ErrorCode::ConstraintViolation =>
                 {
-                    continue
+                    // Another server process may have published this account
+                    // after our initial read. Resolve that race as either an
+                    // idempotent success or an immutable-identity conflict.
+                    let existing: Option<(String, String)> = conn
+                        .query_row(
+                            "SELECT bastion_id, public FROM send_directory WHERE email=?1",
+                            [email],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()?;
+                    if let Some((bastion_id, stored_public)) = existing {
+                        return Self::classify_existing_identity(
+                            bastion_id,
+                            &stored_public,
+                            public,
+                        );
+                    }
+                    continue;
                 }
                 Err(e) => return Err(e),
             }
@@ -1866,8 +1906,8 @@ enum InboxInsert {
     Full,
 }
 
-/// Publish (or rotate) the caller's validated Send public identity. Returns the
-/// stable Bastion ID.
+/// Publish the caller's validated Send public identity. Identical retries are
+/// idempotent; key changes require a separate proof-authorized protocol.
 async fn publish_identity(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -1885,11 +1925,17 @@ async fn publish_identity(
             "identity too large",
         ));
     }
-    let bastion_id = st
+    let publication = st
         .db
-        .publish_identity(&email, &public_json)
+        .publish_identity(&email, &public, &public_json)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
-    Ok(Json(PublishResponse { bastion_id }))
+    match publication {
+        IdentityPublication::Published(bastion_id) => Ok(Json(PublishResponse { bastion_id })),
+        IdentityPublication::Conflict => Err(ApiError(
+            StatusCode::CONFLICT,
+            "send identity already published; rotation proof required",
+        )),
+    }
 }
 
 /// The caller's own directory entry (so the app learns its Bastion ID).

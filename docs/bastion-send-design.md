@@ -227,13 +227,13 @@ minimal logged upload metadata. State this plainly in the UI.
 - **Persistent versioned keyring in the vault; never delete old `enc` private
   keys** → in-flight notes stay decryptable; new devices inherit it via vault
   sync (zero special handling). Identity is per-account, not per-device.
-- Explicit **"rotate identity keys"** action: new pair, bump `key_version`,
-  publish (CAS-style update to avoid races), keep old privs, **force
-  re-verification** (safety number changes → contacts warned). Lost device =
-  endpoint compromise (out of scope) → user rotates from a good device.
-- Optional (P2+): a rotation certificate `Ed25519.sign(old_sig_priv,
-  new_enc_pub‖new_sig_pub‖key_version)` for continuity — surfaced, not
-  auto-trusted.
+- The current directory endpoint is immutable after first publication and
+  accepts only semantically identical identity retries. A bearer token alone cannot
+  rotate keys.
+- A future explicit **"rotate identity keys"** action must bump `key_version`,
+  keep old private keys, force contact re-verification, and authorize the CAS
+  update with a rotation certificate such as `Ed25519.sign(old_sig_priv,
+  new_enc_pub‖new_sig_pub‖key_version)`. No unproved rotation is accepted.
 
 ## 12. Replay / domain separation
 - **Replay:** `message_id` bound into header/AAD/transcript; recipient keeps a
