@@ -156,4 +156,14 @@ describe("Vault dashboard accessibility", () => {
 
     expect(screen.getByRole("dialog", { name: "GitHub" })).toBeVisible();
   });
+
+  it("does not present an empty vault as a perfect health score", async () => {
+    const user = userEvent.setup();
+    renderVault([]);
+
+    await user.click(screen.getByRole("button", { name: "Password Health" }));
+    expect(screen.getByText("not scored")).toBeVisible();
+    expect(screen.queryByRole("progressbar", { name: "Vault health score" })).not.toBeInTheDocument();
+    expect(screen.getByText("Add a login with a password to calculate vault health.")).toBeVisible();
+  });
 });

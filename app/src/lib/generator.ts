@@ -1,4 +1,6 @@
 // Password generator using the browser CSPRNG (crypto.getRandomValues).
+import { assessPassword } from "./password-health";
+
 export interface GenOptions {
   length: number;
   lower: boolean;
@@ -73,20 +75,8 @@ export function generatePassword(o: GenOptions): string {
   return output.join("");
 }
 
-/** Rough strength score 0..4 for a password. */
+/** Offline deterministic strength score 0..4 for a password. */
 export function strength(pw: string): { score: number; label: string; color: string } {
-  if (!pw) return { score: 0, label: "—", color: "#232b3b" };
-  let classes = 0;
-  if (/[a-z]/.test(pw)) classes++;
-  if (/[A-Z]/.test(pw)) classes++;
-  if (/[0-9]/.test(pw)) classes++;
-  if (/[^a-zA-Z0-9]/.test(pw)) classes++;
-  const entropy = pw.length * classes;
-  let score = 1;
-  if (entropy >= 28) score = 2;
-  if (entropy >= 48) score = 3;
-  if (entropy >= 80) score = 4;
-  const labels = ["Very weak", "Weak", "Fair", "Strong", "Excellent"];
-  const colors = ["#ff5d6c", "#ff5d6c", "#ffb454", "#3ad29f", "#3ad29f"];
-  return { score, label: labels[score], color: colors[score] };
+  const { score, label, color } = assessPassword(pw);
+  return { score, label, color };
 }
