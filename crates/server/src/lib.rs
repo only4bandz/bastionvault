@@ -545,15 +545,18 @@ async fn put_item(
     let email = require_auth(&st, &headers)?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
-    if !st.read().accounts.contains_key(&email) {
-        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
-    }
+    // Keep persistence and the read cache in one ordered critical section. If
+    // concurrent requests write the same id, the cache winner must be the same
+    // request as the SQLite winner.
+    let mut inner = st.write();
+    let acc = inner
+        .accounts
+        .get_mut(&email)
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
     st.db
         .put_item(&email, &id, &blob_json)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
-    if let Some(acc) = st.write().accounts.get_mut(&email) {
-        acc.items.insert(id, body.blob);
-    }
+    acc.items.insert(id, body.blob);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -563,12 +566,15 @@ async fn delete_item(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers)?;
+    let mut inner = st.write();
+    let acc = inner
+        .accounts
+        .get_mut(&email)
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
     st.db
         .delete_item(&email, &id)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
-    if let Some(acc) = st.write().accounts.get_mut(&email) {
-        acc.items.remove(&id);
-    }
+    acc.items.remove(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -580,15 +586,15 @@ async fn put_manifest(
     let email = require_auth(&st, &headers)?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
-    if !st.read().accounts.contains_key(&email) {
-        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
-    }
+    let mut inner = st.write();
+    let acc = inner
+        .accounts
+        .get_mut(&email)
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
     st.db
         .put_manifest(&email, &blob_json)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
-    if let Some(acc) = st.write().accounts.get_mut(&email) {
-        acc.manifest = Some(body.blob);
-    }
+    acc.manifest = Some(body.blob);
     Ok(StatusCode::NO_CONTENT)
 }
 

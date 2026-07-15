@@ -366,6 +366,94 @@ async fn data_persists_across_restart() {
     let _ = std::fs::remove_file(format!("{path}-shm"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_writes_keep_cache_and_sqlite_consistent() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir()
+        .join(format!(
+            "bastion-write-order-{}-{unique}.db",
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .to_string();
+
+    let app = server::app_with_db(&path);
+    let (vault, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let auth = reg.auth_secret.expose_b64().to_string();
+    let email = "write-order@example.com";
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({ "email": email, "registration": serde_json::to_value(&reg).unwrap() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, login) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": auth })),
+    )
+    .await;
+    let token = login["token"].as_str().unwrap().to_string();
+
+    let mut writes = tokio::task::JoinSet::new();
+    for value in 0..128 {
+        let app = app.clone();
+        let token = token.clone();
+        let blob = serde_json::to_value(
+            vault
+                .encrypt_item(value.to_string().as_bytes(), "shared-id")
+                .unwrap(),
+        )
+        .unwrap();
+        writes.spawn(async move {
+            send(
+                &app,
+                "PUT",
+                "/vault/items/shared-id",
+                Some(&token),
+                Some(json!({ "blob": blob })),
+            )
+            .await
+            .0
+        });
+    }
+    while let Some(result) = writes.join_next().await {
+        assert_eq!(result.unwrap(), StatusCode::NO_CONTENT);
+    }
+
+    let (_, live) = send(&app, "GET", "/vault", Some(&token), None).await;
+    drop(app);
+
+    let restarted = server::app_with_db(&path);
+    let (_, login) = send(
+        &restarted,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": reg.auth_secret.expose_b64() })),
+    )
+    .await;
+    let restarted_token = login["token"].as_str().unwrap();
+    let (_, persisted) = send(&restarted, "GET", "/vault", Some(restarted_token), None).await;
+    assert_eq!(
+        live["items"]["shared-id"], persisted["items"]["shared-id"],
+        "live reads and restart reads must select the same concurrent winner"
+    );
+
+    drop(restarted);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}-wal"));
+    let _ = std::fs::remove_file(format!("{path}-shm"));
+}
+
 /// Sign up + log in an account; returns its bearer token. Uses the email as the
 /// master password for test determinism/uniqueness.
 async fn signup_login(app: &Router, email: &str) -> String {
