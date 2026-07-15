@@ -110,7 +110,7 @@ export function ItemEditor({
                 <label>Password</label>
                 <div className="input-row">
                   <input className="input mono" value={item.password ?? ""} onChange={(e) => set("password", e.target.value)} />
-                  <button className="btn" title="Generate" onClick={() => set("password", generatePassword({ length: 20, lower: true, upper: true, digits: true, symbols: true, avoidAmbiguous: true }))}>
+                  <button className="btn" aria-label="Generate password" onClick={() => set("password", generatePassword({ length: 20, lower: true, upper: true, digits: true, symbols: true, avoidAmbiguous: true }))}>
                     <IcRefresh size={16} />
                   </button>
                 </div>

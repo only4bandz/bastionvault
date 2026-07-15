@@ -538,7 +538,7 @@ export default function App(): JSX.Element {
           toast={toast}
         />
       )}
-      {toastMsg && <div className="toast">{toastMsg}</div>}
+      {toastMsg && <div className="toast" role="status" aria-live="polite">{toastMsg}</div>}
     </>
   );
 }
