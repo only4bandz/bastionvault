@@ -26,6 +26,11 @@ pub const ACCOUNT_SECRET_LEN: usize = 16;
 /// letting a typo through).
 const CHECKSUM_LEN: usize = 2;
 
+/// Generous byte bound for a human-entered formatted Secret Key. The canonical
+/// form is 37 ASCII bytes; extra room permits whitespace and separators while
+/// rejecting attacker-controlled megabyte inputs before normalization allocates.
+const MAX_FORMATTED_INPUT_LEN: usize = 128;
+
 /// Version prefix of the encoded format, so the scheme can evolve later.
 /// The "1" is not part of the base32 alphabet (A-Z2-7): no collision with the
 /// encoded body is possible.
@@ -87,6 +92,9 @@ impl AccountSecret {
     /// and case, accepts the value with or without the version prefix. The
     /// checksum allows **rejecting a typo immediately** (without Argon2id).
     pub fn parse(input: &str) -> Result<Self> {
+        if input.len() > MAX_FORMATTED_INPUT_LEN {
+            return Err(CryptoError::Malformed);
+        }
         let cleaned: String = input
             .chars()
             .filter(|c| c.is_ascii_alphanumeric())
