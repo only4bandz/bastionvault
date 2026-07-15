@@ -3,6 +3,7 @@
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use axum::Router;
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -98,7 +99,7 @@ async fn full_account_and_vault_flow() {
         "POST",
         "/sessions",
         None,
-        Some(json!({ "email": email, "auth_secret": "not-the-secret" })),
+        Some(json!({ "email": email, "auth_secret": B64.encode([0u8; 32]) })),
     )
     .await;
     assert_eq!(s, StatusCode::UNAUTHORIZED);
@@ -151,6 +152,93 @@ async fn full_account_and_vault_flow() {
     assert_eq!(s, StatusCode::NO_CONTENT);
     let (_, body) = send(&app, "GET", "/vault", Some(&token), None).await;
     assert!(body["items"].get("github.com").is_none());
+}
+
+#[tokio::test]
+async fn rejects_malformed_account_identifiers() {
+    let app = server::app_in_memory();
+    let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let registration = serde_json::to_value(&reg).unwrap();
+    let invalid = [
+        "",
+        "missing-at-sign",
+        " leading@example.com",
+        "trailing@example.com ",
+        "two@@example.com",
+        "non-ascii-é@example.com",
+    ];
+
+    for email in invalid {
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/accounts",
+            None,
+            Some(json!({ "email": email, "registration": registration })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "accepted {email:?}");
+    }
+}
+
+#[tokio::test]
+async fn rejects_malformed_registration_before_storage() {
+    let app = server::app_in_memory();
+    let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let valid = serde_json::to_value(&reg).unwrap();
+    let mut invalid = Vec::new();
+
+    let mut wrong_version = valid.clone();
+    wrong_version["version"] = json!(2);
+    invalid.push(wrong_version);
+
+    let mut bad_salt = valid.clone();
+    bad_salt["salt"] = json!("not-base64");
+    invalid.push(bad_salt);
+
+    let mut weak_kdf = valid.clone();
+    weak_kdf["kdf"]["mem_kib"] = json!(1);
+    invalid.push(weak_kdf);
+
+    let mut bad_auth_secret = valid.clone();
+    bad_auth_secret["auth_secret"] = json!("short");
+    invalid.push(bad_auth_secret);
+
+    let mut bad_wrapped_nonce = valid;
+    bad_wrapped_nonce["wrapped_vault_key"]["nonce"] = json!("short");
+    invalid.push(bad_wrapped_nonce);
+
+    for (index, registration) in invalid.into_iter().enumerate() {
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/accounts",
+            None,
+            Some(json!({
+                "email": format!("invalid-registration-{index}@example.com"),
+                "registration": registration
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "accepted case {index}");
+    }
+}
+
+#[tokio::test]
+async fn rejects_malformed_login_credentials_without_hashing() {
+    let app = server::app_in_memory();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": "missing@example.com",
+            "auth_secret": "not-a-fixed-width-secret"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

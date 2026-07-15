@@ -892,6 +892,7 @@ version = "0.1.0"
 dependencies = [
  "argon2",
  "axum",
+ "base64",
  "crypto-core",
  "data-encoding",
  "http-body-util",
