@@ -18,3 +18,5 @@ jobs:
         run: bash scripts/check-no-browser-secret-storage.sh
       - name: Forbid vault metadata egress
         run: bash scripts/check-no-vault-metadata-egress.sh
+      - name: Enforce the WASM demo CSP
+        run: bash scripts/check-web-demo-csp.sh

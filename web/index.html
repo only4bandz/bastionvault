@@ -3,34 +3,14 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+  />
   <title>🔐 Zero-knowledge vault — WASM demo</title>
-  <style>
-    :root { --bg:#070b12; --panel:#0e151f; --line:#1d2a3a; --txt:#cfe0f0; --dim:#6c8199;
-            --accent:#37e0a0; --warn:#ffb454; --err:#ff5c6c; }
-    * { box-sizing:border-box; }
-    body { margin:0; background:var(--bg); color:var(--txt);
-           font-family:ui-monospace,"Share Tech Mono",Menlo,Consolas,monospace; line-height:1.5; }
-    header { padding:18px 24px; border-bottom:1px solid var(--line); }
-    h1 { font-size:18px; margin:0; letter-spacing:1px; }
-    .sub { color:var(--dim); font-size:12px; }
-    main { display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:20px; max-width:1100px; margin:0 auto; }
-    .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
-    .panel h2 { font-size:13px; text-transform:uppercase; letter-spacing:1px; color:var(--accent); margin:0 0 12px; }
-    .server h2 { color:var(--warn); }
-    label { display:block; font-size:11px; color:var(--dim); margin:10px 0 4px; }
-    input { width:100%; background:#060a10; border:1px solid var(--line); color:var(--txt);
-            padding:8px 10px; border-radius:6px; font:inherit; }
-    button { background:transparent; border:1px solid var(--accent); color:var(--accent);
-             padding:8px 14px; border-radius:6px; font:inherit; cursor:pointer; margin-top:10px; }
-    button:hover { background:rgba(55,224,160,.1); }
-    button:disabled { opacity:.4; cursor:not-allowed; }
-    pre { background:#060a10; border:1px solid var(--line); border-radius:6px; padding:10px;
-          font-size:11px; white-space:pre-wrap; word-break:break-all; max-height:230px; overflow:auto; color:var(--dim); }
-    .ok { color:var(--accent); } .err { color:var(--err); } .warn { color:var(--warn); }
-    .row { display:flex; gap:8px; } .row > * { flex:1; }
-    .pill { display:inline-block; font-size:10px; padding:2px 8px; border:1px solid var(--line); border-radius:20px; color:var(--dim); }
-    .hint { font-size:11px; color:var(--dim); margin-top:6px; }
-  </style>
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+  <link rel="stylesheet" href="./style.css" />
+  <script type="module" src="./app.js"></script>
 </head>
 <body>
   <header>
@@ -41,16 +21,16 @@
   <main>
     <section class="panel">
       <h2>1 · Account</h2>
-      <label>Master password</label>
+      <label for="reg-pw">Master password</label>
       <input id="reg-pw" type="password" value="correct horse battery staple" />
       <button id="btn-register">Create vault</button>
       <div class="hint">Argon2id 64 MiB — creation takes ~1 s in the browser.</div>
       <div id="secret-out"></div>
 
-      <h2 style="margin-top:20px">2 · Unlock (another device)</h2>
-      <label>Master password</label>
+      <h2 class="section-gap">2 · Unlock (another device)</h2>
+      <label for="unlock-pw">Master password</label>
       <input id="unlock-pw" type="password" />
-      <label>Secret Key</label>
+      <label for="unlock-sk">Secret Key</label>
       <input id="unlock-sk" placeholder="A1-XXXXX-XXXXX-…" />
       <button id="btn-unlock" disabled>Unlock from the "server"</button>
       <div id="unlock-out"></div>
@@ -59,12 +39,12 @@
     <section class="panel">
       <h2>3 · Items</h2>
       <div class="row">
-        <div><label>Name (id)</label><input id="item-id" value="github.com" /></div>
-        <div><label>Secret</label><input id="item-val" value="hunter2" /></div>
+        <div><label for="item-id">Name (id)</label><input id="item-id" value="github.com" /></div>
+        <div><label for="item-val">Secret</label><input id="item-val" value="hunter2" /></div>
       </div>
-      <button id="btn-add" disabled>Encrypt & save</button>
+      <button id="btn-add" disabled>Encrypt &amp; save</button>
       <div id="item-out"></div>
-      <h2 style="margin-top:20px">Decrypted items (in memory)</h2>
+      <h2 class="section-gap">Decrypted items (in memory)</h2>
       <pre id="plain-list">—</pre>
     </section>
 
@@ -79,105 +59,5 @@
       <pre id="log">Loading WASM module…</pre>
     </section>
   </main>
-
-  <script type="module">
-    import init, { register, unlock } from './pkg/crypto_wasm.js';
-
-    const $ = (id) => document.getElementById(id);
-    const log = (msg, cls='') => { $('log').innerHTML = `<span class="${cls}">${msg}</span>`; };
-
-    // The "server" = simple local storage of opaque data.
-    const server = { registration: null, items: {} /* id -> blobJSON */ };
-    const renderServer = () => {
-      $('server-view').textContent = JSON.stringify({
-        registration: server.registration ? JSON.parse(server.registration) : null,
-        items: server.items,
-      }, null, 2);
-    };
-
-    let account = null; // unlocked vault, in memory only
-    const renderPlain = () => {
-      if (!account || account.is_locked) { $('plain-list').textContent = '— (locked)'; return; }
-      const lines = Object.keys(server.items).map((id) => {
-        try { return `${id} = ${account.decrypt_item(server.items[id], id)}`; }
-        catch { return `${id} = <unreadable>`; }
-      });
-      $('plain-list').textContent = lines.length ? lines.join('\n') : '—';
-    };
-
-    // ── Auto-lock: shrink the window during which the vault key lives in
-    // browser memory. We lock on inactivity, and whenever the tab is hidden
-    // or loses focus (a stealer's best moment to read memory unobserved).
-    const INACTIVITY_MS = 2 * 60 * 1000; // 2 min
-    let idleTimer = null;
-    const doLock = (reason) => {
-      if (!account || account.is_locked) return;
-      account.lock();                 // drops + zeroizes the vault key in WASM
-      $('btn-add').disabled = true;
-      renderPlain();
-      log(`Locked (${reason}). Unlock again to read items.`, 'warn');
-    };
-    const armIdle = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => doLock('inactivity'), INACTIVITY_MS);
-    };
-    ['mousemove', 'keydown', 'click'].forEach((ev) =>
-      window.addEventListener(ev, armIdle, { passive: true }));
-    window.addEventListener('blur', () => doLock('focus lost'));
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') doLock('tab hidden');
-    });
-
-    await init();
-    log('WASM module ready. Create a vault to get started.', 'ok');
-
-    $('btn-register').onclick = () => {
-      try {
-        log('Deriving Argon2id…');
-        account = register($('reg-pw').value);
-        server.registration = account.registration_json;
-        server.items = {};
-        // One-shot reveal: after this single call the Secret Key is dropped
-        // (zeroized) in WASM and cannot be read again.
-        const reveal = JSON.parse(account.reveal_secret('alice@example.com'));
-        $('secret-out').innerHTML =
-          `<label>Secret Key (keep it safe — shown only once)</label>` +
-          `<pre class="warn">${reveal.secret_key}</pre>` +
-          `<details><summary class="hint">View the Emergency Kit</summary><pre>${reveal.emergency_kit}</pre></details>`;
-        $('unlock-sk').value = reveal.secret_key;  // pre-filled for the demo
-        $('unlock-pw').value = $('reg-pw').value;
-        $('btn-add').disabled = false;
-        $('btn-unlock').disabled = false;
-        armIdle();
-        renderServer(); renderPlain();
-        log('Vault created. The server only receives opaque data.', 'ok');
-      } catch (e) { log('Error: ' + e, 'err'); }
-    };
-
-    $('btn-add').onclick = () => {
-      try {
-        const id = $('item-id').value, val = $('item-val').value;
-        server.items[id] = account.encrypt_item(val, id);
-        armIdle();
-        renderServer(); renderPlain();
-        log(`Item "${id}" encrypted client-side then sent to the server.`, 'ok');
-      } catch (e) { log('Error: ' + e, 'err'); }
-    };
-
-    $('btn-unlock').onclick = () => {
-      try {
-        if (!server.registration) { log('Create a vault first.', 'warn'); return; }
-        log('Unlocking…');
-        account = unlock($('unlock-pw').value, $('unlock-sk').value, server.registration);
-        $('btn-add').disabled = false;
-        armIdle();
-        renderPlain();
-        log('Unlocked. Items decrypted in memory.', 'ok');
-      } catch (e) {
-        account = null; renderPlain();
-        log('Failed: invalid password or Secret Key.', 'err');
-      }
-    };
-  </script>
 </body>
 </html>
