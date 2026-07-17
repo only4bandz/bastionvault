@@ -26,6 +26,7 @@ import {
 import { makeApi, ApiError } from "./lib/api.js";
 import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.js";
 import { revealFieldValue } from "./lib/reveal-policy.js";
+import { CLIPBOARD_CLEAR_MS } from "./lib/clipboard-clear.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
 import {
@@ -361,7 +362,41 @@ async function takeLastUser(host) {
   return username;
 }
 
+// ── Offscreen document: owns the clipboard-clear timer (see offscreen.js) ──
+let offscreenReady;
+async function ensureOffscreen() {
+  if (await chrome.offscreen.hasDocument()) return;
+  if (!offscreenReady) {
+    offscreenReady = chrome.offscreen
+      .createDocument({
+        url: "offscreen.html",
+        reasons: ["CLIPBOARD"],
+        justification: "Clear copied secrets from the clipboard after a delay.",
+      })
+      .catch(() => {})
+      .finally(() => {
+        offscreenReady = null;
+      });
+  }
+  await offscreenReady;
+}
+
+async function scheduleClipboardClear(delayMs) {
+  await ensureOffscreen();
+  chrome.runtime
+    .sendMessage({ target: "offscreen-clipboard", type: "CLIP_SCHEDULE_CLEAR", delayMs })
+    .catch(() => {});
+}
+
+async function cancelClipboardClear() {
+  if (!(await chrome.offscreen.hasDocument())) return;
+  chrome.runtime
+    .sendMessage({ target: "offscreen-clipboard", type: "CLIP_CANCEL_CLEAR" })
+    .catch(() => {});
+}
+
 async function lock() {
+  await cancelClipboardClear(); // a pending clear outliving the session is fine to drop
   await clearPending(); // don't leave a staged plaintext password around
   lastUser = null;
   await chrome.storage.session.remove("lastUser");
@@ -818,6 +853,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await chrome.storage.session.remove("lastUser");
           sendResponse({ ok: true });
           break;
+        case "CLIP_CLEAR": {
+          // The popup copied a secret and wants it wiped after the delay. The
+          // popup's own timer dies when it closes, so the offscreen document
+          // owns it. No plaintext crosses here — just the schedule signal.
+          await scheduleClipboardClear(CLIPBOARD_CLEAR_MS);
+          sendResponse({ ok: true });
+          break;
+        }
         case "ITEM": {
           // Full decrypted item for the detail view. The popup is a trusted
           // extension-page context (same trust boundary that already gets

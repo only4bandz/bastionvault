@@ -33,7 +33,7 @@
       "all_frames": true
     }
   ],
-  "permissions": ["storage", "activeTab", "scripting", "alarms", "favicon", "idle"],
+  "permissions": ["storage", "activeTab", "scripting", "alarms", "favicon", "idle", "offscreen"],
   "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
   "optional_host_permissions": ["https://*/*"],
   "content_security_policy": {

@@ -28,18 +28,11 @@ async function copyText(text, label) {
   try {
     await navigator.clipboard.writeText(text);
     toast(`${label} copied · clears in 12s`);
-    // Best-effort hygiene: overwrite the clipboard after 12s *only if it's still
-    // the value we copied*. Caveats (documented, not silently relied on): the
-    // popup must still be open for the timer to fire, and readText() needs a
-    // focused document — so this is a courtesy, not a guarantee. Prefer autofill
-    // over copy for secrets. OS/clipboard-manager/sync copies are out of scope.
-    setTimeout(async () => {
-      try {
-        if ((await navigator.clipboard.readText()) === text) await navigator.clipboard.writeText("");
-      } catch {
-        /* clipboard not readable without focus/permission; ignore */
-      }
-    }, 12000);
+    // The wipe is owned by the background/offscreen document, NOT this popup:
+    // the popup closes on click-away (FILL even calls window.close()), so a
+    // timer here would never fire. We hand the schedule to the worker and send
+    // no plaintext — only the signal. See offscreen.js.
+    send({ type: "CLIP_CLEAR" }).catch(() => {});
   } catch {
     toast("Copy failed");
   }
