@@ -9,11 +9,13 @@ export type VaultFilter = "all" | ItemType;
 export function filterVaultItems(
   items: VaultItem[],
   filter: VaultFilter,
-  rawQuery: string
+  rawQuery: string,
+  favoritesOnly = false
 ): VaultItem[] {
   const query = rawQuery.trim().toLowerCase();
   return items
     .filter((item) => filter === "all" || item.type === filter)
+    .filter((item) => !favoritesOnly || item.favorite === true)
     .filter((item) => {
       if (!query) return true;
       // Card brand/bank/type are display metadata the list already renders in
