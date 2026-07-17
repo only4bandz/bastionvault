@@ -1,4 +1,5 @@
 import { matchesSite } from "./match.js";
+import { registrableDomain } from "./psl.js";
 
 const INSECURE_HTTP_ERROR = "Credentials are never released to insecure HTTP pages.";
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
@@ -15,6 +16,31 @@ export function credentialPageError(rawUrl) {
   if (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname.toLowerCase())) return null;
   if (url.protocol === "http:") return INSECURE_HTTP_ERROR;
   return "Open a website before filling credentials.";
+}
+
+/**
+ * Inline autofill (SUGGEST/CREDS) runs inside the sender FRAME, which may be
+ * an iframe. Releasing bank.com credentials into a bank.com iframe embedded by
+ * evil.example is a UI-redress trap: the user believes they are on the top
+ * page. Rule (Bitwarden's model): the frame may receive suggestions/credentials
+ * only when its registrable site matches the top-level page's registrable site.
+ * Returns null when allowed, an error string otherwise. Fails closed when the
+ * top URL is unavailable.
+ */
+export function frameAutofillError(frameUrl, tabUrl) {
+  let frameHost;
+  let tabHost;
+  try {
+    frameHost = new URL(frameUrl).hostname.toLowerCase();
+    tabHost = new URL(tabUrl).hostname.toLowerCase();
+  } catch {
+    return "Autofill is unavailable in this frame.";
+  }
+  if (!frameHost || !tabHost) return "Autofill is unavailable in this frame.";
+  if (registrableDomain(frameHost) !== registrableDomain(tabHost)) {
+    return "Autofill is disabled inside third-party frames.";
+  }
+  return null;
 }
 
 export function autofillPolicyError(item, tab, expectedTabId) {
