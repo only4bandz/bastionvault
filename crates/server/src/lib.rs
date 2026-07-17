@@ -84,6 +84,11 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SENDS_PER_MIN: u32 = 60; // per sender
 const MAX_INBOUND_PER_MIN: u32 = 120; // per recipient (anti inbox-flood)
 const MAX_LOOKUPS_PER_MIN: u32 = 120;
+// Authenticated read throttles: a full vault read clones and re-serializes up
+// to MAX_VAULT_BYTES per call, and an inbox read runs a purge + list — both
+// are cheap amplification levers for a hostile-but-authenticated client.
+const MAX_VAULT_READS_PER_MIN: u32 = 60;
+const MAX_INBOX_READS_PER_MIN: u32 = 60;
 const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
 
 fn now_secs() -> i64 {
@@ -1047,6 +1052,7 @@ async fn get_vault(
     headers: HeaderMap,
 ) -> Result<Json<VaultResponse>, ApiError> {
     let email = require_auth(&st, &headers)?;
+    rate_limit(&st, &email, "vault-read", MAX_VAULT_READS_PER_MIN)?;
     let inner = st.read();
     let acc = inner
         .accounts
@@ -2128,6 +2134,7 @@ async fn send_inbox(
     headers: HeaderMap,
 ) -> Result<Json<Vec<InboxItem>>, ApiError> {
     let email = require_auth(&st, &headers)?;
+    rate_limit(&st, &email, "inbox-read", MAX_INBOX_READS_PER_MIN)?;
     let mine = st
         .db
         .bastion_id_for(&email)

@@ -2039,3 +2039,29 @@ async fn unknown_account_login_pays_the_same_hashing_cost() {
         "unknown-account login answered too fast: {unknown_account_elapsed:?} vs {wrong_password_elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn rate_limits_authenticated_vault_and_inbox_reads() {
+    let app = server::app_in_memory();
+    let token = signup_login(&app, "read-limits@example.com").await;
+
+    // Vault reads: allowed up to the per-minute cap, then throttled.
+    for i in 0..60 {
+        let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK, "vault read {i}");
+    }
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // Inbox reads: same shape once an identity is published.
+    let identity = IdentityKeys::generate(1);
+    let public = serde_json::to_value(identity.public()).unwrap();
+    let (status, _) = send(&app, "PUT", "/send/identity", Some(&token), Some(public)).await;
+    assert_eq!(status, StatusCode::OK);
+    for i in 0..60 {
+        let (status, _) = send(&app, "GET", "/send/inbox", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK, "inbox read {i}");
+    }
+    let (status, _) = send(&app, "GET", "/send/inbox", Some(&token), None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
