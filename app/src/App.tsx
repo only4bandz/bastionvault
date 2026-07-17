@@ -7,6 +7,7 @@ import { ensureWasm, register, unlock, type Account } from "./lib/wasm";
 import {
   api,
   ApiError,
+  SESSION_EXPIRED_EVENT,
   type Blob,
   type Registration,
   type VaultData,
@@ -234,6 +235,19 @@ export default function App(): JSX.Element {
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [phase, lock]);
+
+  // Server-side session expiry: any authenticated request rejected with 401
+  // (inbox poll, directory lookup, item sync…) locks the vault immediately,
+  // instead of stranding the user on a screen whose every action fails.
+  useEffect(() => {
+    if (phase !== "vault") return;
+    const onExpired = () => {
+      toast("Session expired — vault locked");
+      lock();
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
+  }, [phase, lock, toast]);
 
   // ── create a new vault locally; persist only after the recovery key is saved ──
   const onCreate = useCallback(async (em: string, pw: string) => {
