@@ -1,5 +1,6 @@
 // Password generator using the browser CSPRNG (crypto.getRandomValues).
 import { assessPassword } from "./password-health";
+import { WORDLIST } from "./wordlist";
 
 export interface GenOptions {
   length: number;
@@ -73,6 +74,54 @@ export function generatePassword(o: GenOptions): string {
     [output[index], output[swapWith]] = [output[swapWith], output[index]];
   }
   return output.join("");
+}
+
+// ─── Passphrases (diceware-style) ───
+
+export interface PassphraseOptions {
+  words: number;
+  separator: string;
+  capitalize: boolean;
+  includeNumber: boolean;
+}
+
+export const MIN_PASSPHRASE_WORDS = 3;
+export const MAX_PASSPHRASE_WORDS = 10;
+export const MAX_SEPARATOR_CHARS = 3;
+
+/** Entropy of one uniformly-sampled word, in bits (log2 of the list size). */
+export const BITS_PER_WORD = Math.log2(WORDLIST.length);
+
+export function generatePassphrase(o: PassphraseOptions): string {
+  if (
+    !Number.isSafeInteger(o.words) ||
+    o.words < MIN_PASSPHRASE_WORDS ||
+    o.words > MAX_PASSPHRASE_WORDS
+  ) {
+    throw new RangeError(
+      `Passphrase length must be ${MIN_PASSPHRASE_WORDS} to ${MAX_PASSPHRASE_WORDS} words.`
+    );
+  }
+  if (o.separator.length > MAX_SEPARATOR_CHARS) {
+    throw new RangeError(`Separator cannot exceed ${MAX_SEPARATOR_CHARS} characters.`);
+  }
+  const words = Array.from({ length: o.words }, () => {
+    const word = WORDLIST[uniformRandomInt(WORDLIST.length)];
+    return o.capitalize ? word[0].toUpperCase() + word.slice(1) : word;
+  });
+  if (o.includeNumber) {
+    // One random digit appended to one random word (a common site requirement;
+    // adds log2(10 * words) bits on top of the word entropy).
+    const position = uniformRandomInt(words.length);
+    words[position] += String(uniformRandomInt(10));
+  }
+  return words.join(o.separator);
+}
+
+/** Exact entropy of a generated passphrase, in bits. */
+export function passphraseBits(o: PassphraseOptions): number {
+  const wordBits = o.words * BITS_PER_WORD;
+  return o.includeNumber ? wordBits + Math.log2(10 * o.words) : wordBits;
 }
 
 /** Offline deterministic strength score 0..4 for a password. */

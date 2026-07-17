@@ -84,3 +84,69 @@ describe("uniformRandomInt", () => {
     }
   );
 });
+
+import {
+  BITS_PER_WORD,
+  generatePassphrase,
+  MAX_PASSPHRASE_WORDS,
+  MIN_PASSPHRASE_WORDS,
+  passphraseBits,
+  type PassphraseOptions,
+} from "./generator";
+import { WORDLIST } from "./wordlist";
+
+const PHRASE: PassphraseOptions = {
+  words: 5,
+  separator: "-",
+  capitalize: false,
+  includeNumber: false,
+};
+
+describe("wordlist", () => {
+  it("holds exactly 2048 unique lowercase words (11 bits each)", () => {
+    expect(WORDLIST).toHaveLength(2048);
+    expect(new Set(WORDLIST).size).toBe(2048);
+    expect(WORDLIST.every((w) => /^[a-z]{2,8}$/.test(w))).toBe(true);
+    expect(BITS_PER_WORD).toBe(11);
+  });
+});
+
+describe("generatePassphrase", () => {
+  it("produces the requested number of wordlist words", () => {
+    const phrase = generatePassphrase(PHRASE);
+    const words = phrase.split("-");
+    expect(words).toHaveLength(5);
+    words.forEach((w) => expect(WORDLIST).toContain(w));
+  });
+
+  it("supports capitalization, custom separators and an appended digit", () => {
+    const phrase = generatePassphrase({
+      words: 4,
+      separator: ".",
+      capitalize: true,
+      includeNumber: true,
+    });
+    const words = phrase.split(".");
+    expect(words).toHaveLength(4);
+    words.forEach((w) => expect(w).toMatch(/^[A-Z][a-z]+\d?$/));
+    expect(words.filter((w) => /\d$/.test(w))).toHaveLength(1);
+  });
+
+  it("rejects out-of-policy word counts and separators", () => {
+    expect(() => generatePassphrase({ ...PHRASE, words: MIN_PASSPHRASE_WORDS - 1 })).toThrow(
+      RangeError
+    );
+    expect(() => generatePassphrase({ ...PHRASE, words: MAX_PASSPHRASE_WORDS + 1 })).toThrow(
+      RangeError
+    );
+    expect(() => generatePassphrase({ ...PHRASE, separator: "----" })).toThrow(RangeError);
+  });
+
+  it("reports exact entropy", () => {
+    expect(passphraseBits(PHRASE)).toBe(55);
+    expect(passphraseBits({ ...PHRASE, includeNumber: true })).toBeCloseTo(
+      55 + Math.log2(50),
+      10
+    );
+  });
+});
