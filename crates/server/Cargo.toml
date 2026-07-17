@@ -22,6 +22,10 @@ argon2 = "0.5"
 data-encoding = "2"
 # Durable storage of opaque encrypted blobs (bundled = no system SQLite needed).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Structured, level-filtered logs. Deliberately used ONLY for non-secret
+# operational data (method, status, terse error) — never emails/tokens/blobs.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

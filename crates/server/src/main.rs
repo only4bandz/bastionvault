@@ -2,6 +2,15 @@
 
 #[tokio::main]
 async fn main() {
+    // Structured logs; level via RUST_LOG (default info). Only non-secret
+    // operational data is ever emitted (see the request/error log middleware).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7777".to_string());
     let listener = tokio::net::TcpListener::bind(&addr)
         .await

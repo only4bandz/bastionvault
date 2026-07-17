@@ -267,6 +267,7 @@ fn build_with_rate_limits(
         )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(request_log))
         .with_state(state)
 }
 
@@ -274,6 +275,47 @@ fn build_with_rate_limits(
 ///
 /// The API serves bearer tokens, wrapped vault keys and encrypted blobs; none
 /// of it may ever land in a shared cache or be sniffed/framed by a browser.
+/// Redacts the dynamic segment of routes whose path carries user data, so the
+/// request log never records an email address (`/accounts/:email/prelogin`) or
+/// an opaque routing id. Everything else is a fixed route shape.
+fn redacted_path(path: &str) -> String {
+    if path.starts_with("/accounts/") && path.ends_with("/prelogin") {
+        return "/accounts/{email}/prelogin".to_string();
+    }
+    if let Some(rest) = path.strip_prefix("/send/directory/") {
+        if !rest.is_empty() {
+            return "/send/directory/{id}".to_string();
+        }
+    }
+    if let Some(rest) = path.strip_prefix("/send/inbox/") {
+        if !rest.is_empty() {
+            return "/send/inbox/{id}".to_string();
+        }
+    }
+    if let Some(rest) = path.strip_prefix("/vault/items/") {
+        if !rest.is_empty() {
+            return "/vault/items/{id}".to_string();
+        }
+    }
+    path.to_string()
+}
+
+/// One structured line per request: method, redacted route, status. 5xx are
+/// logged at error, everything else at info. No request/response bodies, no
+/// headers — nothing secret is ever recorded.
+async fn request_log(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = redacted_path(request.uri().path());
+    let response = next.run(request).await;
+    let status = response.status().as_u16();
+    if response.status().is_server_error() {
+        tracing::error!(%method, path, status, "request");
+    } else {
+        tracing::info!(%method, path, status, "request");
+    }
+    response
+}
+
 async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -774,6 +816,11 @@ struct ApiError(StatusCode, &'static str);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        // Log server-side faults where they funnel. The message is a fixed,
+        // non-secret label (no emails/tokens/blobs), so this is safe to emit.
+        if self.0.is_server_error() {
+            tracing::error!(status = self.0.as_u16(), detail = self.1, "request failed");
+        }
         (self.0, self.1).into_response()
     }
 }
@@ -2219,5 +2266,21 @@ mod tests {
             .query_row("PRAGMA synchronous", [], |r| r.get(0))
             .unwrap();
         assert_eq!(synchronous, 1);
+    }
+
+    #[test]
+    fn request_log_path_is_redacted_of_user_data() {
+        // Emails and opaque ids must never reach the logs.
+        assert_eq!(
+            redacted_path("/accounts/alice%40example.com/prelogin"),
+            "/accounts/{email}/prelogin"
+        );
+        assert_eq!(redacted_path("/send/directory/ABCDEF"), "/send/directory/{id}");
+        assert_eq!(redacted_path("/send/inbox/msg-123"), "/send/inbox/{id}");
+        assert_eq!(redacted_path("/vault/items/item-9"), "/vault/items/{id}");
+        // Fixed routes pass through unchanged.
+        assert_eq!(redacted_path("/vault"), "/vault");
+        assert_eq!(redacted_path("/health"), "/health");
+        assert_eq!(redacted_path("/send/inbox"), "/send/inbox");
     }
 }
