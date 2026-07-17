@@ -311,9 +311,31 @@ impl Account {
 
     /// Generate a fresh Send identity, hold it in memory, and return the
     /// ENCRYPTED reserved vault item (JSON `EncryptedBlob`) to persist on the
-    /// server under [`send_identity_item_id`]. Replaces any existing one.
+    /// server under [`send_identity_item_id`].
+    ///
+    /// Fails if an identity is already loaded: overwriting the X25519 key would
+    /// silently orphan every inbound sealed message and every `LockedRecord`
+    /// bound to the old key. Rotation must go through [`Self::replace_send_identity`].
     pub fn create_send_identity(&mut self) -> Result<String, JsError> {
-        let ident = SendIdentity::generate(1);
+        if self.identity.is_some() {
+            return Err(JsError::new("send identity already exists"));
+        }
+        self.mint_send_identity(SendIdentity::generate(1))
+    }
+
+    /// Deliberately replace the in-memory Send identity with a freshly generated
+    /// one at the next key version, returning the new encrypted reserved item.
+    ///
+    /// DESTRUCTIVE: messages and locked records sealed to the previous key can
+    /// no longer be opened. Exposed as a distinct, explicit call so a stray
+    /// `create_send_identity` can never trigger it by accident.
+    pub fn replace_send_identity(&mut self) -> Result<String, JsError> {
+        let next_version = self.identity.as_ref().map_or(1, |id| id.key_version() + 1);
+        self.mint_send_identity(SendIdentity::generate(next_version))
+    }
+
+    /// Encrypt `ident` into its reserved vault item and store it in memory.
+    fn mint_send_identity(&mut self, ident: SendIdentity) -> Result<String, JsError> {
         let stored = Zeroizing::new(B64.encode(&*ident.to_bytes()));
         let blob = {
             let vault = self.vault()?;
