@@ -41,30 +41,37 @@ export function Unlock({
           encrypted vault from the server and decrypt it here, on your device.
         </p>
 
-        <div className="field">
-          <label>Email</label>
-          <input className="input" type="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-        </div>
-        <div className="field">
-          <label>Master password</label>
-          <SecretInput label="Master password" value={pw} onChange={(e) => setPw(e.target.value)} />
-        </div>
-        <div className="field">
-          <label>Secret Key</label>
-          <input
-            className="input mono"
-            value={sk}
-            placeholder="A1-XXXXX-XXXXX-…"
-            onChange={(e) => setSk(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && go()}
-          />
-        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void go();
+          }}
+        >
+          <div className="field">
+            <label>Email</label>
+            <input className="input" type="email" autoComplete="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
+          </div>
+          <div className="field">
+            <label>Master password</label>
+            <SecretInput label="Master password" autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} />
+          </div>
+          <div className="field">
+            <label>Secret Key</label>
+            <input
+              className="input mono"
+              value={sk}
+              placeholder="A1-XXXXX-XXXXX-…"
+              autoComplete="off"
+              onChange={(e) => setSk(e.target.value)}
+            />
+          </div>
 
-        {err && <div className="callout">{err}</div>}
+          {err && <div className="callout">{err}</div>}
 
-        <button className="btn btn-primary btn-block" onClick={go} disabled={busy}>
-          {busy ? "Unlocking…" : "Unlock"}
-        </button>
+          <button className="btn btn-primary btn-block" type="submit" disabled={busy}>
+            {busy ? "Unlocking…" : "Unlock"}
+          </button>
+        </form>
 
         <div className="auth-foot">
           New here?{" "}
