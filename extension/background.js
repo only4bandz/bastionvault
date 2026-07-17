@@ -739,7 +739,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         case "STAGE_USER": {
           // Username/email typed (often on a prior step than the password).
-          if (!senderHost) return sendResponse({ ok: false, error: "forbidden" });
+          // Insecure-HTTP pages can be attacker-authored (network MITM): they
+          // must not feed the save pipeline either — same rule as fills.
+          if (!senderHost || senderCredentialError) {
+            return sendResponse({ ok: false, error: "forbidden" });
+          }
           await setLastUser(msg.username, senderHost);
           sendResponse({ ok: true });
           break;
@@ -748,7 +752,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // Form submitted with a password — remember it so we can offer to save
           // once the page settles. Host/URL are taken from the SENDER frame, not
           // the message, so a page can't stage a save for another origin.
-          if (msg.password && senderHost) {
+          if (msg.password && senderHost && !senderCredentialError) {
             const stagedUser = await takeLastUser(senderHost);
             await setPending({
               host: senderHost,
@@ -765,7 +769,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // the non-secret bits; the password stays in the worker. Passive — no
           // keep-unlock extension. Host comes from the sender.
           const p = await getPending();
-          if (p && senderHost && matchesSite(p.url || p.host, senderHost)) {
+          if (p && senderHost && !senderCredentialError && matchesSite(p.url || p.host, senderHost)) {
             const s = session;
             const dup =
               s && [...s.items.values()].some((it) => it.type === "login" && it.username === p.username && matchesSite(it.url || it.title, senderHost));
@@ -785,7 +789,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // dedupe path, overwrite) a credential staged on site X. Host and
           // title are taken from the staged pending (host-bound at STAGE_SAVE),
           // never from the message.
-          if (!senderHost || !matchesSite(p.url || p.host, senderHost)) {
+          if (!senderHost || senderCredentialError || !matchesSite(p.url || p.host, senderHost)) {
             return sendResponse({ ok: false, error: "forbidden" });
           }
           await touchSession();

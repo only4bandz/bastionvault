@@ -319,10 +319,14 @@
       .catch(() => {});
   }
 
-  document.addEventListener("submit", (e) => stageFromForm(e.target), true);
+  // Only genuine user gestures may stage credentials: synthetic events fired
+  // by page scripts (el.dispatchEvent) must not be able to push values into
+  // the save pipeline behind the user's back.
+  document.addEventListener("submit", (e) => e.isTrusted && stageFromForm(e.target), true);
   document.addEventListener(
     "click",
     (e) => {
+      if (!e.isTrusted) return;
       const btn = e.target.closest && e.target.closest("button, input[type=submit], [role=button]");
       if (!btn) return;
       const label = `${btn.textContent || ""} ${btn.value || ""}`;
@@ -336,6 +340,7 @@
   document.addEventListener(
     "change",
     (e) => {
+      if (!e.isTrusted) return;
       const el = e.target;
       if (el?.tagName !== "INPUT" || !el.value) return;
       const t = (el.type || "").toLowerCase();
