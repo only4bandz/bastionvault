@@ -13,6 +13,7 @@
 use data_encoding::BASE32_NOPAD;
 use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::error::{CryptoError, Result};
@@ -111,7 +112,14 @@ impl AccountSecret {
         }
         let mut secret = [0u8; ACCOUNT_SECRET_LEN];
         secret.copy_from_slice(&bytes[..ACCOUNT_SECRET_LEN]);
-        if bytes[ACCOUNT_SECRET_LEN..] != checksum(&secret) {
+        // Constant-time compare: the checksum is derived from the secret, so a
+        // variable-time `!=` on it would leak secret-dependent timing. Matches
+        // the crate's discipline elsewhere (vault.rs / pinlock.rs use `subtle`).
+        if checksum(&secret)
+            .ct_eq(&bytes[ACCOUNT_SECRET_LEN..])
+            .unwrap_u8()
+            == 0
+        {
             secret.zeroize();
             return Err(CryptoError::Malformed);
         }
