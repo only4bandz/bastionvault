@@ -78,6 +78,17 @@ it("filters favorites independently from type and search", () => {
   expect(filterVaultItems(items, "login", "git", true).map((item) => item.id)).toEqual(["a"]);
 });
 
+it("supports deterministic explicit sort modes", () => {
+  const items = [
+    { id: "b", type: "login", title: "Zulu", updatedAt: 200, favorite: true },
+    { id: "c", type: "note", title: "alpha", updatedAt: 100 },
+    { id: "a", type: "card", title: "Alpha", updatedAt: 200 },
+  ] as VaultItem[];
+  expect(filterVaultItems(items, "all", "", false, "recent").map((item) => item.id)).toEqual(["a", "b", "c"]);
+  expect(filterVaultItems(items, "all", "", false, "oldest").map((item) => item.id)).toEqual(["c", "a", "b"]);
+  expect(filterVaultItems(items, "all", "", false, "name").map((item) => item.id)).toEqual(["a", "c", "b"]);
+});
+
 it("matches displayed card metadata but never secret fields", () => {
   const card: VaultItem = {
     id: "card-meta",

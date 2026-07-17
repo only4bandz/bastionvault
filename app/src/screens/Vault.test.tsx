@@ -114,6 +114,33 @@ describe("Vault dashboard accessibility", () => {
     expect(screen.queryByRole("button", { name: "Open Recovery" })).not.toBeInTheDocument();
   });
 
+  it("updates semantic relative timestamps on a minute boundary", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(LOGIN.updatedAt + 30_000);
+    try {
+      renderVault();
+      const timestamp = screen.getByText("just now");
+      expect(timestamp.tagName).toBe("TIME");
+      expect(timestamp).toHaveAttribute("datetime", new Date(LOGIN.updatedAt).toISOString());
+
+      await act(() => vi.advanceTimersByTimeAsync(60_000));
+      expect(screen.getByText("1m ago")).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("changes vault ordering through the explicit sort control", async () => {
+    const user = userEvent.setup();
+    renderVault([
+      { ...LOGIN, id: "z", title: "Zulu" },
+      { ...LOGIN, id: "a", title: "Alpha" },
+    ]);
+    await user.selectOptions(screen.getByRole("combobox", { name: "Sort vault items" }), "name");
+    const rows = screen.getAllByRole("button", { name: /^Open (Alpha|Zulu)$/ });
+    expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual(["Open Alpha", "Open Zulu"]);
+  });
+
   it("opens a vault row from the keyboard and restores focus after dismissal", async () => {
     const user = userEvent.setup();
     renderVault();
