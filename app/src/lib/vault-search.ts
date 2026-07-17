@@ -20,5 +20,9 @@ export function filterVaultItems(
         (value ?? "").toLowerCase().includes(query)
       );
     })
-    .sort((left, right) => right.updatedAt - left.updatedAt);
+    .sort(
+      (left, right) =>
+        Number(right.favorite ?? false) - Number(left.favorite ?? false) ||
+        right.updatedAt - left.updatedAt
+    );
 }
