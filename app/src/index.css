@@ -158,6 +158,11 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .search-clear { width: 24px; height: 24px; flex: none; }
 .search-results-status { margin: -8px 2px 14px; font-size: 12px; }
 .topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.sync-status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-faint); font-size: 12px; white-space: nowrap; }
+.sync-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.sync-status.saving .sync-dot { background: var(--warn); }
+.sync-status.error { color: var(--danger); }
+.sync-status.error .sync-dot { background: var(--danger); }
 .avatar { width: 32px; height: 32px; border-radius: 50%; background: linear-gradient(135deg, var(--accent-2), var(--accent)); color: #0a0c12; display: grid; place-items: center; font-weight: 800; font-size: 13px; }
 
 .content { flex: 1; overflow: auto; padding: 26px 22px; }
