@@ -51,6 +51,14 @@ function renderVault(items: VaultItem[] = [LOGIN], syncStatus: "saved" | "saving
 }
 
 describe("Vault dashboard accessibility", () => {
+  it("marks unavailable destinations as disabled roadmap entries", () => {
+    renderVault();
+    expect(screen.getByRole("button", { name: "Trash Soon" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Personal Soon" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Email Masking Soon" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Data Breach Scanner Soon" })).toBeDisabled();
+  });
+
   it("reveals card secrets independently and conceals them after the deadline", async () => {
     vi.useFakeTimers();
     try {

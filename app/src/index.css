@@ -143,9 +143,12 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .sidebar .brand { padding: 6px 8px 16px; }
 .nav-item { display: flex; align-items: center; gap: 11px; padding: 9px 11px; border-radius: var(--radius-sm); color: var(--text-dim); font-size: 14px; font-weight: 500; border: none; background: none; width: 100%; text-align: left; }
 .nav-item:hover { background: var(--surface); color: var(--text); }
+.nav-item:disabled { cursor: not-allowed; opacity: .55; }
+.nav-item:disabled:hover { background: none; color: var(--text-dim); }
 .nav-item.active { background: var(--accent-soft); color: var(--text); }
 .nav-item .ico { color: var(--text-faint); display: inline-flex; }
 .nav-item.active .ico { color: var(--accent-2); }
+.nav-soon { margin-left: auto; padding: 2px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-faint); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
 .nav-sep { height: 1px; background: var(--line); margin: 10px 8px; }
 .nav-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-faint); padding: 10px 11px 4px; }
 .sidebar-foot { margin-top: auto; }
