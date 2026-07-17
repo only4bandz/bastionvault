@@ -70,6 +70,10 @@ const MAX_ACCOUNT_CREATIONS_GLOBAL_PER_MIN: u32 = 20;
 const MAX_ACCOUNT_CREATIONS_PER_ACCOUNT_PER_MIN: u32 = 2;
 const MAX_LOGIN_ATTEMPTS_GLOBAL_PER_MIN: u32 = 120;
 const MAX_LOGIN_ATTEMPTS_PER_ACCOUNT_PER_MIN: u32 = 10;
+// Prelogin is unauthenticated and reveals whether an account exists (plus its
+// KDF params), so it gets its own throttle against bulk enumeration.
+const MAX_PRELOGINS_GLOBAL_PER_MIN: u32 = 300;
+const MAX_PRELOGINS_PER_ACCOUNT_PER_MIN: u32 = 15;
 /// Bastion Send: max stored blob size, per-recipient inbox cap, and per-account
 /// fixed-window rate limits (abuse controls — see docs/bastion-send-design.md §8).
 const MAX_SEND_BLOB: usize = 256 * 1024;
@@ -173,6 +177,8 @@ pub struct AuthRateLimits {
     pub account_creations_per_account: u32,
     pub login_attempts_global: u32,
     pub login_attempts_per_account: u32,
+    pub prelogins_global: u32,
+    pub prelogins_per_account: u32,
 }
 
 impl Default for AuthRateLimits {
@@ -184,6 +190,8 @@ impl Default for AuthRateLimits {
             account_creations_per_account: MAX_ACCOUNT_CREATIONS_PER_ACCOUNT_PER_MIN,
             login_attempts_global: MAX_LOGIN_ATTEMPTS_GLOBAL_PER_MIN,
             login_attempts_per_account: MAX_LOGIN_ATTEMPTS_PER_ACCOUNT_PER_MIN,
+            prelogins_global: MAX_PRELOGINS_GLOBAL_PER_MIN,
+            prelogins_per_account: MAX_PRELOGINS_PER_ACCOUNT_PER_MIN,
         }
     }
 }
@@ -883,6 +891,20 @@ async fn prelogin(
     Path(email): Path<String>,
 ) -> Result<Json<Prelogin>, ApiError> {
     validate_account_id(&email)?;
+    // Unauthenticated existence oracle: throttle before the account lookup so
+    // bulk enumeration (and KDF-parameter harvesting) is rate-bound.
+    auth_rate_limit(
+        &st,
+        "global",
+        "prelogin-global",
+        st.auth_rate_limits.prelogins_global,
+    )?;
+    auth_rate_limit(
+        &st,
+        &email,
+        "prelogin-account",
+        st.auth_rate_limits.prelogins_per_account,
+    )?;
     let inner = st.read();
     let acc = inner
         .accounts
