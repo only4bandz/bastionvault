@@ -57,7 +57,18 @@ export function ItemEditor({
   async function save() {
     if (!item.title.trim()) return;
     setSaving(true);
-    const saved = await onSave({ ...item, updatedAt: Date.now() });
+    const now = Date.now();
+    // Track password age separately: any edit bumps updatedAt, but only an
+    // actual password change resets the age clock used by Password Health.
+    const passwordChangedAt =
+      item.password && item.password !== initial?.password
+        ? now
+        : item.passwordChangedAt ?? initial?.passwordChangedAt;
+    const saved = await onSave({
+      ...item,
+      updatedAt: now,
+      ...(passwordChangedAt !== undefined ? { passwordChangedAt } : {}),
+    });
     if (!saved) setSaving(false);
   }
 
