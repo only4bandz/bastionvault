@@ -218,3 +218,20 @@ fn manifest_bindings_roundtrip_and_rollback_in_wasm() {
         .manifest_set_item(exhausted, "a", &updated_a)
         .is_err());
 }
+
+#[wasm_bindgen_test]
+fn create_send_identity_refuses_to_overwrite() {
+    let mut account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    account.create_send_identity().unwrap();
+    let first_public = account.send_identity_public().unwrap();
+
+    // A second create must fail — silently regenerating the X25519 key would
+    // orphan every inbound message and locked record bound to the old key.
+    assert!(account.create_send_identity().is_err());
+    assert_eq!(account.send_identity_public().unwrap(), first_public);
+
+    // Explicit rotation is allowed and bumps the key version.
+    account.replace_send_identity().unwrap();
+    let rotated_public = account.send_identity_public().unwrap();
+    assert_ne!(rotated_public, first_public);
+}
