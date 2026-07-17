@@ -7,6 +7,7 @@ import {
   type ImportProgress,
   type ImportResult,
 } from "../lib/import";
+import type { VaultItem } from "../lib/types";
 import { ImportModal } from "./ImportModal";
 
 describe("ImportModal", () => {
@@ -22,7 +23,7 @@ describe("ImportModal", () => {
         })
     );
     const onClose = vi.fn();
-    render(<ImportModal onImport={onImport} onClose={onClose} />);
+    render(<ImportModal existingItems={[]} onImport={onImport} onClose={onClose} />);
 
     const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
     expect(fileInput).not.toBeNull();
@@ -57,7 +58,7 @@ describe("ImportModal", () => {
   it("rejects oversized files before reading or parsing them", async () => {
     const user = userEvent.setup();
     const onImport = vi.fn(async () => ({ requested: 0, imported: 0 }));
-    render(<ImportModal onImport={onImport} onClose={vi.fn()} />);
+    render(<ImportModal existingItems={[]} onImport={onImport} onClose={vi.fn()} />);
 
     const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]');
     await user.upload(
@@ -67,5 +68,35 @@ describe("ImportModal", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("CSV files cannot exceed 5 MiB.");
     expect(onImport).not.toHaveBeenCalled();
+  });
+
+  it("skips exact duplicates unless the user explicitly includes them", async () => {
+    const user = userEvent.setup();
+    const existing: VaultItem = {
+      id: "existing",
+      type: "login",
+      title: "GitHub",
+      username: "general",
+      password: "secret",
+      updatedAt: 1,
+    };
+    const onImport = vi.fn(async (result: ImportResult) => ({
+      requested: result.items.length,
+      imported: result.items.length,
+    }));
+    render(<ImportModal existingItems={[existing]} onImport={onImport} onClose={vi.fn()} />);
+
+    const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    await user.upload(
+      fileInput,
+      new File(["name,username,password\nGitHub,general,secret"], "vault.csv", { type: "text/csv" })
+    );
+
+    expect(await screen.findByText("1 exact duplicate(s) skipped by default.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Import 0 items" })).toBeDisabled();
+
+    await user.click(screen.getByRole("checkbox", { name: "Import exact duplicates anyway" }));
+    await user.click(screen.getByRole("button", { name: "Import 1 items" }));
+    expect(onImport.mock.calls[0][0].items).toHaveLength(1);
   });
 });

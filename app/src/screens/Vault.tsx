@@ -549,6 +549,7 @@ export function Vault({
 
       {importing && (
         <ImportModal
+          existingItems={items}
           onClose={() => setImporting(false)}
           onImport={async (result, onProgress) => {
             const outcome = await onImport(result, onProgress);

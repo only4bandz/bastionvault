@@ -1,4 +1,4 @@
-import { useRef, useState, type JSX } from "react";
+import { useMemo, useRef, useState, type JSX } from "react";
 import {
   MAX_CSV_BYTES,
   csvToItems,
@@ -7,15 +7,19 @@ import {
   type ImportResult,
 } from "../lib/import";
 import { TYPE_LABEL, type ItemType } from "../lib/types";
+import type { VaultItem } from "../lib/types";
+import { partitionImportItems } from "../lib/import-dedup";
 import { IcUpload } from "./icons";
 import { Dialog } from "./Dialog";
 
 export function ImportModal({
   onImport,
   onClose,
+  existingItems,
 }: {
   onImport: (result: ImportResult, onProgress: ImportProgress) => Promise<ImportOutcome>;
   onClose: () => void;
+  existingItems: VaultItem[];
 }): JSX.Element {
   const [result, setResult] = useState<ImportResult | null>(null);
   const [outcome, setOutcome] = useState<ImportOutcome | null>(null);
@@ -24,6 +28,7 @@ export function ImportModal({
   const [err, setErr] = useState("");
   const [reading, setReading] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [includeDuplicates, setIncludeDuplicates] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const chooseRef = useRef<HTMLButtonElement>(null);
 
@@ -33,6 +38,7 @@ export function ImportModal({
     setResult(null);
     setOutcome(null);
     setProgress(null);
+    setIncludeDuplicates(false);
     if (file.size > MAX_CSV_BYTES) {
       setErr("CSV files cannot exceed 5 MiB.");
       return;
@@ -64,13 +70,13 @@ export function ImportModal({
   }
 
   async function startImport(): Promise<void> {
-    if (!result || importing) return;
+    if (!result || importing || selectedItems.length === 0) return;
     setErr("");
     setOutcome(null);
-    setProgress({ imported: 0, requested: result.items.length });
+    setProgress({ imported: 0, requested: selectedItems.length });
     setImporting(true);
     try {
-      const completed = await onImport(result, (imported, requested) => {
+      const completed = await onImport({ ...result, items: selectedItems }, (imported, requested) => {
         setProgress({ imported, requested });
       });
       setOutcome(completed);
@@ -82,8 +88,18 @@ export function ImportModal({
     }
   }
 
+  const partition = useMemo(
+    () => result ? partitionImportItems(result.items, existingItems) : { unique: [], duplicates: [] },
+    [existingItems, result]
+  );
+  const selectedItems = result
+    ? includeDuplicates
+      ? result.items
+      : partition.unique
+    : [];
+
   const counts = result
-    ? result.items.reduce<Record<ItemType, number>>(
+    ? selectedItems.reduce<Record<ItemType, number>>(
         (acc, it) => ((acc[it.type] = (acc[it.type] || 0) + 1), acc),
         { login: 0, note: 0, card: 0 }
       )
@@ -107,12 +123,12 @@ export function ImportModal({
             <button className="btn btn-ghost" disabled={reading || importing} onClick={onClose}>Cancel</button>
             <button
               className="btn btn-primary"
-              disabled={!result || reading || importing}
+              disabled={!result || selectedItems.length === 0 || reading || importing}
               onClick={() => void startImport()}
             >
               {importing && progress
                 ? `Importing ${progress.imported}/${progress.requested}…`
-                : `Import ${result ? result.items.length : ""} items`}
+                : `Import ${result ? selectedItems.length : ""} items`}
             </button>
           </>
         )
@@ -162,7 +178,7 @@ export function ImportModal({
 
           {result && counts && (
             <div className="card-section" style={{ marginTop: 16, maxWidth: "none" }}>
-              <div style={{ fontSize: 28, fontWeight: 800 }}>{result.items.length}</div>
+              <div style={{ fontSize: 28, fontWeight: 800 }}>{selectedItems.length}</div>
               <div className="muted" style={{ marginBottom: 10 }}>items ready to import</div>
               {(["login", "note", "card"] as ItemType[]).map((t) =>
                 counts[t] ? (
@@ -176,6 +192,22 @@ export function ImportModal({
                 <div className="faint" style={{ marginTop: 8, fontSize: 12 }}>
                   {result.skipped} row(s) skipped (no name).
                 </div>
+              )}
+              {partition.duplicates.length > 0 && (
+                <>
+                  <div className="faint" style={{ marginTop: 8, fontSize: 12 }}>
+                    {partition.duplicates.length} exact duplicate(s) skipped by default.
+                  </div>
+                  <label className="send-check">
+                    <input
+                      type="checkbox"
+                      checked={includeDuplicates}
+                      disabled={importing}
+                      onChange={(event) => setIncludeDuplicates(event.target.checked)}
+                    />
+                    Import exact duplicates anyway
+                  </label>
+                </>
               )}
             </div>
           )}
