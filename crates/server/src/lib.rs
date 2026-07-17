@@ -845,8 +845,24 @@ struct AuthenticatedAccount(String);
 
 // ─── Handlers ───
 
-async fn health() -> &'static str {
-    "ok"
+/// Liveness + DB readiness. A wedged, deleted or corrupted database must not
+/// report healthy, or an orchestrator will keep routing traffic to a server
+/// whose every stateful endpoint 500s. Runs a trivial `SELECT 1`; the body
+/// stays static so nothing internal leaks.
+async fn health(State(st): State<AppState>) -> Response {
+    // Read a real table so a corrupt/dropped schema (not just a live socket)
+    // surfaces as unhealthy, rather than a bare `SELECT 1` the connection can
+    // answer even when the data is gone.
+    let db_ok = st
+        .db
+        .lock()
+        .query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get::<_, i64>(0))
+        .is_ok();
+    if db_ok {
+        (StatusCode::OK, "ok").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response()
+    }
 }
 
 async fn create_account(
