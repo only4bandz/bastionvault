@@ -516,7 +516,15 @@ impl Db {
         }
         .expect("open database");
         conn.execute_batch(
+            // busy_timeout: with several processes sharing the DB (a supported
+            // deployment — see create_account), cross-process lock contention
+            // should wait a bounded moment instead of surfacing an instant
+            // SQLITE_BUSY that handlers can only map to an opaque 500.
+            // synchronous=NORMAL: the durable, fsync-light setting recommended
+            // for WAL mode (FULL's extra fsyncs buy nothing under WAL).
             "PRAGMA journal_mode=WAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA synchronous=NORMAL;
              CREATE TABLE IF NOT EXISTS accounts(
                email TEXT PRIMARY KEY, salt TEXT NOT NULL, kdf TEXT NOT NULL,
                wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL,
@@ -2155,4 +2163,24 @@ async fn send_inbox_delete(
         .inbox_delete(&message_id, &mine)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_pragmas_are_hardened() {
+        let db = Db::open(":memory:");
+        let conn = db.lock();
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy_timeout, 5000);
+        // 1 = NORMAL, the recommended durable setting under WAL.
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1);
+    }
 }
