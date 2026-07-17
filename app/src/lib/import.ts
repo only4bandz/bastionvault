@@ -190,6 +190,7 @@ export function csvToItems(text: string): ImportResult {
       item.password = raw(row, col.password) || undefined;
       item.url = cell(row, col.url) || undefined;
     } else if (type === "card") {
+      item.cardholderName = cell(row, col.cardholder) || undefined;
       item.cardNumber = cell(row, col.cardnumber) || undefined;
       item.cardExp = cell(row, col.exp) || undefined;
       item.cardCvv = cell(row, col.cvc) || undefined;

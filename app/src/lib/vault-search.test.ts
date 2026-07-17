@@ -73,6 +73,7 @@ it("matches displayed card metadata but never secret fields", () => {
     id: "card-meta",
     type: "card",
     title: "Everyday",
+    cardholderName: "General Example",
     cardNumber: "4111111111111111",
     cardCvv: "987",
     cardBrand: "visa",
@@ -82,6 +83,7 @@ it("matches displayed card metadata but never secret fields", () => {
     updatedAt: 1,
   };
   expect(filterVaultItems([card], "all", "visa")).toHaveLength(1);
+  expect(filterVaultItems([card], "all", "general example")).toHaveLength(1);
   expect(filterVaultItems([card], "all", "cibc")).toHaveLength(1);
   expect(filterVaultItems([card], "all", "debit")).toHaveLength(1);
   expect(filterVaultItems([card], "all", "4111")).toHaveLength(0);

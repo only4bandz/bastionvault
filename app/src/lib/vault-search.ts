@@ -22,6 +22,7 @@ export function filterVaultItems(
         item.title,
         item.username,
         item.url,
+        item.cardholderName,
         item.cardBrand,
         item.cardBank,
         item.cardType,

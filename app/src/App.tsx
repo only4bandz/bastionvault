@@ -46,7 +46,7 @@ const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
  * not user entries — never surface them in the vault list. */
 const SEND_LOCKED_PREFIX = "bastion:send-locked:";
 const OPTIONAL_ITEM_STRINGS: (keyof VaultItem)[] = [
-  "username", "password", "url", "cardNumber", "cardExp", "cardCvv",
+  "username", "password", "url", "cardNumber", "cardholderName", "cardExp", "cardCvv",
   "cardBrand", "cardBank", "cardBankDomain", "cardType", "notes",
 ];
 

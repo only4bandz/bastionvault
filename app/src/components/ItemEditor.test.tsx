@@ -18,6 +18,7 @@ const CARD: VaultItem = {
   id: "card",
   type: "card",
   title: "Operations card",
+  cardholderName: "General Example",
   cardNumber: "4111111111111111",
   cardExp: "12/29",
   cardCvv: "123",
@@ -82,6 +83,8 @@ describe("ItemEditor secret fields", () => {
 
     const cardNumber = screen.getByLabelText("Card number");
     const cvv = screen.getByLabelText("CVV");
+    expect(screen.getByLabelText("Cardholder name")).toHaveValue("General Example");
+    expect(screen.getByLabelText("Cardholder name")).toHaveAttribute("autocomplete", "cc-name");
     expect(cardNumber).toHaveAttribute("type", "password");
     expect(cardNumber).toHaveAttribute("autocomplete", "cc-number");
     expect(cardNumber).toHaveAttribute("inputmode", "numeric");
