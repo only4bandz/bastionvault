@@ -87,6 +87,7 @@ impl fmt::Debug for AuthSecret {
 ///
 /// No `Clone`: `auth_secret` is a credential, so we avoid silent copies.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Registration {
     /// Version of the registration format, to migrate the schema without
     /// breaking existing accounts.
