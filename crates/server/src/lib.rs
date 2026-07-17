@@ -1585,18 +1585,28 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
 /// Evicts an expired token along the way.
 fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     let token = bearer_token(headers)?.to_string();
+    let now = Instant::now();
+    // Fast path: a valid, unexpired token needs only a READ lock, so concurrent
+    // authenticated requests (every GET /vault, /send/inbox…) don't serialize on
+    // the global write lock just to be validated.
+    {
+        let inner = st.read();
+        match inner.sessions.get(&token) {
+            Some(s) if now < s.expires_at => return Ok(s.email.clone()),
+            Some(_) => {} // expired → fall through to evict under the write lock
+            None => return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
+        }
+    }
+    // Slow path: the token exists but is expired — take the write lock to evict
+    // it. Re-check under the lock in case another request already refreshed it.
     let mut inner = st.write();
-    let email = match inner.sessions.get(&token) {
-        Some(s) if Instant::now() < s.expires_at => Some(s.email.clone()),
-        Some(_) => None, // expired
-        None => return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
-    };
-    match email {
-        Some(email) => Ok(email),
-        None => {
+    match inner.sessions.get(&token) {
+        Some(s) if now < s.expires_at => Ok(s.email.clone()),
+        Some(_) => {
             inner.sessions.remove(&token);
             Err(ApiError(StatusCode::UNAUTHORIZED, "session expired"))
         }
+        None => Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
     }
 }
 
