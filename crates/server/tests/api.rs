@@ -1976,3 +1976,66 @@ async fn security_headers_are_stamped_on_success_and_error_responses() {
         assert_eq!(get("x-frame-options"), "DENY", "{method} {uri}");
     }
 }
+
+#[tokio::test]
+async fn unknown_account_login_pays_the_same_hashing_cost() {
+    let app = server::app_in_memory();
+    let (_, registration, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "timing-real@example.com",
+            "registration": serde_json::to_value(registration).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let wrong_secret = B64.encode([7u8; 32]);
+
+    // Wrong password for a real account: pays a full Argon2id verification.
+    let started = std::time::Instant::now();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": "timing-real@example.com",
+            "auth_secret": wrong_secret
+        })),
+    )
+    .await;
+    let wrong_password_elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, Value::Null);
+
+    // Unknown account: same status, same body, and now a comparable cost —
+    // it verifies against a process-constant dummy hash instead of returning
+    // in microseconds (which used to leak account existence via timing).
+    let started = std::time::Instant::now();
+    let (status, body) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": "timing-unknown@example.com",
+            "auth_secret": wrong_secret
+        })),
+    )
+    .await;
+    let unknown_account_elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body, Value::Null);
+
+    // Coarse bound (scheduling noise aside): the unknown-account path must run
+    // real Argon2id work, not answer instantly. Default params take tens of
+    // milliseconds; a quarter of the real-account cost is a safe floor.
+    assert!(
+        unknown_account_elapsed * 4 >= wrong_password_elapsed,
+        "unknown-account login answered too fast: {unknown_account_elapsed:?} vs {wrong_password_elapsed:?}"
+    );
+}
