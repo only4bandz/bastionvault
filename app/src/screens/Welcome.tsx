@@ -1,7 +1,7 @@
 import { useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
 import { SecretInput } from "../components/SecretInput";
-import { strength } from "../lib/generator";
+import { assessPassword } from "../lib/password-health";
 
 export function Welcome({
   onCreate,
@@ -15,12 +15,18 @@ export function Welcome({
   const [pw2, setPw2] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const s = strength(pw);
+  const s = assessPassword(pw);
 
   async function create() {
     setErr("");
     if (!/^\S+@\S+\.\S+$/.test(email)) return setErr("Enter a valid email address.");
     if (pw.length < 8) return setErr("Use at least 8 characters for your master password.");
+    // The master password protects everything and cannot be reset — refuse an
+    // obviously weak one (common word, sequence, single class, too short) that
+    // the offline strength check flags. score < 2 = "Very weak"/"Weak".
+    if (s.score < 2) {
+      return setErr(`This master password is too weak (${s.reasons[0].toLowerCase()}). Try a longer passphrase.`);
+    }
     if (pw !== pw2) return setErr("Passwords do not match.");
     setBusy(true);
     await new Promise((r) => setTimeout(r, 30)); // let "Creating…" paint before Argon2id blocks
