@@ -80,6 +80,17 @@ describe("csvToItems", () => {
     );
   });
 
+  it("preserves an imported cardholder name", () => {
+    const result = csvToItems(
+      "name,type,cardholdername,cardnumber\nOperations card,card,General Example,4111111111111111"
+    );
+    expect(result.items[0]).toMatchObject({
+      type: "card",
+      cardholderName: "General Example",
+      cardNumber: "4111111111111111",
+    });
+  });
+
   it("rejects an item whose UTF-8 payload exceeds the encrypted-item envelope", () => {
     const oversizedUtf8Title = "😀".repeat(65_536);
     expect(() => csvToItems(`name\n${oversizedUtf8Title}`)).toThrow(CsvImportError);

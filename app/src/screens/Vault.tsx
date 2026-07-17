@@ -597,7 +597,7 @@ function ItemDetailView({
     item.type === "login"
       ? [["Username", item.username, false], ["Password", item.password, true], ["Website", item.url, false]]
       : item.type === "card"
-        ? [["Number", item.cardNumber, true], ["Expiry", item.cardExp, false], ["CVV", item.cardCvv, true]]
+        ? [["Cardholder", item.cardholderName, false], ["Number", item.cardNumber, true], ["Expiry", item.cardExp, false], ["CVV", item.cardCvv, true]]
         : [];
   const websiteUrl = safeWebsiteUrl(item.url);
 

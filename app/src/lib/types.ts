@@ -10,6 +10,7 @@ export interface VaultItem {
   url?: string;
   // card
   cardNumber?: string;
+  cardholderName?: string;
   cardExp?: string;
   cardCvv?: string;
   cardBrand?: string; // detected network: visa | mastercard | amex | discover

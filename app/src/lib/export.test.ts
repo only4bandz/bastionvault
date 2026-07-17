@@ -18,6 +18,7 @@ const CARD: VaultItem = {
   id: "c1",
   type: "card",
   title: "Visa",
+  cardholderName: "General Example",
   cardNumber: "4111 1111 1111 1111",
   cardExp: "12/27",
   cardCvv: "123",
@@ -56,6 +57,7 @@ describe("itemsToCsv", () => {
     expect(card).toMatchObject({
       type: "card",
       title: CARD.title,
+      cardholderName: CARD.cardholderName,
       cardNumber: CARD.cardNumber,
       cardExp: CARD.cardExp,
       cardCvv: CARD.cardCvv,

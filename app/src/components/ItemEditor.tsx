@@ -161,6 +161,16 @@ export function ItemEditor({
           {item.type === "card" && (
             <>
               <div className="field">
+                <label htmlFor="item-cardholder">Cardholder name</label>
+                <input
+                  id="item-cardholder"
+                  className="input"
+                  autoComplete="cc-name"
+                  value={item.cardholderName ?? ""}
+                  onChange={(e) => set("cardholderName", e.target.value)}
+                />
+              </div>
+              <div className="field">
                 <label htmlFor="item-card-number">Card number</label>
                 <SecretInput
                   key="card-number"
