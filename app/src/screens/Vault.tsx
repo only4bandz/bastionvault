@@ -8,7 +8,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Favicon } from "../components/Favicon";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
-  IcDownload, IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcStar, IcTrash, IcUpload, IcVault, IcX,
+  IcDownload, IcExternal, IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcStar, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { analyzePasswordHealth, passwordAgeReference } from "../lib/password-health";
@@ -20,6 +20,7 @@ import type { Contact } from "../lib/send";
 import type { Blob } from "../lib/api";
 import { filterVaultItems } from "../lib/vault-search";
 import { copySecretWithFeedback, copyWithFeedback } from "../lib/clipboard";
+import { safeWebsiteUrl } from "../lib/safe-url";
 import { Send } from "./Send";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
@@ -598,6 +599,7 @@ function ItemDetailView({
       : item.type === "card"
         ? [["Number", item.cardNumber, true], ["Expiry", item.cardExp, false], ["CVV", item.cardCvv, true]]
         : [];
+  const websiteUrl = safeWebsiteUrl(item.url);
 
   function conceal(key: string): void {
     const timer = concealTimers.current.get(key);
@@ -674,6 +676,18 @@ function ItemDetailView({
                   >
                     <IcEye size={16} />
                   </button>
+                )}
+                {k === "Website" && websiteUrl && (
+                  <a
+                    className="icon-btn"
+                    href={websiteUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    referrerPolicy="no-referrer"
+                    aria-label="Open website in a new tab"
+                  >
+                    <IcExternal size={16} />
+                  </a>
                 )}
                 <button className="icon-btn" aria-label={`Copy ${k.toLowerCase()}`} onClick={() => copy(v!, k, secret)}><IcCopy size={16} /></button>
               </div>

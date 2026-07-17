@@ -117,6 +117,18 @@ describe("Vault dashboard accessibility", () => {
     expect(openItem).toHaveFocus();
   });
 
+  it("offers an isolated open action only for a safe website URL", async () => {
+    const user = userEvent.setup();
+    renderVault();
+    await user.click(screen.getByRole("button", { name: "Open GitHub" }));
+
+    const open = screen.getByRole("link", { name: "Open website in a new tab" });
+    expect(open).toHaveAttribute("href", "https://github.com/");
+    expect(open).toHaveAttribute("target", "_blank");
+    expect(open).toHaveAttribute("rel", "noopener noreferrer");
+    expect(open).toHaveAttribute("referrerpolicy", "no-referrer");
+  });
+
   it("requires explicit confirmation before deleting a vault item", async () => {
     const user = userEvent.setup();
     const { onDelete } = renderVault();
