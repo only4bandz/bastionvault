@@ -67,3 +67,24 @@ it("sorts favorites first, then by recency", () => {
   ] as VaultItem[];
   expect(filterVaultItems(items, "all", "").map((i) => i.id)).toEqual(["d", "b", "a", "c"]);
 });
+
+it("matches displayed card metadata but never secret fields", () => {
+  const card: VaultItem = {
+    id: "card-meta",
+    type: "card",
+    title: "Everyday",
+    cardNumber: "4111111111111111",
+    cardCvv: "987",
+    cardBrand: "visa",
+    cardBank: "CIBC",
+    cardType: "debit",
+    notes: "hidden words",
+    updatedAt: 1,
+  };
+  expect(filterVaultItems([card], "all", "visa")).toHaveLength(1);
+  expect(filterVaultItems([card], "all", "cibc")).toHaveLength(1);
+  expect(filterVaultItems([card], "all", "debit")).toHaveLength(1);
+  expect(filterVaultItems([card], "all", "4111")).toHaveLength(0);
+  expect(filterVaultItems([card], "all", "987")).toHaveLength(0);
+  expect(filterVaultItems([card], "all", "hidden")).toHaveLength(0);
+});

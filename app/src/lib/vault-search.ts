@@ -16,9 +16,16 @@ export function filterVaultItems(
     .filter((item) => filter === "all" || item.type === filter)
     .filter((item) => {
       if (!query) return true;
-      return [item.title, item.username, item.url].some((value) =>
-        (value ?? "").toLowerCase().includes(query)
-      );
+      // Card brand/bank/type are display metadata the list already renders in
+      // clear — indexing them is safe; numbers/CVVs/notes stay unindexed.
+      return [
+        item.title,
+        item.username,
+        item.url,
+        item.cardBrand,
+        item.cardBank,
+        item.cardType,
+      ].some((value) => (value ?? "").toLowerCase().includes(query));
     })
     .sort(
       (left, right) =>
