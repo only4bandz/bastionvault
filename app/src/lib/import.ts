@@ -124,6 +124,24 @@ export interface ImportOutcome {
 
 export type ImportProgress = (imported: number, requested: number) => void;
 
+const MAX_DATE_MS = 8_640_000_000_000_000;
+
+function optionalTimestamp(value: string, row: number, field: string): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > MAX_DATE_MS) {
+    throw new CsvImportError(`CSV row ${row} has an invalid ${field}.`);
+  }
+  return parsed;
+}
+
+function optionalBoolean(value: string, row: number, field: string): boolean | undefined {
+  if (!value) return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  throw new CsvImportError(`CSV row ${row} has an invalid ${field}.`);
+}
+
 /** Maps a parsed CSV (with a header row) into vault items. Tolerant of column
  *  order and of missing optional columns. */
 export function csvToItems(text: string): ImportResult {
@@ -151,6 +169,13 @@ export function csvToItems(text: string): ImportResult {
     cardnumber: idx("cardnumber"),
     cvc: idx("cvc", "cvv"),
     exp: idx("expirydate", "expiry"),
+    favorite: idx("favorite"),
+    updatedAt: idx("updatedat", "updated_at"),
+    passwordChangedAt: idx("passwordchangedat", "password_changed_at"),
+    cardBrand: idx("cardbrand", "card_brand"),
+    cardBank: idx("cardbank", "card_bank"),
+    cardBankDomain: idx("cardbankdomain", "card_bank_domain"),
+    cardType: idx("cardtype", "card_type"),
   };
   if (col.name === -1) {
     throw new CsvImportError('CSV header must include a "name" or "title" column.');
@@ -183,8 +208,14 @@ export function csvToItems(text: string): ImportResult {
       type,
       title: name,
       notes: cell(row, col.note) || undefined,
-      updatedAt: Date.now(),
+      updatedAt: optionalTimestamp(cell(row, col.updatedAt), r + 1, "updated timestamp") ?? Date.now(),
     };
+    item.favorite = optionalBoolean(cell(row, col.favorite).toLowerCase(), r + 1, "favorite value");
+    item.passwordChangedAt = optionalTimestamp(
+      cell(row, col.passwordChangedAt),
+      r + 1,
+      "password-changed timestamp"
+    );
     if (type === "login") {
       item.username = cell(row, col.username) || undefined;
       item.password = raw(row, col.password) || undefined;
@@ -194,6 +225,10 @@ export function csvToItems(text: string): ImportResult {
       item.cardNumber = cell(row, col.cardnumber) || undefined;
       item.cardExp = cell(row, col.exp) || undefined;
       item.cardCvv = cell(row, col.cvc) || undefined;
+      item.cardBrand = cell(row, col.cardBrand) || undefined;
+      item.cardBank = cell(row, col.cardBank) || undefined;
+      item.cardBankDomain = cell(row, col.cardBankDomain) || undefined;
+      item.cardType = cell(row, col.cardType) || undefined;
     }
     if (new TextEncoder().encode(JSON.stringify(item)).byteLength > MAX_IMPORT_ITEM_BYTES) {
       throw new CsvImportError(`CSV row ${r + 1} exceeds the 256 KiB item limit.`);

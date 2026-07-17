@@ -17,6 +17,13 @@ export const EXPORT_HEADER = [
   "cardnumber",
   "expirydate",
   "cvc",
+  "favorite",
+  "updatedat",
+  "passwordchangedat",
+  "cardbrand",
+  "cardbank",
+  "cardbankdomain",
+  "cardtype",
 ] as const;
 
 /** RFC 4180 quoting: only when the value needs it, doubling inner quotes. */
@@ -39,6 +46,13 @@ export function itemsToCsv(items: VaultItem[]): string {
         item.cardNumber ?? "",
         item.cardExp ?? "",
         item.cardCvv ?? "",
+        item.favorite === undefined ? "" : String(item.favorite),
+        String(item.updatedAt),
+        item.passwordChangedAt === undefined ? "" : String(item.passwordChangedAt),
+        item.cardBrand ?? "",
+        item.cardBank ?? "",
+        item.cardBankDomain ?? "",
+        item.cardType ?? "",
       ]
         .map(csvField)
         .join(",")
