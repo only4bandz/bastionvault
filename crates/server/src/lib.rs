@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -965,8 +965,11 @@ async fn create_session(
         .accounts
         .get(&req.email)
         .map(|a| a.auth_hash.clone());
-    // Same response for "unknown account" and "wrong secret".
-    let phc = phc.ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"))?;
+    // Same response for "unknown account" and "wrong secret" — and the same
+    // Argon2id cost: unknown accounts verify against a process-constant dummy
+    // hash so response timing cannot separate the two cases.
+    let known = phc.is_some();
+    let phc = phc.unwrap_or_else(|| DUMMY_PHC.clone());
     let secret = req.auth_secret;
     let permit = auth_permit(&st)?;
     let ok = tokio::task::spawn_blocking(move || {
@@ -975,7 +978,7 @@ async fn create_session(
     })
     .await
     .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?;
-    if !ok {
+    if !ok || !known {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
     let now = Instant::now();
@@ -1563,6 +1566,18 @@ fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> 
         }
     }
 }
+
+/// Process-constant dummy PHC hash of a random secret nobody knows.
+///
+/// Logins for unknown accounts verify against this hash so they pay the same
+/// Argon2id cost as a wrong password for a real account. Without it, response
+/// time separated "no such account" (~µs) from "wrong secret" (~100 ms),
+/// re-opening the account-enumeration oracle the identical 401 body closes.
+static DUMMY_PHC: LazyLock<String> = LazyLock::new(|| {
+    let mut secret = [0u8; 32];
+    OsRng.fill_bytes(&mut secret);
+    hash_secret(&data_encoding::BASE64.encode(&secret)).expect("hash dummy login secret")
+});
 
 /// Slow Argon2id hash (PHC) of the authentication secret.
 fn hash_secret(secret: &str) -> Result<String, ()> {
