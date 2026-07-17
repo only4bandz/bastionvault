@@ -389,3 +389,25 @@ fn base64_encode(b: &[u8]) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
     STANDARD.encode(b)
 }
+
+#[test]
+fn vault_wire_types_reject_unknown_fields() {
+    // EncryptedBlob
+    let blob = serde_json::json!({ "v": 1, "nonce": "AA", "ct": "AA", "x": 1 });
+    assert!(serde_json::from_value::<EncryptedBlob>(blob).is_err());
+
+    // KdfParams
+    let kdf = serde_json::json!({
+        "mem_kib": 19456, "iterations": 2, "parallelism": 1, "rounds": 9
+    });
+    assert!(serde_json::from_value::<KdfParams>(kdf).is_err());
+
+    // Registration — build a valid one, then smuggle an extra field.
+    let (_v, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let mut reg_json = serde_json::to_value(&reg).unwrap();
+    reg_json
+        .as_object_mut()
+        .unwrap()
+        .insert("admin".into(), serde_json::json!(true));
+    assert!(serde_json::from_value::<crypto_core::Registration>(reg_json).is_err());
+}

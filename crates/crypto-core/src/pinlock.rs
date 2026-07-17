@@ -106,6 +106,7 @@ fn ct_ne(a: &[u8; 32], b: &[u8; 32]) -> bool {
 /// server-visible `message_id` (design §7), so the sync server can't correlate a
 /// deleted inbox message with a stored locked item.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LockedRecord {
     pub v: u8,
     pub local_id: String,    // base64, 16 random bytes (vault item id)

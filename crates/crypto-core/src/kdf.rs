@@ -29,6 +29,7 @@ pub const SALT_LEN: usize = 16;
 /// Default values aligned with password-manager recommendations (stronger than
 /// the OWASP minimum): 64 MiB, 3 passes, p=4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct KdfParams {
     /// Memory cost in kibibytes.
     pub mem_kib: u32,

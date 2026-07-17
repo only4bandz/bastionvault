@@ -35,6 +35,7 @@ const MAX_ENCODED_CT_LEN: usize = 8 * 1024 * 1024;
 /// Serializable (base64) for server storage and transport. Contains no secret:
 /// without the key, it is noise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EncryptedBlob {
     /// Format version (see [`FORMAT_VERSION`]).
     pub v: u8,
