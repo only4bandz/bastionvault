@@ -48,3 +48,86 @@ describe("copyWithFeedback", () => {
     expect(toast).toHaveBeenCalledWith("Bastion address was not copied");
   });
 });
+
+import { afterEach, beforeEach } from "vitest";
+import { copySecretWithFeedback, SECRET_CLEAR_MS } from "./clipboard";
+
+describe("copySecretWithFeedback", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function writer() {
+    const writes: string[] = [];
+    const clipboard: ClipboardWriter = {
+      writeText: vi.fn(async (text: string) => {
+        writes.push(text);
+      }),
+    };
+    return { clipboard, writes };
+  }
+
+  it("wipes the clipboard after the clear delay", async () => {
+    const { clipboard, writes } = writer();
+    const toast = vi.fn();
+
+    await expect(copySecretWithFeedback("hunter2", "Password", toast, clipboard)).resolves.toBe(
+      true
+    );
+    expect(writes).toEqual(["hunter2"]);
+    expect(toast).toHaveBeenCalledWith("Password copied — clears in 30s");
+
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS - 1);
+    expect(writes).toEqual(["hunter2"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(writes).toEqual(["hunter2", ""]);
+  });
+
+  it("a newer secret copy cancels the older pending wipe", async () => {
+    const { clipboard, writes } = writer();
+    const toast = vi.fn();
+
+    await copySecretWithFeedback("first", "Password", toast, clipboard);
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS / 2);
+    await copySecretWithFeedback("second", "CVV", toast, clipboard);
+
+    // The first copy's deadline passes: nothing is wiped yet.
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS / 2);
+    expect(writes).toEqual(["first", "second"]);
+
+    // The second copy's own deadline wipes exactly once.
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS / 2);
+    expect(writes).toEqual(["first", "second", ""]);
+  });
+
+  it("a newer plain copy cancels the pending wipe", async () => {
+    const { clipboard, writes } = writer();
+    const toast = vi.fn();
+
+    await copySecretWithFeedback("hunter2", "Password", toast, clipboard);
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS / 2);
+    await copyWithFeedback("alice@example.com", "Username", toast, clipboard);
+
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS * 2);
+    expect(writes).toEqual(["hunter2", "alice@example.com"]);
+  });
+
+  it("does not schedule a wipe when the write fails", async () => {
+    const clipboard: ClipboardWriter = {
+      writeText: vi.fn(async () => {
+        throw new DOMException("Denied", "NotAllowedError");
+      }),
+    };
+    const toast = vi.fn();
+
+    await expect(copySecretWithFeedback("secret", "Password", toast, clipboard)).resolves.toBe(
+      false
+    );
+    expect(toast).toHaveBeenCalledWith("Password was not copied");
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS * 2);
+    expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+  });
+});

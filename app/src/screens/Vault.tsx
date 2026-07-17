@@ -18,7 +18,7 @@ import type { Account } from "../lib/wasm";
 import type { Contact } from "../lib/send";
 import type { Blob } from "../lib/api";
 import { filterVaultItems } from "../lib/vault-search";
-import { copyWithFeedback } from "../lib/clipboard";
+import { copySecretWithFeedback, copyWithFeedback } from "../lib/clipboard";
 import { Send } from "./Send";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
@@ -165,8 +165,9 @@ export function Vault({
     return () => document.removeEventListener("keydown", handleSearchShortcut);
   }, [mobileNavOpen]);
 
-  function copy(text: string, what: string) {
-    void copyWithFeedback(text, what, toast);
+  function copy(text: string, what: string, secret = false) {
+    if (secret) void copySecretWithFeedback(text, what, toast);
+    else void copyWithFeedback(text, what, toast);
   }
 
   const counts = {
@@ -412,7 +413,7 @@ export function Vault({
                       </button>
                       <div className="actions">
                         {i.type === "login" && i.password && (
-                          <button className="icon-btn" aria-label={`Copy password for ${i.title}`} onClick={() => copy(i.password!, "Password")}>
+                          <button className="icon-btn" aria-label={`Copy password for ${i.title}`} onClick={() => copy(i.password!, "Password", true)}>
                             <IcCopy size={16} />
                           </button>
                         )}
@@ -540,7 +541,7 @@ function ItemDetailView({
   onClose: () => void;
   onEdit: () => void;
   onDelete: () => Promise<boolean>;
-  copy: (t: string, w: string) => void;
+  copy: (t: string, w: string, secret?: boolean) => void;
 }): JSX.Element {
   const [reveal, setReveal] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -585,7 +586,7 @@ function ItemDetailView({
                   <IcEye size={16} />
                 </button>
               )}
-              <button className="icon-btn" aria-label={`Copy ${k.toLowerCase()}`} onClick={() => copy(v!, k)}><IcCopy size={16} /></button>
+              <button className="icon-btn" aria-label={`Copy ${k.toLowerCase()}`} onClick={() => copy(v!, k, secret)}><IcCopy size={16} /></button>
             </div>
           ))}
           {item.notes && (
