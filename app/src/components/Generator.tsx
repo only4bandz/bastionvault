@@ -1,6 +1,6 @@
 import { useEffect, useState, type JSX } from "react";
 import { generatePassword, strength, type GenOptions } from "../lib/generator";
-import { copyWithFeedback } from "../lib/clipboard";
+import { copySecretWithFeedback } from "../lib/clipboard";
 import { IcCopy, IcRefresh } from "./icons";
 
 const DEFAULTS: GenOptions = {
@@ -54,7 +54,7 @@ export function Generator({
         <button
           className="icon-btn"
           aria-label="Copy generated password"
-          onClick={() => void copyWithFeedback(pw, "Password", toast)}
+          onClick={() => void copySecretWithFeedback(pw, "Password", toast)}
         >
           <IcCopy size={17} />
         </button>
