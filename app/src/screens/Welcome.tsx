@@ -1,5 +1,6 @@
 import { useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
+import { SecretInput } from "../components/SecretInput";
 import { strength } from "../lib/generator";
 
 export function Welcome({
@@ -55,9 +56,8 @@ export function Welcome({
         </div>
         <div className="field">
           <label>Master password</label>
-          <input
-            className="input"
-            type="password"
+          <SecretInput
+            label="Master password"
             value={pw}
             onChange={(e) => setPw(e.target.value)}
             placeholder="A long, memorable passphrase"
@@ -70,9 +70,8 @@ export function Welcome({
         </div>
         <div className="field">
           <label>Confirm master password</label>
-          <input
-            className="input"
-            type="password"
+          <SecretInput
+            label="Master password confirmation"
             value={pw2}
             onChange={(e) => setPw2(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && create()}
