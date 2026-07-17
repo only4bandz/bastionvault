@@ -44,7 +44,7 @@ function CardSubtitle({ item }: { item: VaultItem }): JSX.Element {
   return <>{label}</>;
 }
 
-type Nav = "vault" | "generator" | "health" | "send" | "soon";
+type Nav = "vault" | "generator" | "health" | "send";
 export type VaultSyncStatus = "saved" | "saving" | "error";
 
 const PAGE_SIZE = 50;
@@ -96,7 +96,6 @@ export function Vault({
   toast: (m: string) => void;
 }): JSX.Element {
   const [nav, setNav] = useState<Nav>("vault");
-  const [soonLabel, setSoonLabel] = useState("");
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"all" | ItemType>("all");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -181,7 +180,6 @@ export function Vault({
 
       event.preventDefault();
       setNav("vault");
-      setSoonLabel("");
       searchInputRef.current?.focus();
     }
 
@@ -202,9 +200,8 @@ export function Vault({
     favorite: items.filter((i) => i.favorite).length,
   };
 
-  function go(n: Nav, label = "") {
+  function go(n: Nav) {
     setNav(n);
-    setSoonLabel(label);
     setMobileNavOpen(false);
   }
 
@@ -264,13 +261,13 @@ export function Vault({
         >
           <span className="ico"><IcShared /></span> Send
         </button>
-        <button className="nav-item" onClick={() => go("soon", "Trash")}>
-          <span className="ico"><IcTrash /></span> Trash
+        <button className="nav-item" disabled aria-disabled="true">
+          <span className="ico"><IcTrash /></span> Trash <span className="nav-soon">Soon</span>
         </button>
 
         <div className="nav-label">Folders</div>
-        <button className="nav-item" onClick={() => go("soon", "Folders")}>
-          <span className="ico"><IcFolder /></span> Personal
+        <button className="nav-item" disabled aria-disabled="true">
+          <span className="ico"><IcFolder /></span> Personal <span className="nav-soon">Soon</span>
         </button>
 
         <div className="nav-sep" />
@@ -289,11 +286,11 @@ export function Vault({
         >
           <span className="ico"><IcHealth /></span> Password Health
         </button>
-        <button className="nav-item" onClick={() => go("soon", "Email Masking")}>
-          <span className="ico"><IcMask /></span> Email Masking
+        <button className="nav-item" disabled aria-disabled="true">
+          <span className="ico"><IcMask /></span> Email Masking <span className="nav-soon">Soon</span>
         </button>
-        <button className="nav-item" onClick={() => go("soon", "Data Breach Scanner")}>
-          <span className="ico"><IcBreach /></span> Data Breach Scanner
+        <button className="nav-item" disabled aria-disabled="true">
+          <span className="ico"><IcBreach /></span> Data Breach Scanner <span className="nav-soon">Soon</span>
         </button>
 
         <div className="sidebar-foot">
@@ -561,13 +558,6 @@ export function Vault({
             />
           )}
 
-          {nav === "soon" && (
-            <div className="empty">
-              <div className="big"><IcGen size={54} /></div>
-              <div style={{ fontSize: 16, color: "var(--text-dim)" }}>{soonLabel}</div>
-              <div style={{ marginTop: 6 }}>Coming soon.</div>
-            </div>
-          )}
         </main>
       </div>
 
