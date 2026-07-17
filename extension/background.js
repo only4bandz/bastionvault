@@ -21,6 +21,7 @@ import {
   autofillPolicyError,
   credentialPageError,
   validatedAutofillTarget,
+  frameAutofillError,
 } from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.js";
@@ -665,6 +666,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   const senderHost = isExtPage ? null : hostFromSender(sender);
   const senderCredentialError = isExtPage ? "forbidden" : credentialPageError(sender?.url);
+  // Third-party-iframe guard: the sender frame only gets autofill traffic when
+  // its registrable site matches the TOP page the user actually sees.
+  const senderFrameError = isExtPage
+    ? "forbidden"
+    : frameAutofillError(sender?.url, sender?.tab?.url);
 
   (async () => {
     try {
@@ -706,7 +712,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // from the SENDER frame, not the message. Passive — does NOT extend the
           // keep-unlock window.
           const s = await ensureSession();
-          if (!s || !senderHost || senderCredentialError) return sendResponse({ ok: true, items: [] });
+          if (!s || !senderHost || senderCredentialError || senderFrameError) {
+            return sendResponse({ ok: true, items: [] });
+          }
           sendResponse({ ok: true, items: suggestionsFor(s, senderHost) });
           break;
         }
@@ -715,7 +723,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // Password leaves WASM only here, for the field the user explicitly
           // picked — and ONLY if the item's site matches the sender frame's host
           // (so a frame can't pull credentials for an unrelated site by id).
-          if (senderCredentialError) return sendResponse({ ok: false, error: "forbidden" });
+          if (senderCredentialError || senderFrameError) {
+            return sendResponse({ ok: false, error: "forbidden" });
+          }
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
           const it = s.items.get(msg.id);

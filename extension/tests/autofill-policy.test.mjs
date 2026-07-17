@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   autofillPolicyError,
   credentialPageError,
+  frameAutofillError,
   validatedAutofillTarget,
 } from "../lib/autofill-policy.js";
 
@@ -84,4 +85,33 @@ test("fails closed when Chrome cannot identify one top-level document", () => {
   ]) {
     assert.throws(() => validatedAutofillTarget(login, { id: 7 }, 7, results), /could not be verified/i);
   }
+});
+
+test("frame guard: same-page and same-site frames are allowed", () => {
+  assert.equal(
+    frameAutofillError("https://bank.com/login", "https://bank.com/home"),
+    null
+  );
+  assert.equal(
+    frameAutofillError("https://auth.bank.com/login", "https://www.bank.com/home"),
+    null
+  );
+});
+
+test("frame guard: cross-site iframes are rejected", () => {
+  assert.match(
+    frameAutofillError("https://bank.com/login", "https://evil.example/lure"),
+    /third-party frames/i
+  );
+  // PaaS shared suffixes are distinct registrable sites.
+  assert.match(
+    frameAutofillError("https://a.github.io/x", "https://b.github.io/y"),
+    /third-party frames/i
+  );
+});
+
+test("frame guard: fails closed when the top URL is missing or invalid", () => {
+  assert.ok(frameAutofillError("https://bank.com/login", undefined));
+  assert.ok(frameAutofillError("https://bank.com/login", "not a url"));
+  assert.ok(frameAutofillError(undefined, "https://bank.com/"));
 });
