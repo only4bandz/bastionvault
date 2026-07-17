@@ -100,6 +100,20 @@ describe("Vault dashboard accessibility", () => {
     );
   });
 
+  it("filters favorites independently and exposes the pressed state", async () => {
+    const user = userEvent.setup();
+    renderVault([
+      { ...LOGIN, favorite: true },
+      { id: "note-1", type: "note", title: "Recovery", updatedAt: LOGIN.updatedAt + 1 },
+    ]);
+
+    const favorites = screen.getByRole("button", { name: /Favorites/ });
+    await user.click(favorites);
+    expect(favorites).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Open GitHub" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Open Recovery" })).not.toBeInTheDocument();
+  });
+
   it("opens a vault row from the keyboard and restores focus after dismissal", async () => {
     const user = userEvent.setup();
     renderVault();

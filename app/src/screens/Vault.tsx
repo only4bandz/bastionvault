@@ -106,6 +106,7 @@ export function Vault({
   const [soonLabel, setSoonLabel] = useState("");
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"all" | ItemType>("all");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [editor, setEditor] = useState<null | "new" | VaultItem>(null);
   const [detail, setDetail] = useState<VaultItem | null>(null);
   const [importing, setImporting] = useState(false);
@@ -118,13 +119,16 @@ export function Vault({
   const sidebarRef = useRef<HTMLElement>(null);
   const mobileNavWasOpen = useRef(false);
 
-  const filtered = useMemo(() => filterVaultItems(items, tab, query), [items, tab, query]);
+  const filtered = useMemo(
+    () => filterVaultItems(items, tab, query, favoritesOnly),
+    [favoritesOnly, items, tab, query]
+  );
 
   // Paginate so a 270-item vault doesn't scroll forever.
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount);
   const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-  useEffect(() => { setPage(1); }, [query, tab]); // reset to first page on filter change
+  useEffect(() => { setPage(1); }, [favoritesOnly, query, tab]); // reset to first page on filter change
 
   useEffect(() => {
     if (mobileNavOpen) firstNavRef.current?.focus();
@@ -182,6 +186,7 @@ export function Vault({
     login: items.filter((i) => i.type === "login").length,
     note: items.filter((i) => i.type === "note").length,
     card: items.filter((i) => i.type === "card").length,
+    favorite: items.filter((i) => i.favorite).length,
   };
 
   function go(n: Nav, label = "") {
@@ -358,7 +363,7 @@ export function Vault({
                 </div>
               </div>
 
-              <div className="tabs" aria-label="Vault item type">
+              <div className="tabs" aria-label="Vault filters">
                 {([["all", "All Items"], ["login", "Passwords"], ["note", "Secure Notes"], ["card", "Credit Cards"]] as [typeof tab, string][]).map(
                   ([t, label]) => (
                     <button
@@ -371,6 +376,14 @@ export function Vault({
                     </button>
                   )
                 )}
+                <button
+                  className={`tab${favoritesOnly ? " active" : ""}`}
+                  aria-pressed={favoritesOnly}
+                  onClick={() => setFavoritesOnly((active) => !active)}
+                >
+                  <IcStar size={14} filled={favoritesOnly} /> Favorites{" "}
+                  <span className="faint">{counts.favorite}</span>
+                </button>
               </div>
 
               {query.trim() && (
@@ -383,12 +396,18 @@ export function Vault({
                 <div className="empty">
                   <div className="big">{items.length === 0 ? <IcVault size={54} /> : <IcSearch size={54} />}</div>
                   <div style={{ fontSize: 16, color: "var(--text-dim)" }}>
-                    {items.length === 0 ? "No items yet" : "No matching items"}
+                    {items.length === 0
+                      ? "No items yet"
+                      : favoritesOnly && !query.trim() && tab === "all"
+                        ? "No favorite items"
+                        : "No matching items"}
                   </div>
                   <div style={{ marginTop: 6 }}>
                     {items.length === 0
                       ? "Create your first item to get started."
-                      : "Try another search or item type."}
+                      : favoritesOnly && !query.trim() && tab === "all"
+                        ? "Mark an item as a favorite to see it here."
+                        : "Try another search or item type."}
                   </div>
                   {items.length > 0 && (
                     <button
@@ -397,6 +416,7 @@ export function Vault({
                       onClick={() => {
                         setQuery("");
                         setTab("all");
+                        setFavoritesOnly(false);
                         searchInputRef.current?.focus();
                       }}
                     >

@@ -68,6 +68,16 @@ it("sorts favorites first, then by recency", () => {
   expect(filterVaultItems(items, "all", "").map((i) => i.id)).toEqual(["d", "b", "a", "c"]);
 });
 
+it("filters favorites independently from type and search", () => {
+  const items = [
+    { id: "a", type: "login", title: "GitHub", updatedAt: 2, favorite: true },
+    { id: "b", type: "note", title: "GitHub recovery", updatedAt: 3, favorite: true },
+    { id: "c", type: "login", title: "GitLab", updatedAt: 1 },
+  ] as VaultItem[];
+  expect(filterVaultItems(items, "all", "", true).map((item) => item.id)).toEqual(["b", "a"]);
+  expect(filterVaultItems(items, "login", "git", true).map((item) => item.id)).toEqual(["a"]);
+});
+
 it("matches displayed card metadata but never secret fields", () => {
   const card: VaultItem = {
     id: "card-meta",
