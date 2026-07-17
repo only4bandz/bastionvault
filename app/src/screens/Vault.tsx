@@ -43,6 +43,7 @@ function CardSubtitle({ item }: { item: VaultItem }): JSX.Element {
 }
 
 type Nav = "vault" | "generator" | "health" | "send" | "soon";
+export type VaultSyncStatus = "saved" | "saving" | "error";
 
 const PAGE_SIZE = 50;
 
@@ -81,6 +82,7 @@ export function Vault({
   onUpsert,
   onDelete,
   onImport,
+  syncStatus,
   onLock,
   toast,
 }: {
@@ -94,6 +96,7 @@ export function Vault({
   onUpsert: (i: VaultItem) => Promise<boolean>;
   onDelete: (id: string) => Promise<boolean>;
   onImport: (r: ImportResult, onProgress: ImportProgress) => Promise<ImportOutcome>;
+  syncStatus: VaultSyncStatus;
   onLock: () => void;
   toast: (m: string) => void;
 }): JSX.Element {
@@ -319,6 +322,14 @@ export function Vault({
             <kbd className="kbd" aria-label="Keyboard shortcut Control or Command K">Ctrl/⌘ K</kbd>
           </div>
           <div className="topbar-right">
+            <span className={`sync-status ${syncStatus}`} role="status" aria-live="polite">
+              <span className="sync-dot" aria-hidden="true" />
+              {syncStatus === "saving"
+                ? "Saving…"
+                : syncStatus === "error"
+                  ? "Sync failed"
+                  : "All changes saved"}
+            </span>
             <span className="pill">🔒 Zero-knowledge</span>
             <span className="faint" style={{ fontSize: 13 }}>{email}</span>
             <div className="avatar" aria-hidden="true">{(email[0] || "B").toUpperCase()}</div>

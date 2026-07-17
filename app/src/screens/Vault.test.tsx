@@ -14,7 +14,7 @@ const LOGIN: VaultItem = {
   updatedAt: 1_700_000_000_000,
 };
 
-function renderVault(items: VaultItem[] = [LOGIN]) {
+function renderVault(items: VaultItem[] = [LOGIN], syncStatus: "saved" | "saving" | "error" = "saved") {
   const onUpsert = vi.fn(async () => true);
   const onDelete = vi.fn(async () => true);
   render(
@@ -32,6 +32,7 @@ function renderVault(items: VaultItem[] = [LOGIN]) {
         requested: result.items.length,
         imported: result.items.length,
       }))}
+      syncStatus={syncStatus}
       onLock={vi.fn()}
       toast={vi.fn()}
     />
@@ -40,6 +41,11 @@ function renderVault(items: VaultItem[] = [LOGIN]) {
 }
 
 describe("Vault dashboard accessibility", () => {
+  it("announces only transaction-backed sync states", () => {
+    renderVault([], "saving");
+    expect(screen.getByRole("status")).toHaveTextContent("Saving…");
+  });
+
   it("publishes current navigation, filter, and generator control states", async () => {
     const user = userEvent.setup();
     renderVault();
@@ -131,7 +137,7 @@ describe("Vault dashboard accessibility", () => {
     expect(screen.getByText("Ctrl/⌘ K")).toBeVisible();
 
     await user.type(search, "github");
-    expect(screen.getByRole("status")).toHaveTextContent("1 result for “github”");
+    expect(screen.getByText("1 result for “github”")).toHaveAttribute("role", "status");
     await user.keyboard("{Escape}");
     expect(search).toHaveValue("");
 

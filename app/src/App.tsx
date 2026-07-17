@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Welcome } from "./screens/Welcome";
 import { RevealSecret } from "./screens/RevealSecret";
 import { Unlock } from "./screens/Unlock";
-import { Vault } from "./screens/Vault";
+import { Vault, type VaultSyncStatus } from "./screens/Vault";
 import { ensureWasm, register, unlock, type Account } from "./lib/wasm";
 import {
   api,
@@ -184,10 +184,13 @@ export default function App(): JSX.Element {
   const [items, setItems] = useState<VaultItem[]>([]);
   const [sendContacts, setSendContacts] = useState<Contact[]>([]);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<VaultSyncStatus>("saved");
   const toastTimer = useRef<number | undefined>(undefined);
   const sessionEpoch = useRef(0);
   const integrityRef = useRef<VaultIntegrityState | null>(null);
   const mutationTail = useRef<Promise<void>>(Promise.resolve());
+  const pendingMutations = useRef(0);
+  const mutationFailed = useRef(false);
 
   const toast = useCallback((m: string) => {
     setToastMsg(m);
@@ -205,6 +208,9 @@ export default function App(): JSX.Element {
     setSendContacts([]);
     integrityRef.current = null;
     mutationTail.current = Promise.resolve();
+    pendingMutations.current = 0;
+    mutationFailed.current = false;
+    setSyncStatus("saved");
     setPhase("unlock");
   }, [account, token]);
 
@@ -365,6 +371,9 @@ export default function App(): JSX.Element {
       const acc = account;
       const tok = token;
       const epoch = sessionEpoch.current;
+      if (pendingMutations.current === 0) mutationFailed.current = false;
+      pendingMutations.current += 1;
+      setSyncStatus("saving");
       const execute = async (): Promise<void> => {
         try {
           if (!acc || !tok || sessionEpoch.current !== epoch) {
@@ -422,6 +431,18 @@ export default function App(): JSX.Element {
       mutationTail.current = scheduled.then(
         () => undefined,
         () => undefined
+      );
+      const finish = (succeeded: boolean): void => {
+        if (sessionEpoch.current !== epoch) return;
+        if (!succeeded) mutationFailed.current = true;
+        pendingMutations.current = Math.max(0, pendingMutations.current - 1);
+        if (pendingMutations.current === 0) {
+          setSyncStatus(mutationFailed.current ? "error" : "saved");
+        }
+      };
+      scheduled.then(
+        () => finish(true),
+        () => finish(false)
       );
       return scheduled;
     },
@@ -559,6 +580,7 @@ export default function App(): JSX.Element {
           onUpsert={upsert}
           onDelete={remove}
           onImport={importItems}
+          syncStatus={syncStatus}
           onLock={lock}
           toast={toast}
         />
