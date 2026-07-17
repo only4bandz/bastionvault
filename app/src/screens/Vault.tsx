@@ -11,7 +11,7 @@ import {
   IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
-import { analyzePasswordHealth } from "../lib/password-health";
+import { analyzePasswordHealth, passwordAgeReference } from "../lib/password-health";
 import { lookupBin } from "../lib/bin";
 import type { ImportOutcome, ImportProgress, ImportResult } from "../lib/import";
 import type { Account } from "../lib/wasm";
@@ -613,7 +613,7 @@ function ItemDetailView({
 
 // ── Password Health ──
 function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) => void }): JSX.Element {
-  const analysis = useMemo(() => analyzePasswordHealth(items), [items]);
+  const analysis = useMemo(() => analyzePasswordHealth(items, Date.now()), [items]);
   const score = analysis.score;
   const scoreColor =
     score === null
@@ -673,7 +673,7 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
           </div>
         )}
         <div className="faint" style={{ marginTop: 10, fontSize: 13 }}>
-          {analysis.assessedCount}/{analysis.loginCount} login passwords assessed · {analysis.weakItems.length} weak · {analysis.reusedGroups.length} reused {analysis.reusedGroups.length === 1 ? "group" : "groups"}
+          {analysis.assessedCount}/{analysis.loginCount} login passwords assessed · {analysis.weakItems.length} weak · {analysis.reusedGroups.length} reused {analysis.reusedGroups.length === 1 ? "group" : "groups"} · {analysis.oldItems.length} old
         </div>
         <div className="faint" style={{ marginTop: 6, fontSize: 12 }}>
           Offline analysis only: length, character variety, obvious patterns, and exact reuse.
@@ -697,6 +697,20 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
           ))}
         </div>
       )}
+      {analysis.oldItems.length > 0 && (
+        <div className="card-section" style={{ maxWidth: 640, marginBottom: 16 }}>
+          <div className="health-section-title" style={{ color: "var(--warn)" }}>
+            Old passwords · {analysis.oldItems.length}
+          </div>
+          {analysis.oldItems.map((item) => (
+            <Finding
+              key={item.id}
+              item={item}
+              detail={`Unchanged for ${Math.floor((Date.now() - passwordAgeReference(item)) / 86_400_000)} days`}
+            />
+          ))}
+        </div>
+      )}
       {analysis.assessedCount === 0 && (
         <div className="card-section" style={{ maxWidth: 640 }}>
           <span className="muted">Add a login with a password to calculate vault health.</span>
@@ -704,7 +718,7 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
       )}
       {analysis.assessedCount > 0 && analysis.atRiskItems.length === 0 && (
         <div className="card-section" style={{ maxWidth: 640 }}>
-          <span className="muted">No weak or reused passwords found by the offline checks. 🎉</span>
+          <span className="muted">No weak, reused or old passwords found by the offline checks. 🎉</span>
         </div>
       )}
     </>

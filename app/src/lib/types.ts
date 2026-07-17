@@ -20,6 +20,8 @@ export interface VaultItem {
   notes?: string;
   favorite?: boolean;
   updatedAt: number;
+  /** When the password itself last changed (any edit bumps updatedAt). */
+  passwordChangedAt?: number;
 }
 
 export const TYPE_LABEL: Record<ItemType, string> = {

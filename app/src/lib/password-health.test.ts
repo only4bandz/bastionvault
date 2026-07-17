@@ -70,3 +70,30 @@ describe("analyzePasswordHealth", () => {
     expect(items.map((item) => item.id)).toEqual(originalOrder);
   });
 });
+
+describe("password age", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const NOW = 1_800_000_000_000;
+
+  it("flags passwords unchanged for more than a year", () => {
+    const fresh = { ...login("fresh", "Fresh", "V7!kQ2#pL9@xR4$m"), passwordChangedAt: NOW - 30 * DAY };
+    const stale = { ...login("stale", "Stale", "W8!mR3#qN0@yS5$n"), passwordChangedAt: NOW - 400 * DAY };
+    const analysis = analyzePasswordHealth([fresh, stale], NOW);
+    expect(analysis.oldItems.map((i) => i.id)).toEqual(["stale"]);
+    expect(analysis.atRiskItems.map((i) => i.id)).toContain("stale");
+    expect(analysis.score).toBe(50);
+  });
+
+  it("falls back to updatedAt when passwordChangedAt is absent", () => {
+    const legacy = { ...login("legacy", "Legacy", "V7!kQ2#pL9@xR4$m"), updatedAt: NOW - 366 * DAY };
+    const analysis = analyzePasswordHealth([legacy], NOW);
+    expect(analysis.oldItems.map((i) => i.id)).toEqual(["legacy"]);
+  });
+
+  it("skips age analysis entirely when no clock is provided", () => {
+    const stale = { ...login("stale", "Stale", "W8!mR3#qN0@yS5$n"), passwordChangedAt: 1 };
+    const analysis = analyzePasswordHealth([stale]);
+    expect(analysis.oldItems).toEqual([]);
+    expect(analysis.score).toBe(100);
+  });
+});

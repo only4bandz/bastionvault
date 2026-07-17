@@ -73,7 +73,9 @@ function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
         OPTIONAL_ITEM_STRINGS.some(
           (field) => (item as VaultItem)[field] !== undefined && typeof (item as VaultItem)[field] !== "string"
         ) ||
-        ((item as VaultItem).favorite !== undefined && typeof (item as VaultItem).favorite !== "boolean")
+        ((item as VaultItem).favorite !== undefined && typeof (item as VaultItem).favorite !== "boolean") ||
+        ((item as VaultItem).passwordChangedAt !== undefined &&
+          !Number.isFinite((item as VaultItem).passwordChangedAt))
       ) {
         throw new Error("invalid item payload");
       }

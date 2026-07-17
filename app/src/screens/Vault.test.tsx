@@ -150,7 +150,9 @@ describe("Vault dashboard accessibility", () => {
     renderVault();
 
     await user.click(screen.getByRole("button", { name: "Password Health" }));
-    const finding = screen.getByRole("button", { name: /GitHub/ });
+    // The fixture's password is both weak and old, so it is listed in two
+    // findings sections; keyboard behavior is identical — use the first.
+    const finding = screen.getAllByRole("button", { name: /GitHub/ })[0];
     finding.focus();
     await user.keyboard(" ");
 
