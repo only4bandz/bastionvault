@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { VaultItem } from "../lib/types";
@@ -11,6 +11,16 @@ const LOGIN: VaultItem = {
   username: "general@example.com",
   password: "abc",
   url: "https://github.com",
+  updatedAt: 1_700_000_000_000,
+};
+
+const CARD: VaultItem = {
+  id: "card-1",
+  type: "card",
+  title: "Operations card",
+  cardNumber: "4111111111111111",
+  cardExp: "12/29",
+  cardCvv: "123",
   updatedAt: 1_700_000_000_000,
 };
 
@@ -41,6 +51,27 @@ function renderVault(items: VaultItem[] = [LOGIN], syncStatus: "saved" | "saving
 }
 
 describe("Vault dashboard accessibility", () => {
+  it("reveals card secrets independently and conceals them after the deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      renderVault([CARD]);
+      fireEvent.click(screen.getByRole("button", { name: "Open Operations card" }));
+
+      fireEvent.click(screen.getByRole("button", { name: "Reveal number" }));
+      expect(screen.getByText(CARD.cardNumber!)).toBeVisible();
+      expect(screen.queryByText(CARD.cardCvv!)).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Reveal cvv" }));
+      expect(screen.getByText(CARD.cardCvv!)).toBeVisible();
+
+      await act(() => vi.advanceTimersByTimeAsync(30_000));
+      expect(screen.queryByText(CARD.cardNumber!)).not.toBeInTheDocument();
+      expect(screen.queryByText(CARD.cardCvv!)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("announces only transaction-backed sync states", () => {
     renderVault([], "saving");
     expect(screen.getByRole("status")).toHaveTextContent("Saving…");

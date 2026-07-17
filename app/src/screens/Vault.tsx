@@ -46,6 +46,7 @@ type Nav = "vault" | "generator" | "health" | "send" | "soon";
 export type VaultSyncStatus = "saved" | "saving" | "error";
 
 const PAGE_SIZE = 50;
+export const SECRET_REVEAL_MS = 30_000;
 
 /** Page numbers to show, with "…" gaps for long ranges (e.g. 1 … 4 5 6 … 12). */
 function pageNumbers(cur: number, total: number): (number | "…")[] {
@@ -588,14 +589,55 @@ function ItemDetailView({
   onDelete: () => Promise<boolean>;
   copy: (t: string, w: string, secret?: boolean) => void;
 }): JSX.Element {
-  const [reveal, setReveal] = useState(false);
+  const [revealed, setRevealed] = useState<Set<string>>(() => new Set());
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const concealTimers = useRef<Map<string, number>>(new Map());
   const rows: [string, string | undefined, boolean][] =
     item.type === "login"
       ? [["Username", item.username, false], ["Password", item.password, true], ["Website", item.url, false]]
       : item.type === "card"
         ? [["Number", item.cardNumber, true], ["Expiry", item.cardExp, false], ["CVV", item.cardCvv, true]]
         : [];
+
+  function conceal(key: string): void {
+    const timer = concealTimers.current.get(key);
+    if (timer !== undefined) window.clearTimeout(timer);
+    concealTimers.current.delete(key);
+    setRevealed((current) => {
+      if (!current.has(key)) return current;
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  }
+
+  function concealAll(): void {
+    concealTimers.current.forEach((timer) => window.clearTimeout(timer));
+    concealTimers.current.clear();
+    setRevealed(new Set());
+  }
+
+  function toggleReveal(key: string): void {
+    if (revealed.has(key)) {
+      conceal(key);
+      return;
+    }
+    setRevealed((current) => new Set(current).add(key));
+    concealTimers.current.set(key, window.setTimeout(() => conceal(key), SECRET_REVEAL_MS));
+  }
+
+  useEffect(() => {
+    const timers = concealTimers.current;
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === "hidden") concealAll();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      timers.forEach((timer) => window.clearTimeout(timer));
+      timers.clear();
+    };
+  }, []);
 
   return (
     <>
@@ -617,23 +659,26 @@ function ItemDetailView({
           </>
         }
       >
-          {rows.filter(([, v]) => v).map(([k, v, secret]) => (
-            <div className="row-copy" key={k}>
-              <span className="k">{k}</span>
-              <span className="v mono">{secret && !reveal ? "•".repeat(Math.min(14, (v || "").length)) : v}</span>
-              {secret && (
-                <button
-                  className="icon-btn"
-                  aria-label={`${reveal ? "Hide" : "Reveal"} ${k.toLowerCase()}`}
-                  aria-pressed={reveal}
-                  onClick={() => setReveal((r) => !r)}
-                >
-                  <IcEye size={16} />
-                </button>
-              )}
-              <button className="icon-btn" aria-label={`Copy ${k.toLowerCase()}`} onClick={() => copy(v!, k, secret)}><IcCopy size={16} /></button>
-            </div>
-          ))}
+          {rows.filter(([, v]) => v).map(([k, v, secret]) => {
+            const isRevealed = revealed.has(k);
+            return (
+              <div className="row-copy" key={k}>
+                <span className="k">{k}</span>
+                <span className="v mono">{secret && !isRevealed ? "•".repeat(Math.min(14, (v || "").length)) : v}</span>
+                {secret && (
+                  <button
+                    className="icon-btn"
+                    aria-label={`${isRevealed ? "Hide" : "Reveal"} ${k.toLowerCase()}`}
+                    aria-pressed={isRevealed}
+                    onClick={() => toggleReveal(k)}
+                  >
+                    <IcEye size={16} />
+                  </button>
+                )}
+                <button className="icon-btn" aria-label={`Copy ${k.toLowerCase()}`} onClick={() => copy(v!, k, secret)}><IcCopy size={16} /></button>
+              </div>
+            );
+          })}
           {item.notes && (
             <div className="row-copy" style={{ alignItems: "flex-start" }}>
               <span className="k">Notes</span>
