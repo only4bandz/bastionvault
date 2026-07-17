@@ -1039,8 +1039,27 @@ async fn rejects_invalid_item_ids_and_oversized_blobs() {
 #[tokio::test]
 async fn health_ok() {
     let app = server::app_in_memory();
+    let (s, body) = send(&app, "GET", "/health", None, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body, Value::Null); // "ok" is plain text, not JSON
+}
+
+#[tokio::test]
+async fn health_reports_unavailable_when_the_schema_is_gone() {
+    let path = test_db_path("health");
+    let app = server::app_with_db(&path.to_string());
     let (s, _) = send(&app, "GET", "/health", None, None).await;
     assert_eq!(s, StatusCode::OK);
+
+    // Simulate a wedged database: another connection drops the accounts table.
+    // The server's cached connection then observes the missing schema and the
+    // health check must fail closed instead of reporting healthy.
+    let breaker = rusqlite::Connection::open(path.to_string()).unwrap();
+    breaker.execute_batch("DROP TABLE accounts;").unwrap();
+    drop(breaker);
+
+    let (s, _) = send(&app, "GET", "/health", None, None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[cfg(unix)]
