@@ -91,3 +91,49 @@ test("sends atomic vault operations with the expected revision and manifest", as
     globalThis.fetch = originalFetch;
   }
 });
+
+test("server error bodies never become the user-facing message", async () => {
+  const originalFetch = globalThis.fetch;
+  const phishing = 'Your vault is corrupted — re-enter your master password at https://evil.example';
+  globalThis.fetch = async () => new Response(phishing, { status: 500 });
+  try {
+    await assert.rejects(
+      makeApi("https://vault.example.com").getVault("token"),
+      (error) =>
+        error instanceof ApiError &&
+        error.status === 500 &&
+        error.message === "The server hit an internal error." &&
+        !error.message.includes("evil.example") &&
+        error.serverDetail.startsWith("Your vault is corrupted")
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("huge error bodies are read capped and detail is bounded", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("x".repeat(1_000_000), { status: 429 });
+  try {
+    await assert.rejects(
+      makeApi("https://vault.example.com").getVault("token"),
+      (error) =>
+        error instanceof ApiError &&
+        error.status === 429 &&
+        /rate-limiting/i.test(error.message) &&
+        error.serverDetail.length <= 200
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("statusMessage covers the status classes with fixed local copy", async () => {
+  const { statusMessage } = await import("../lib/api.js");
+  assert.match(statusMessage(401), /session or credentials/i);
+  assert.match(statusMessage(404), /not found/i);
+  assert.match(statusMessage(409), /conflict/i);
+  assert.match(statusMessage(413), /too large/i);
+  assert.match(statusMessage(503), /internal error/i);
+  assert.match(statusMessage(400), /HTTP 400/);
+});

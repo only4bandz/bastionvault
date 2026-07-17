@@ -5,14 +5,58 @@
 // encrypted blobs + a hash of the auth secret — never plaintext.
 
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, serverDetail = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    /** Capped raw server text, for debugging only — never rendered in UI. */
+    this.serverDetail = serverDetail;
   }
 }
 
+/** Longest server error body we bother reading (anti memory-DoS). */
+export const MAX_ERROR_BODY_CHARS = 4096;
+/** How much raw server text is kept on the error, for debugging only. */
+export const MAX_SERVER_DETAIL_CHARS = 200;
+
+/**
+ * Fixed, local message per status class. The server's response body is
+ * ATTACKER-CONTROLLED from the extension's point of view (a malicious or
+ * compromised server): it must never become UI text, where it could carry
+ * arbitrary-length garbage or phishing copy ("re-enter your master password
+ * at …"). Callers that need specifics branch on `error.status`.
+ */
+export function statusMessage(status) {
+  if (status === 401) return "The server rejected the session or credentials.";
+  if (status === 404) return "Not found on the server.";
+  if (status === 409) return "The server reported a conflict with another change.";
+  if (status === 413) return "The request is too large for the server.";
+  if (status === 429) return "The server is rate-limiting requests. Try again shortly.";
+  if (status >= 500) return "The server hit an internal error.";
+  return `The server rejected the request (HTTP ${status}).`;
+}
+
 export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Reads at most MAX_ERROR_BODY_CHARS of an error body — a hostile server
+ * must not be able to balloon the worker's memory with a huge error page. */
+async function readErrorBody(res) {
+  try {
+    const reader = res.body?.getReader?.();
+    if (!reader) return ((await res.text()) || "").slice(0, MAX_ERROR_BODY_CHARS);
+    const decoder = new TextDecoder();
+    let out = "";
+    while (out.length < MAX_ERROR_BODY_CHARS) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      out += decoder.decode(value, { stream: true });
+    }
+    reader.cancel().catch(() => {});
+    return out.slice(0, MAX_ERROR_BODY_CHARS);
+  } catch {
+    return "";
+  }
+}
 
 async function req(base, method, path, token, body, timeoutMs) {
   const headers = {};
@@ -28,8 +72,12 @@ async function req(base, method, path, token, body, timeoutMs) {
       signal: controller.signal,
     });
     if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new ApiError(res.status, text || res.statusText);
+      const text = await readErrorBody(res);
+      throw new ApiError(
+        res.status,
+        statusMessage(res.status),
+        text.slice(0, MAX_SERVER_DETAIL_CHARS)
+      );
     }
     const ct = res.headers.get("content-type") || "";
     if (!ct.includes("application/json")) return undefined;
