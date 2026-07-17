@@ -2065,3 +2065,68 @@ async fn rate_limits_authenticated_vault_and_inbox_reads() {
     let (status, _) = send(&app, "GET", "/send/inbox", Some(&token), None).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn request_bodies_reject_unknown_fields() {
+    let app = server::app_in_memory();
+    let token = signup_login(&app, "strict-dto@example.com").await;
+
+    // A typo like "expire_at" must fail loudly, not silently store a message
+    // the sender believes is ephemeral with no expiry at all.
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(&token),
+        Some(json!({
+            "recipient_id": "SOMERECIPIENT",
+            "message_id": "m1",
+            "blob": { "v": 1, "payload": "AAAA" },
+            "expire_at": 123
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (_, registration, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "strict-dto-2@example.com",
+            "registration": serde_json::to_value(registration).unwrap(),
+            "admin": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": "strict-dto@example.com",
+            "auth_secret": B64.encode([0u8; 32]),
+            "remember_me": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/items/i1",
+        Some(&token),
+        Some(json!({
+            "blob": { "v": 1, "nonce": "AAAA", "ct": "AAAA" },
+            "overwrite": true
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
