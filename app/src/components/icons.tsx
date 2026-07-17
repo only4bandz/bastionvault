@@ -52,6 +52,11 @@ export const IcCopy = ({ size }: P): JSX.Element => (
 export const IcEdit = ({ size }: P): JSX.Element => (
   <svg {...S(size)}><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M14 6l4 4" /></svg>
 );
+export const IcStar = ({ size, filled = false }: P & { filled?: boolean }): JSX.Element => (
+  <svg {...S(size)} fill={filled ? "currentColor" : "none"}>
+    <path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2l1.1-6.2L3 9.6l6.2-.9z" />
+  </svg>
+);
 export const IcEye = ({ size }: P): JSX.Element => (
   <svg {...S(size)}><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></svg>
 );

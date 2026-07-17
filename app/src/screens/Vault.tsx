@@ -8,7 +8,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Favicon } from "../components/Favicon";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
-  IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcTrash, IcUpload, IcVault, IcX,
+  IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcStar, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { analyzePasswordHealth, passwordAgeReference } from "../lib/password-health";
@@ -412,6 +412,15 @@ export function Vault({
                         <span className="when">{timeAgo(i.updatedAt)}</span>
                       </button>
                       <div className="actions">
+                        <button
+                          className="icon-btn"
+                          aria-label={`${i.favorite ? "Remove" : "Add"} ${i.title} ${i.favorite ? "from" : "to"} favorites`}
+                          aria-pressed={Boolean(i.favorite)}
+                          style={i.favorite ? { color: "var(--warn)" } : undefined}
+                          onClick={() => void onUpsert({ ...i, favorite: !i.favorite })}
+                        >
+                          <IcStar size={16} filled={Boolean(i.favorite)} />
+                        </button>
                         {i.type === "login" && i.password && (
                           <button className="icon-btn" aria-label={`Copy password for ${i.title}`} onClick={() => copy(i.password!, "Password", true)}>
                             <IcCopy size={16} />

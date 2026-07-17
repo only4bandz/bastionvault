@@ -57,3 +57,13 @@ describe("filterVaultItems", () => {
     }
   );
 });
+
+it("sorts favorites first, then by recency", () => {
+  const items = [
+    { id: "a", type: "login", title: "Newest", updatedAt: 300 },
+    { id: "b", type: "login", title: "Starred old", updatedAt: 100, favorite: true },
+    { id: "c", type: "login", title: "Middle", updatedAt: 200 },
+    { id: "d", type: "login", title: "Starred new", updatedAt: 250, favorite: true },
+  ] as VaultItem[];
+  expect(filterVaultItems(items, "all", "").map((i) => i.id)).toEqual(["d", "b", "a", "c"]);
+});
