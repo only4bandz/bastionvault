@@ -25,6 +25,7 @@ import {
 } from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.js";
+import { revealFieldValue } from "./lib/reveal-policy.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
 import {
@@ -703,7 +704,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await touchSession();
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
-          sendResponse({ ok: true, value: it[msg.field] || "" });
+          sendResponse({ ok: true, value: revealFieldValue(it, msg.field) });
           break;
         }
         case "SUGGEST": {
