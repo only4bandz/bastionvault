@@ -781,6 +781,7 @@ impl IntoResponse for ApiError {
 // ─── DTO ───
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateAccount {
     email: String,
     registration: Registration,
@@ -794,6 +795,7 @@ struct Prelogin {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoginRequest {
     email: String,
     /// Base64 authentication secret derived on the client side.
@@ -813,6 +815,7 @@ struct VaultResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BlobBody {
     blob: EncryptedBlob,
 }
@@ -1957,6 +1960,7 @@ struct PublishResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendPost {
     recipient_id: String,
     message_id: String,
