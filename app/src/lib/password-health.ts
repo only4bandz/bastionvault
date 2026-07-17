@@ -2,16 +2,27 @@ import type { VaultItem } from "./types";
 
 const LABELS = ["Very weak", "Weak", "Fair", "Strong", "Excellent"];
 const COLORS = ["#ff5d6c", "#ff5d6c", "#ffb454", "#3ad29f", "#3ad29f"];
+// Top common-password tokens (offline, deterministic — matched against the
+// l33t-normalized password). Sourced from the recurring leaders of breach
+// corpora (rockyou / SecLists top lists), lowercased, deduplicated.
 const COMMON_TOKENS = [
-  "password",
-  "letmein",
-  "qwerty",
-  "welcome",
-  "admin",
-  "iloveyou",
-  "monkey",
-  "dragon",
-];
+  "password", "letmein", "qwerty", "welcome", "admin", "iloveyou", "monkey",
+  "dragon", "sunshine", "princess", "football", "baseball", "basketball", "soccer",
+  "hockey", "superman", "batman", "master", "shadow", "michael", "jennifer",
+  "jordan", "hunter", "harley", "ranger", "buster", "thomas", "robert",
+  "killer", "george", "andrew", "charlie", "daniel", "ashley", "jessica",
+  "amanda", "nicole", "chelsea", "biteme", "matrix", "secret", "freedom",
+  "whatever", "trustno", "starwars", "computer", "corvette", "mercedes", "ferrari",
+  "cheese", "pepper", "ginger", "banana", "orange", "purple", "yellow",
+  "silver", "golden", "cookie", "summer", "winter", "spring", "autumn",
+  "flower", "butterfly", "rainbow", "diamond", "tigger", "snoopy", "mickey",
+  "pokemon", "pikachu", "naruto", "gandalf", "hannah", "maggie", "sophie",
+  "pandora", "phoenix", "scorpio", "taurus", "gemini", "peanut", "cowboy",
+  "eagles", "yankees", "lakers", "dallas", "chicago", "london", "austin",
+  "canada", "america", "mexico", "money", "loveme", "lovely", "angels",
+  "bailey", "access", "please", "internet", "samsung", "google", "gaming",
+  "soccer1", "abc123", "test",
+] as const;
 const SEQUENCES = [
   "0123456789",
   "9876543210",
@@ -109,6 +120,16 @@ export function assessPassword(password: string): PasswordAssessment {
   if (common) {
     score = Math.min(score, 1);
     reasons.push("Common password pattern");
+  }
+  // "Maple2023!"-style: any single word followed by a plausible year. The
+  // base word need not be in the common list — the *shape* alone is one of
+  // the first patterns offline crackers enumerate.
+  if (
+    !common &&
+    /^[a-z]{3,}(19|20)\d{2}$/.test(password.toLowerCase().replace(/[^a-z0-9]/g, ""))
+  ) {
+    score = Math.min(score, 2);
+    reasons.push("Word with a year suffix");
   }
   if (password.length < 12) reasons.push("Fewer than 12 characters");
   if (classCount < 2) reasons.push("Uses only one character class");

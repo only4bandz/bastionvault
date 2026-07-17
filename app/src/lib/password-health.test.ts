@@ -97,3 +97,26 @@ describe("password age", () => {
     expect(analysis.score).toBe(100);
   });
 });
+
+describe("expanded common-password detection", () => {
+  it.each(["Sunshine12!", "Football99!", "Princess2024", "Tru5tno1!", "Starwars#1"])(
+    "caps breach-corpus leader %s as weak",
+    (password) => {
+      const assessment = assessPassword(password);
+      expect(assessment.score).toBeLessThanOrEqual(1);
+      expect(assessment.reasons).toContain("Common password pattern");
+    }
+  );
+
+  it("caps any word followed by a year, even outside the common list", () => {
+    const assessment = assessPassword("Maple2023!");
+    expect(assessment.score).toBeLessThanOrEqual(2);
+    expect(assessment.reasons).toContain("Word with a year suffix");
+  });
+
+  it("does not flag genuinely random values", () => {
+    expect(assessPassword("V7!kQ2#pL9@xR4$m").reasons).toEqual([
+      "No obvious offline pattern detected",
+    ]);
+  });
+});
