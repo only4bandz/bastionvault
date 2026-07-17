@@ -23,6 +23,7 @@ import {
   validatedAutofillTarget,
 } from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
+import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
 import {
@@ -452,6 +453,14 @@ async function ensureSession() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === AUTOLOCK_ALARM) lock();
+});
+
+// The keep-unlocked window must not outlive the user's presence: when the OS
+// session locks (screen lock, fast user switching, suspend), lock the vault
+// immediately. See lib/idle-lock.js for why "idle" alone does not lock.
+chrome.idle.setDetectionInterval(IDLE_DETECTION_SECONDS);
+chrome.idle.onStateChanged.addListener((state) => {
+  if (shouldLockOnIdleState(state)) lock();
 });
 
 async function doUnlock(email, password, secretKey) {
