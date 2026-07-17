@@ -25,6 +25,36 @@ const CARD: VaultItem = {
 };
 
 describe("ItemEditor secret fields", () => {
+  it("requires confirmation before discarding a user-edited draft", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ItemEditor initial={LOGIN} onSave={vi.fn(async () => true)} onClose={onClose} />);
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "GitLab");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(screen.getByRole("dialog", { name: "Discard unsaved changes?" })).toBeVisible();
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByLabelText("Name")).toHaveValue("GitLab");
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("closes an untouched editor without prompting", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ItemEditor initial={LOGIN} onSave={vi.fn(async () => true)} onClose={onClose} />);
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("dialog", { name: "Discard unsaved changes?" })).not.toBeInTheDocument();
+  });
+
   it("masks a saved login password and submits the unchanged secret", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn(async (_item: VaultItem) => false);

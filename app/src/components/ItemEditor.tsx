@@ -3,6 +3,7 @@ import type { ItemType, VaultItem } from "../lib/types";
 import { generatePassword } from "../lib/generator";
 import { detectScheme, lookupBin } from "../lib/bin";
 import { IcCard, IcKey, IcNote, IcRefresh } from "./icons";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
 import { SecretInput } from "./SecretInput";
 
@@ -24,8 +25,13 @@ export function ItemEditor({
 }): JSX.Element {
   const [item, setItem] = useState<VaultItem>(initial ?? NEW());
   const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
-  const set = <K extends keyof VaultItem>(k: K, v: VaultItem[K]) => setItem((p) => ({ ...p, [k]: v }));
+  const set = <K extends keyof VaultItem>(k: K, v: VaultItem[K]) => {
+    setDirty(true);
+    setItem((p) => ({ ...p, [k]: v }));
+  };
 
   // Detect the card network locally (instant) and the issuing bank from the BIN
   // (debounced lookup), so the item shows the right logo.
@@ -72,26 +78,34 @@ export function ItemEditor({
     if (!saved) setSaving(false);
   }
 
+  function requestClose(): void {
+    if (saving) return;
+    if (dirty) setConfirmingDiscard(true);
+    else onClose();
+  }
+
   return (
-    <Dialog
-      title={initial ? "Edit item" : "New item"}
-      onClose={onClose}
-      closeDisabled={saving}
-      initialFocusRef={titleRef}
-      footer={
-        <>
-          <span className="spacer" />
-          <button className="btn btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
-          <button
-            className="btn btn-primary"
-            onClick={() => void save()}
-            disabled={!item.title.trim() || saving}
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </>
-      }
-    >
+    <>
+      <Dialog
+        title={initial ? "Edit item" : "New item"}
+        onClose={requestClose}
+        closeDisabled={saving}
+        inactive={confirmingDiscard}
+        initialFocusRef={titleRef}
+        footer={
+          <>
+            <span className="spacer" />
+            <button className="btn btn-ghost" onClick={requestClose} disabled={saving}>Cancel</button>
+            <button
+              className="btn btn-primary"
+              onClick={() => void save()}
+              disabled={!item.title.trim() || saving}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </>
+        }
+      >
           {!initial && (
             <div className="type-pick">
               {([
@@ -195,6 +209,20 @@ export function ItemEditor({
             <label htmlFor="item-notes">Notes</label>
             <textarea id="item-notes" className="textarea" value={item.notes ?? ""} onChange={(e) => set("notes", e.target.value)} />
           </div>
-    </Dialog>
+      </Dialog>
+      {confirmingDiscard && (
+        <ConfirmDialog
+          title="Discard unsaved changes?"
+          confirmLabel="Discard changes"
+          onClose={() => setConfirmingDiscard(false)}
+          onConfirm={async () => {
+            onClose();
+            return true;
+          }}
+        >
+          Your edits have not been saved. Discarding them cannot be undone.
+        </ConfirmDialog>
+      )}
+    </>
   );
 }
