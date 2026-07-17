@@ -43,47 +43,56 @@ export function Welcome({
           could never read your vault.
         </p>
 
-        <div className="field">
-          <label>Email</label>
-          <input
-            className="input"
-            type="email"
-            autoFocus
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-          />
-        </div>
-        <div className="field">
-          <label>Master password</label>
-          <SecretInput
-            label="Master password"
-            value={pw}
-            onChange={(e) => setPw(e.target.value)}
-            placeholder="A long, memorable passphrase"
-          />
-          {pw && (
-            <div className="strength" title={s.label}>
-              <i style={{ width: `${(s.score / 4) * 100}%`, background: s.color }} />
-            </div>
-          )}
-        </div>
-        <div className="field">
-          <label>Confirm master password</label>
-          <SecretInput
-            label="Master password confirmation"
-            value={pw2}
-            onChange={(e) => setPw2(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && create()}
-            placeholder="Repeat it"
-          />
-        </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void create();
+          }}
+        >
+          <div className="field">
+            <label>Email</label>
+            <input
+              className="input"
+              type="email"
+              autoComplete="email"
+              autoFocus
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+            />
+          </div>
+          <div className="field">
+            <label>Master password</label>
+            <SecretInput
+              label="Master password"
+              autoComplete="new-password"
+              value={pw}
+              onChange={(e) => setPw(e.target.value)}
+              placeholder="A long, memorable passphrase"
+            />
+            {pw && (
+              <div className="strength" title={s.label}>
+                <i style={{ width: `${(s.score / 4) * 100}%`, background: s.color }} />
+              </div>
+            )}
+          </div>
+          <div className="field">
+            <label>Confirm master password</label>
+            <SecretInput
+              label="Master password confirmation"
+              autoComplete="new-password"
+              value={pw2}
+              onChange={(e) => setPw2(e.target.value)}
+              placeholder="Repeat it"
+            />
+          </div>
 
-        {err && <div className="callout">{err}</div>}
+          {err && <div className="callout">{err}</div>}
 
-        <button className="btn btn-primary btn-block" onClick={create} disabled={busy}>
-          {busy ? "Creating your vault…" : "Create vault"}
-        </button>
+          <button className="btn btn-primary btn-block" type="submit" disabled={busy}>
+            {busy ? "Creating your vault…" : "Create vault"}
+          </button>
+        </form>
 
         <div className="auth-foot">
           Already have a vault?{" "}
