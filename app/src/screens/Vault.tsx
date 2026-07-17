@@ -18,9 +18,10 @@ import type { ImportOutcome, ImportProgress, ImportResult } from "../lib/import"
 import type { Account } from "../lib/wasm";
 import type { Contact } from "../lib/send";
 import type { Blob } from "../lib/api";
-import { filterVaultItems } from "../lib/vault-search";
+import { filterVaultItems, type VaultSort } from "../lib/vault-search";
 import { copySecretWithFeedback, copyWithFeedback } from "../lib/clipboard";
 import { safeWebsiteUrl } from "../lib/safe-url";
+import { relativeItemTime } from "../lib/item-time";
 import { Send } from "./Send";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
@@ -62,14 +63,6 @@ function pageNumbers(cur: number, total: number): (number | "…")[] {
   return out;
 }
 
-function timeAgo(ts: number): string {
-  const d = Math.floor((Date.now() - ts) / 1000);
-  if (d < 60) return "just now";
-  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
-  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
-  return `${Math.floor(d / 86400)}d ago`;
-}
-
 const typeIcon = (t: ItemType, size = 18) =>
   t === "login" ? <IcKey size={size} /> : t === "note" ? <IcNote size={size} /> : <IcCard size={size} />;
 
@@ -107,6 +100,8 @@ export function Vault({
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"all" | ItemType>("all");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [sort, setSort] = useState<VaultSort>("favorites-recent");
+  const [now, setNow] = useState(() => Date.now());
   const [editor, setEditor] = useState<null | "new" | VaultItem>(null);
   const [detail, setDetail] = useState<VaultItem | null>(null);
   const [importing, setImporting] = useState(false);
@@ -120,8 +115,8 @@ export function Vault({
   const mobileNavWasOpen = useRef(false);
 
   const filtered = useMemo(
-    () => filterVaultItems(items, tab, query, favoritesOnly),
-    [favoritesOnly, items, tab, query]
+    () => filterVaultItems(items, tab, query, favoritesOnly, sort),
+    [favoritesOnly, items, query, sort, tab]
   );
 
   // Paginate so a 270-item vault doesn't scroll forever.
@@ -129,6 +124,24 @@ export function Vault({
   const safePage = Math.min(page, pageCount);
   const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
   useEffect(() => { setPage(1); }, [favoritesOnly, query, tab]); // reset to first page on filter change
+
+  useEffect(() => {
+    if (nav !== "vault") return;
+    let timer: number | undefined;
+    const start = (): void => {
+      window.clearInterval(timer);
+      setNow(Date.now());
+      if (document.visibilityState !== "hidden") {
+        timer = window.setInterval(() => setNow(Date.now()), 60_000);
+      }
+    };
+    start();
+    document.addEventListener("visibilitychange", start);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", start);
+    };
+  }, [nav]);
 
   useEffect(() => {
     if (mobileNavOpen) firstNavRef.current?.focus();
@@ -386,6 +399,23 @@ export function Vault({
                 </button>
               </div>
 
+              <div className="vault-list-controls">
+                <label>
+                  <span className="faint">Sort</span>
+                  <select
+                    className="input sort-select"
+                    aria-label="Sort vault items"
+                    value={sort}
+                    onChange={(event) => setSort(event.target.value as VaultSort)}
+                  >
+                    <option value="favorites-recent">Favorites and recent</option>
+                    <option value="recent">Recently updated</option>
+                    <option value="oldest">Oldest updated</option>
+                    <option value="name">Name A–Z</option>
+                  </select>
+                </label>
+              </div>
+
               {query.trim() && (
                 <div className="search-results-status faint" role="status" aria-live="polite">
                   {filtered.length} {filtered.length === 1 ? "result" : "results"} for “{query.trim()}”
@@ -449,7 +479,13 @@ export function Vault({
                             </span>
                           </span>
                         </span>
-                        <span className="when">{timeAgo(i.updatedAt)}</span>
+                        <time
+                          className="when"
+                          dateTime={new Date(i.updatedAt).toISOString()}
+                          title={new Date(i.updatedAt).toLocaleString()}
+                        >
+                          {relativeItemTime(i.updatedAt, now)}
+                        </time>
                       </button>
                       <div className="actions">
                         <button
