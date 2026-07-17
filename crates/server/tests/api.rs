@@ -1943,3 +1943,36 @@ async fn rate_limits_prelogin_globally_and_per_account() {
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn security_headers_are_stamped_on_success_and_error_responses() {
+    let app = server::app_in_memory();
+    for (method, uri, auth) in [
+        ("GET", "/health", None),
+        ("GET", "/vault", Some("bogus-token")), // 401
+        ("GET", "/accounts/nobody@example.com/prelogin", None), // 404
+    ] {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = auth {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let headers = response.headers().clone();
+        let get = |name: &str| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(get("cache-control"), "no-store", "{method} {uri}");
+        assert_eq!(get("pragma"), "no-cache", "{method} {uri}");
+        assert_eq!(get("x-content-type-options"), "nosniff", "{method} {uri}");
+        assert_eq!(get("referrer-policy"), "no-referrer", "{method} {uri}");
+        assert_eq!(get("x-frame-options"), "DENY", "{method} {uri}");
+    }
+}
