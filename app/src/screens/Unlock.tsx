@@ -1,5 +1,6 @@
 import { useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
+import { SecretInput } from "../components/SecretInput";
 import { IcLock } from "../components/icons";
 
 export function Unlock({
@@ -46,7 +47,7 @@ export function Unlock({
         </div>
         <div className="field">
           <label>Master password</label>
-          <input className="input" type="password" value={pw} onChange={(e) => setPw(e.target.value)} />
+          <SecretInput label="Master password" value={pw} onChange={(e) => setPw(e.target.value)} />
         </div>
         <div className="field">
           <label>Secret Key</label>
