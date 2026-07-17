@@ -565,6 +565,8 @@ async fn rate_limits_account_creation_globally_and_per_account_before_hashing() 
         account_creations_per_account: 1,
         login_attempts_global: 10,
         login_attempts_per_account: 10,
+        prelogins_global: 100,
+        prelogins_per_account: 100,
     });
     let (_, first, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let first = serde_json::to_value(first).unwrap();
@@ -631,6 +633,8 @@ async fn rate_limits_login_globally_and_per_account_before_verification() {
         account_creations_per_account: 2,
         login_attempts_global: 3,
         login_attempts_per_account: 1,
+        prelogins_global: 100,
+        prelogins_per_account: 100,
     });
     for email in ["login-alice@example.com", "login-bob@example.com"] {
         let (_, registration, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
@@ -711,6 +715,8 @@ async fn authentication_rate_state_is_strictly_bounded() {
         account_creations_per_account: 10,
         login_attempts_global: 10,
         login_attempts_per_account: 10,
+        prelogins_global: 100,
+        prelogins_per_account: 100,
     });
     let (_, first, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let (status, _) = send(
@@ -740,6 +746,8 @@ async fn authentication_rate_state_is_strictly_bounded() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
+    // Prelogin now participates in the bounded auth-rate map: at capacity a
+    // new live key is refused rather than growing the map without bound.
     let (status, _) = send(
         &app,
         "GET",
@@ -748,7 +756,7 @@ async fn authentication_rate_state_is_strictly_bounded() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -1864,4 +1872,74 @@ async fn corrupted_send_persistence_fails_closed() {
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(format!("{path}-wal"));
     let _ = std::fs::remove_file(format!("{path}-shm"));
+}
+
+#[tokio::test]
+async fn rate_limits_prelogin_globally_and_per_account() {
+    let app = server::app_in_memory_with_auth_rate_limits(server::AuthRateLimits {
+        max_entries: 16,
+        window: std::time::Duration::from_secs(60),
+        account_creations_global: 10,
+        account_creations_per_account: 2,
+        login_attempts_global: 10,
+        login_attempts_per_account: 10,
+        prelogins_global: 3,
+        prelogins_per_account: 1,
+    });
+    let (_, registration, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": "prelogin-alice@example.com",
+            "registration": serde_json::to_value(registration).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // First lookup for the account is allowed.
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/accounts/prelogin-alice@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Second lookup for the same account trips the per-account limiter.
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/accounts/prelogin-alice@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // Probing a different (unknown) address consumes the remaining global
+    // allowance and is rejected — enumeration cannot proceed at line rate.
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/accounts/prelogin-bob@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(
+        &app,
+        "GET",
+        "/accounts/prelogin-carol@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }
