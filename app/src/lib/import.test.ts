@@ -91,6 +91,30 @@ describe("csvToItems", () => {
     });
   });
 
+  it("imports strict Bastion dashboard metadata", () => {
+    const result = csvToItems(
+      "name,type,favorite,updatedat,passwordchangedat,cardbrand,cardbank,cardbankdomain,cardtype,cardnumber\n" +
+        "Operations card,card,true,1700000000000,1600000000000,visa,Example Bank,bank.example,credit,4111111111111111"
+    );
+    expect(result.items[0]).toMatchObject({
+      favorite: true,
+      updatedAt: 1_700_000_000_000,
+      passwordChangedAt: 1_600_000_000_000,
+      cardBrand: "visa",
+      cardBank: "Example Bank",
+      cardBankDomain: "bank.example",
+      cardType: "credit",
+    });
+  });
+
+  it.each([
+    ["favorite", "yes"],
+    ["updatedat", "-1"],
+    ["passwordchangedat", "not-a-number"],
+  ])("rejects invalid %s metadata", (header, value) => {
+    expect(() => csvToItems(`name,${header}\nGitHub,${value}`)).toThrow(CsvImportError);
+  });
+
   it("rejects an item whose UTF-8 payload exceeds the encrypted-item envelope", () => {
     const oversizedUtf8Title = "😀".repeat(65_536);
     expect(() => csvToItems(`name\n${oversizedUtf8Title}`)).toThrow(CsvImportError);

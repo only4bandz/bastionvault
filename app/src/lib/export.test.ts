@@ -11,7 +11,9 @@ const LOGIN: VaultItem = {
   password: 'p@ss,word\n"quoted"',
   url: "https://bank.example",
   notes: "line one\nline two",
-  updatedAt: 1,
+  favorite: true,
+  updatedAt: 1_700_000_000_000,
+  passwordChangedAt: 1_600_000_000_000,
 };
 
 const CARD: VaultItem = {
@@ -22,6 +24,10 @@ const CARD: VaultItem = {
   cardNumber: "4111 1111 1111 1111",
   cardExp: "12/27",
   cardCvv: "123",
+  cardBrand: "visa",
+  cardBank: "Example Bank",
+  cardBankDomain: "bank.example",
+  cardType: "credit",
   updatedAt: 1,
 };
 
@@ -53,6 +59,9 @@ describe("itemsToCsv", () => {
       password: LOGIN.password,
       url: LOGIN.url,
       notes: LOGIN.notes,
+      favorite: true,
+      updatedAt: LOGIN.updatedAt,
+      passwordChangedAt: LOGIN.passwordChangedAt,
     });
     expect(card).toMatchObject({
       type: "card",
@@ -61,6 +70,10 @@ describe("itemsToCsv", () => {
       cardNumber: CARD.cardNumber,
       cardExp: CARD.cardExp,
       cardCvv: CARD.cardCvv,
+      cardBrand: CARD.cardBrand,
+      cardBank: CARD.cardBank,
+      cardBankDomain: CARD.cardBankDomain,
+      cardType: CARD.cardType,
     });
     expect(note).toMatchObject({ type: "note", title: NOTE.title, notes: NOTE.notes });
   });
