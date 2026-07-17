@@ -8,10 +8,11 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { Favicon } from "../components/Favicon";
 import {
   IcBreach, IcCard, IcCopy, IcEdit, IcEye, IcFolder, IcGen, IcHealth, IcKey,
-  IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcStar, IcTrash, IcUpload, IcVault, IcX,
+  IcDownload, IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcStar, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
 import { analyzePasswordHealth, passwordAgeReference } from "../lib/password-health";
+import { downloadCsv, exportFilename, itemsToCsv } from "../lib/export";
 import { lookupBin } from "../lib/bin";
 import type { ImportOutcome, ImportProgress, ImportResult } from "../lib/import";
 import type { Account } from "../lib/wasm";
@@ -103,6 +104,7 @@ export function Vault({
   const [editor, setEditor] = useState<null | "new" | VaultItem>(null);
   const [detail, setDetail] = useState<VaultItem | null>(null);
   const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [page, setPage] = useState(1);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
@@ -332,6 +334,11 @@ export function Vault({
                   <button className="btn" onClick={() => setImporting(true)}>
                     <IcUpload size={16} /> Import
                   </button>
+                  {items.length > 0 && (
+                    <button className="btn" onClick={() => setExporting(true)}>
+                      <IcDownload size={16} /> Export
+                    </button>
+                  )}
                   <button className="btn btn-primary" onClick={() => setEditor("new")}>
                     <IcPlus size={16} /> Create item
                   </button>
@@ -537,6 +544,24 @@ export function Vault({
             return outcome;
           }}
         />
+      )}
+
+      {exporting && (
+        <ConfirmDialog
+          title="Export vault?"
+          confirmLabel={`Export ${items.length} ${items.length === 1 ? "item" : "items"}`}
+          pendingLabel="Exporting…"
+          onClose={() => setExporting(false)}
+          onConfirm={async () => {
+            const ok = downloadCsv(itemsToCsv(items), exportFilename(new Date()));
+            toast(ok ? "Vault exported" : "Export failed");
+            return ok;
+          }}
+        >
+          The exported CSV contains every password, card number and note in{" "}
+          <b>unencrypted plaintext</b>. Save it only to a location you trust, and
+          delete it as soon as you are done.
+        </ConfirmDialog>
       )}
     </div>
   );
