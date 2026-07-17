@@ -52,6 +52,14 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Fired on `window` when a request that carried a session token is rejected
+ * with 401 — i.e. the server no longer honors the session (expired/revoked).
+ * The app listens while the vault is open and locks immediately, instead of
+ * leaving the user on a screen whose every action fails.
+ */
+export const SESSION_EXPIRED_EVENT = "bastion:session-expired";
+
 async function req<T>(method: string, path: string, token?: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -66,6 +74,9 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
       signal: controller.signal,
     });
     if (!res.ok) {
+      if (res.status === 401 && token) {
+        window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
+      }
       const text = await res.text().catch(() => "");
       throw new ApiError(res.status, text || res.statusText);
     }
