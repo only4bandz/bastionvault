@@ -114,3 +114,31 @@ pub(crate) fn decrypt(key: &SecretKey, blob: &EncryptedBlob, aad: &[u8]) -> Resu
         )
         .map_err(|_| CryptoError::Aead)
 }
+
+
+#[cfg(test)]
+mod kat {
+    //! XChaCha20-Poly1305 known-answer test for the envelope's decrypt path.
+    //! A ciphertext produced by an earlier build (fixed key/nonce/AAD) must
+    //! still decrypt to the original plaintext, and any tamper must fail.
+    use super::*;
+
+    #[test]
+    fn xchacha20poly1305_decrypt_vector() {
+        let key = SecretKey::from_bytes([0x42u8; 32]);
+        let blob = EncryptedBlob {
+            v: FORMAT_VERSION,
+            nonce: "JCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk".to_string(),
+            ct: "zjC4EgAJLcjRWFpIuZcwYrtP0ZApxLg8YEhrvQ==".to_string(),
+        };
+        let out = decrypt(&key, &blob, b"item-42").unwrap();
+        assert_eq!(out, b"known-answer");
+
+        // Wrong AAD, wrong key, and a flipped version all fail (no plaintext).
+        assert!(decrypt(&key, &blob, b"item-43").is_err());
+        assert!(decrypt(&SecretKey::from_bytes([0x43u8; 32]), &blob, b"item-42").is_err());
+        let mut bumped = blob.clone();
+        bumped.v = FORMAT_VERSION + 1;
+        assert!(decrypt(&key, &bumped, b"item-42").is_err());
+    }
+}
