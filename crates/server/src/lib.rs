@@ -2275,7 +2275,10 @@ mod tests {
             redacted_path("/accounts/alice%40example.com/prelogin"),
             "/accounts/{email}/prelogin"
         );
-        assert_eq!(redacted_path("/send/directory/ABCDEF"), "/send/directory/{id}");
+        assert_eq!(
+            redacted_path("/send/directory/ABCDEF"),
+            "/send/directory/{id}"
+        );
         assert_eq!(redacted_path("/send/inbox/msg-123"), "/send/inbox/{id}");
         assert_eq!(redacted_path("/vault/items/item-9"), "/vault/items/{id}");
         // Fixed routes pass through unchanged.

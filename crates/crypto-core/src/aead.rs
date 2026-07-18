@@ -115,7 +115,6 @@ pub(crate) fn decrypt(key: &SecretKey, blob: &EncryptedBlob, aad: &[u8]) -> Resu
         .map_err(|_| CryptoError::Aead)
 }
 
-
 #[cfg(test)]
 mod kat {
     //! XChaCha20-Poly1305 known-answer test for the envelope's decrypt path.

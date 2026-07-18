@@ -29,8 +29,7 @@ fn kat_kdf() -> KdfParams {
 #[test]
 fn argon2id_master_key_vector() {
     let salt = [0x11u8; 16];
-    let master =
-        kdf::derive_master_key(b"correct horse battery staple", &salt, kat_kdf()).unwrap();
+    let master = kdf::derive_master_key(b"correct horse battery staple", &salt, kat_kdf()).unwrap();
     assert_eq!(
         HEXLOWER.encode(master.as_bytes()),
         "064401872f712d299da5dc8fb3058e4af259cf62e8c3d78419ee23295cc88a19"
@@ -43,8 +42,7 @@ fn argon2id_master_key_vector() {
 #[test]
 fn hkdf_subkey_vectors() {
     let salt = [0x11u8; 16];
-    let master =
-        kdf::derive_master_key(b"correct horse battery staple", &salt, kat_kdf()).unwrap();
+    let master = kdf::derive_master_key(b"correct horse battery staple", &salt, kat_kdf()).unwrap();
     let secret = AccountSecret::parse("A1-VRVKQ-QC43P-WQRVZ-RZC54-EV2YL-HPGY").unwrap();
 
     assert_eq!(
