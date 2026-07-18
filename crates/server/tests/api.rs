@@ -1054,7 +1054,7 @@ async fn health_reports_unavailable_when_the_schema_is_gone() {
     // Simulate a wedged database: another connection drops the accounts table.
     // The server's cached connection then observes the missing schema and the
     // health check must fail closed instead of reporting healthy.
-    let breaker = rusqlite::Connection::open(path.to_string()).unwrap();
+    let breaker = rusqlite::Connection::open(&path).unwrap();
     breaker.execute_batch("DROP TABLE accounts;").unwrap();
     drop(breaker);
 
