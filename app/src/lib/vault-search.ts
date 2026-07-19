@@ -48,6 +48,7 @@ export function filterVaultItems(
         item.cardBrand,
         item.cardBank,
         item.cardType,
+        item.folder,
       ].some((value) => (value ?? "").toLowerCase().includes(query));
     })
     .sort((left, right) => compareItems(left, right, sort));

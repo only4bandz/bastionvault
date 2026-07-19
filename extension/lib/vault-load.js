@@ -4,8 +4,8 @@ const SEND_LOCKED_PREFIX = "bastion:send-locked:";
 const SEND_RESERVED_PREFIX = "bastion:send-";
 const ITEM_TYPES = new Set(["login", "note", "card"]);
 const OPTIONAL_STRING_FIELDS = [
-  "username", "password", "url", "cardNumber", "cardExp", "cardCvv",
-  "cardBrand", "cardBank", "cardBankDomain", "cardType", "notes",
+  "username", "password", "url", "cardNumber", "cardholderName", "cardExp", "cardCvv",
+  "cardBrand", "cardBank", "cardBankDomain", "cardType", "notes", "folder",
 ];
 
 export class VaultIntegrityError extends Error {
@@ -26,7 +26,13 @@ function isVaultItem(value, storageId) {
     typeof value.updatedAt === "number" &&
     Number.isFinite(value.updatedAt) &&
     OPTIONAL_STRING_FIELDS.every((field) => value[field] === undefined || typeof value[field] === "string") &&
-    (value.favorite === undefined || typeof value.favorite === "boolean")
+    (value.folder === undefined || value.folder.length <= 80) &&
+    (value.favorite === undefined || typeof value.favorite === "boolean") &&
+    (value.passwordChangedAt === undefined || (typeof value.passwordChangedAt === "number" && Number.isFinite(value.passwordChangedAt))) &&
+    (value.deletedAt === undefined ||
+      (Number.isSafeInteger(value.deletedAt) &&
+        value.deletedAt >= 0 &&
+        value.deletedAt <= 8_640_000_000_000_000))
   );
 }
 
@@ -90,7 +96,7 @@ function decryptVaultItems(account, rawItems) {
       throw new VaultIntegrityError();
     } else {
       if (!isVaultItem(parsed, id)) throw new VaultIntegrityError();
-      items.set(id, parsed);
+      if (parsed.deletedAt === undefined) items.set(id, parsed);
     }
   }
   return { items, contacts, lockedRecords };

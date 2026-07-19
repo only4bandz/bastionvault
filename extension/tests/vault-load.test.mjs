@@ -108,6 +108,23 @@ test("verifies the manifest before loading a complete valid vault", () => {
   assert.equal(result.integrity.manifestSeq, 2n);
 });
 
+test("validates but withholds trashed items from every extension consumer", () => {
+  const acc = account();
+  const result = loadVaultState(
+    acc,
+    snapshot(acc, {
+      active: {
+        plaintext: JSON.stringify({ id: "active", type: "login", title: "Active", folder: "Personal", updatedAt: 1 }),
+      },
+      deleted: {
+        plaintext: JSON.stringify({ id: "deleted", type: "login", title: "Deleted", deletedAt: 2, updatedAt: 2 }),
+      },
+    })
+  );
+  assert.deepEqual([...result.items.keys()], ["active"]);
+  assert.ok("deleted" in result.integrity.encryptedItems);
+});
+
 test("fails before decryption when the encrypted set differs from the manifest", () => {
   const acc = account();
   let decryptions = 0;

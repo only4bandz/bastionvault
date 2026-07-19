@@ -137,8 +137,10 @@ cargo run -p server          # listens on http://127.0.0.1:7777
 | 8 | Chrome extension (autofill, save-on-signup, keep-unlock) | ✅ Done |
 | 9 | **Bastion Send** — E2E notes (crypto, server, both UIs) | ✅ Done |
 | 10 | Bastion Send polish (QR address, unread counts) | 🚧 In progress |
-| 11 | TOTP 2FA · FIDO2 / WebAuthn keys | ⬜ |
-| 12 | iOS / Android apps | ⬜ |
+| 11 | Encrypted folders · restorable trash · k-anonymous password breach scan | ✅ Done |
+| 12 | Email masking relay/provider integration | ⬜ Architecture decision required |
+| 13 | TOTP 2FA · FIDO2 / WebAuthn keys | ⬜ |
+| 14 | iOS / Android apps | ⬜ |
 
 ## Development
 

@@ -19,10 +19,14 @@ export interface VaultItem {
   cardType?: string; // detected "debit" | "credit"
   // shared
   notes?: string;
+  /** Optional user-defined folder name. It remains inside the encrypted item. */
+  folder?: string;
   favorite?: boolean;
   updatedAt: number;
   /** When the password itself last changed (any edit bumps updatedAt). */
   passwordChangedAt?: number;
+  /** Soft-deletion timestamp. Deleted items remain encrypted until purged. */
+  deletedAt?: number;
 }
 
 export const TYPE_LABEL: Record<ItemType, string> = {

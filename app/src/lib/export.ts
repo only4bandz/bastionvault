@@ -24,6 +24,7 @@ export const EXPORT_HEADER = [
   "cardbank",
   "cardbankdomain",
   "cardtype",
+  "folder",
 ] as const;
 
 /** RFC 4180 quoting: only when the value needs it, doubling inner quotes. */
@@ -53,6 +54,7 @@ export function itemsToCsv(items: VaultItem[]): string {
         item.cardBank ?? "",
         item.cardBankDomain ?? "",
         item.cardType ?? "",
+        item.folder ?? "",
       ]
         .map(csvField)
         .join(",")
