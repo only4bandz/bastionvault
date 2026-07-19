@@ -16,6 +16,7 @@ run bash scripts/test-backup-restore.sh
 run bash scripts/test-operational-failures.sh
 run bash -n scripts/verify-production-edge.sh
 run bash -n scripts/verify-production-operations.sh
+run bash -n scripts/capture-release-validation.sh
 run wasm-pack test --node crates/crypto-wasm
 
 run bash app/build-wasm.sh
@@ -33,6 +34,8 @@ find extension \
   -name '*.js' -print0 | xargs -0 -n1 node --check
 run bash extension/build.sh
 run python3 scripts/check-release.py
+run python3 scripts/build-audit-bundle.py --self-test
+run python3 scripts/verify-independent-audit.py --self-test
 run bash web/build.sh
 
 run bash scripts/check-no-browser-secret-storage.sh

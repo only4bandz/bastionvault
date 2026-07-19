@@ -8,7 +8,10 @@ client-side. One shared, test-covered crypto core (Rust → WASM) powers **two s
 
 > **Audit status:** the repository has extensive deterministic, integration,
 > and WebAssembly tests plus internal security review artifacts. It has not yet
-> undergone an independent third-party security audit.
+> undergone an independent third-party security audit. The frozen
+> [audit scope](docs/security-audit-scope.md) and
+> [signed release gate](docs/independent-audit-release-gate.md) are ready for an
+> external auditor; they do not constitute an audit result.
 
 ## Security model
 

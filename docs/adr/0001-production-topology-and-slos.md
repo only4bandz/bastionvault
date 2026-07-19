@@ -187,7 +187,8 @@ following are complete:
    implemented by the production operations runbook and exercised on the
    selected deployment environment with retained evidence.
 6. An independent security audit of the frozen release has no unresolved
-   Critical or High findings.
+   Critical or High findings and passes the signed, commit-bound
+   [independent-audit release gate](../independent-audit-release-gate.md).
 
 ## Consequences
 
