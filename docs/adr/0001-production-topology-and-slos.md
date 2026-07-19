@@ -45,10 +45,12 @@ browser extension ---+--> HTTPS ingress
                                           encrypted off-host backups
 ```
 
-The ingress and Axum server must share a host or an explicitly private,
-authenticated network boundary. Axum must not be directly reachable from the
-public Internet. The application remains same-origin: the public web origin
-serves both the static application and `/api/*`. CORS is disabled by default.
+The implemented initial contract requires the ingress and Axum server to share
+a host: production startup restricts Axum to a numeric loopback listener. A
+future private authenticated network hop requires a new reviewed contract.
+Axum must not be directly reachable from the public Internet. The application
+remains same-origin: the public web origin serves both the static application
+and `/api/*`. CORS is disabled by default.
 
 The browser extension may call the same HTTPS origin through an explicitly
 granted extension host permission. A narrowly scoped CORS exception may be
@@ -163,7 +165,8 @@ following are complete:
 2. Schema migrations are versioned and backup/restore drills meet the RPO and
    RTO above.
 3. HTTPS, origin enforcement, certificate renewal, and the private Axum
-   boundary pass automated edge tests.
+   boundary pass the repository's automated production-edge drill on the
+   selected deployment.
 4. Mailbox verification uses durable delivery, bounded abuse controls, and
    never acts as vault recovery.
 5. Operational metrics, alerts, rollback procedures, and failure drills are

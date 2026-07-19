@@ -11,9 +11,12 @@
 //! the reads and is loaded from SQLite at startup; mutations are write-through.
 
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
@@ -26,7 +29,7 @@ use argon2::password_hash::rand_core::{OsRng, RngCore};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Argon2, Params as ArgonParams};
 use axum::extract::{DefaultBodyLimit, Extension, Path, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, uri::Authority, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -105,6 +108,153 @@ const DB_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Latest schema understood by this binary. Startup refuses newer databases
 /// instead of silently running code against an incompatible layout.
 const CURRENT_SCHEMA_VERSION: i64 = 2;
+const DEFAULT_BIND_ADDR: &str = "127.0.0.1:7777";
+const DEFAULT_DB_PATH: &str = "bastion.db";
+const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
+
+/// Validated process configuration. Production is deliberately narrower than
+/// development: a same-host TLS ingress is public and Axum stays on loopback.
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    bind_addr: SocketAddr,
+    db_path: String,
+    transport: Option<TransportPolicy>,
+}
+
+#[derive(Clone, Debug)]
+struct TransportPolicy {
+    public_origin: String,
+    public_authority: Authority,
+}
+
+impl ServerConfig {
+    /// Read and validate the environment before opening storage or a socket.
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_lookup(|name| env::var(name).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, String> {
+        let mode = lookup("BASTION_ENV").unwrap_or_else(|| "development".to_string());
+        match mode.as_str() {
+            "development" => Ok(Self {
+                bind_addr: parse_bind_addr(
+                    lookup("BIND_ADDR").as_deref().unwrap_or(DEFAULT_BIND_ADDR),
+                )?,
+                db_path: lookup("BASTION_DB").unwrap_or_else(|| DEFAULT_DB_PATH.to_string()),
+                transport: None,
+            }),
+            "production" => {
+                let bind_addr = parse_bind_addr(&required_setting(&mut lookup, "BIND_ADDR")?)?;
+                if !bind_addr.ip().is_loopback() {
+                    return Err(
+                        "production BIND_ADDR must be loopback; public or unauthenticated private Axum listeners are unsupported"
+                            .to_string(),
+                    );
+                }
+                let db_path = required_setting(&mut lookup, "BASTION_DB")?;
+                if db_path == ":memory:" || !FsPath::new(&db_path).is_absolute() {
+                    return Err(
+                        "production BASTION_DB must be an absolute persistent filesystem path"
+                            .to_string(),
+                    );
+                }
+                let public_origin = required_setting(&mut lookup, "BASTION_PUBLIC_ORIGIN")?;
+                Ok(Self {
+                    bind_addr,
+                    db_path,
+                    transport: Some(TransportPolicy::parse(&public_origin)?),
+                })
+            }
+            _ => Err("BASTION_ENV must be either development or production".to_string()),
+        }
+    }
+
+    pub fn bind_addr(&self) -> SocketAddr {
+        self.bind_addr
+    }
+
+    pub fn db_path(&self) -> &str {
+        &self.db_path
+    }
+
+    pub fn is_production(&self) -> bool {
+        self.transport.is_some()
+    }
+
+    pub fn public_origin(&self) -> Option<&str> {
+        self.transport
+            .as_ref()
+            .map(|policy| policy.public_origin.as_str())
+    }
+}
+
+fn required_setting(
+    lookup: &mut impl FnMut(&str) -> Option<String>,
+    name: &str,
+) -> Result<String, String> {
+    lookup(name)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("{name} is required when BASTION_ENV=production"))
+}
+
+fn parse_bind_addr(value: &str) -> Result<SocketAddr, String> {
+    value
+        .parse()
+        .map_err(|_| "BIND_ADDR must be a numeric IP socket address".to_string())
+}
+
+impl TransportPolicy {
+    fn parse(value: &str) -> Result<Self, String> {
+        if value.trim() != value || !value.is_ascii() {
+            return Err("BASTION_PUBLIC_ORIGIN must be a canonical ASCII HTTPS origin".to_string());
+        }
+        let uri: Uri = value.parse().map_err(|_| {
+            "BASTION_PUBLIC_ORIGIN must be a valid absolute HTTPS origin".to_string()
+        })?;
+        if uri.scheme_str() != Some("https")
+            || uri.authority().is_none()
+            || uri.query().is_some()
+            || !matches!(uri.path(), "" | "/")
+        {
+            return Err(
+                "BASTION_PUBLIC_ORIGIN must contain only an HTTPS origin without path, query, or fragment"
+                    .to_string(),
+            );
+        }
+        let authority = uri.authority().cloned().expect("authority checked");
+        if authority.as_str().contains('@') || authority.host().is_empty() {
+            return Err("BASTION_PUBLIC_ORIGIN must not contain credentials".to_string());
+        }
+        if authority.port_u16() == Some(443) {
+            return Err("BASTION_PUBLIC_ORIGIN must omit the default HTTPS port 443".to_string());
+        }
+        let canonical_authority = Authority::from_str(&authority.as_str().to_ascii_lowercase())
+            .map_err(|_| "BASTION_PUBLIC_ORIGIN has an invalid authority".to_string())?;
+        let public_origin = format!("https://{canonical_authority}");
+        if value.trim_end_matches('/') != public_origin {
+            return Err(format!(
+                "BASTION_PUBLIC_ORIGIN must be canonical; use {public_origin}"
+            ));
+        }
+        Ok(Self {
+            public_origin,
+            public_authority: canonical_authority,
+        })
+    }
+
+    fn accepts_host(&self, value: &HeaderValue) -> bool {
+        value
+            .to_str()
+            .ok()
+            .and_then(|raw| Authority::from_str(raw).ok())
+            .is_some_and(|actual| {
+                actual
+                    .host()
+                    .eq_ignore_ascii_case(self.public_authority.host())
+                    && actual.port_u16() == self.public_authority.port_u16()
+            })
+    }
+}
 
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -142,16 +292,22 @@ fn stored_data_error(
     rusqlite::Error::FromSqlConversionFailure(column, data_type, Box::new(error))
 }
 
-/// Builds the router, persisting to the SQLite database at `$BASTION_DB`
-/// (default `bastion.db` in the working directory).
-///
-/// ⚠️ NON-PRODUCTION: this server still has no production TLS/origin boundary. The Bastion Send
-/// endpoints have per-account rate limits + inbox quotas + size caps. Vault
-/// writes also have per-item, item-count, and aggregate encrypted-byte quotas.
-/// Add the same-origin TLS ingress and broader rate limiting before deployment.
+/// Builds the development router, persisting to the SQLite database at
+/// `$BASTION_DB` (default `bastion.db` in the working directory).
 pub fn app() -> Router {
-    let db_path = std::env::var("BASTION_DB").unwrap_or_else(|_| "bastion.db".to_string());
+    let db_path = env::var("BASTION_DB").unwrap_or_else(|_| DEFAULT_DB_PATH.to_string());
     build(DEFAULT_TOKEN_TTL, &db_path, MAX_CONCURRENT_AUTH)
+}
+
+/// Builds a router from startup settings that already failed closed on an
+/// invalid production transport or storage contract.
+pub fn app_with_config(config: &ServerConfig) -> Router {
+    build_with_transport(
+        DEFAULT_TOKEN_TTL,
+        config.db_path(),
+        MAX_CONCURRENT_AUTH,
+        config.transport.clone(),
+    )
 }
 
 /// Variant with an explicit SQLite path (used to test persistence).
@@ -184,6 +340,7 @@ pub fn app_in_memory_with_rate_limits(max_entries: usize, window: Duration) -> R
         max_entries,
         window,
         AuthRateLimits::default(),
+        None,
     )
 }
 
@@ -225,10 +382,20 @@ pub fn app_in_memory_with_auth_rate_limits(limits: AuthRateLimits) -> Router {
         MAX_RATE_ENTRIES,
         RATE_WINDOW,
         limits,
+        None,
     )
 }
 
 fn build(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Router {
+    build_with_transport(token_ttl, db_path, auth_limit, None)
+}
+
+fn build_with_transport(
+    token_ttl: Duration,
+    db_path: &str,
+    auth_limit: usize,
+    transport: Option<TransportPolicy>,
+) -> Router {
     build_with_rate_limits(
         token_ttl,
         db_path,
@@ -236,6 +403,7 @@ fn build(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Router {
         MAX_RATE_ENTRIES,
         RATE_WINDOW,
         AuthRateLimits::default(),
+        transport,
     )
 }
 
@@ -246,6 +414,7 @@ fn build_with_rate_limits(
     max_rate_entries: usize,
     rate_window: Duration,
     auth_rate_limits: AuthRateLimits,
+    transport: Option<TransportPolicy>,
 ) -> Router {
     let state = AppState::new(
         token_ttl,
@@ -254,6 +423,7 @@ fn build_with_rate_limits(
         max_rate_entries,
         rate_window,
         auth_rate_limits,
+        transport,
     );
     let transaction_route = put(apply_vault_transaction)
         .layer(DefaultBodyLimit::max(MAX_VAULT_TRANSACTION_BODY_BYTES))
@@ -296,7 +466,14 @@ fn build_with_rate_limits(
         .merge(legacy)
         .nest("/v1", routes)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            production_transport_boundary,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            security_headers,
+        ))
         .layer(middleware::from_fn(request_log))
         .with_state(state)
 }
@@ -375,7 +552,55 @@ async fn request_log(request: Request, next: Next) -> Response {
     response
 }
 
-async fn security_headers(request: Request, next: Next) -> Response {
+fn direct_health_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/health" | "/livez" | "/readyz" | "/v1/health" | "/v1/livez" | "/v1/readyz"
+    )
+}
+
+fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a HeaderValue> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
+async fn production_transport_boundary(
+    State(st): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let Some(policy) = &st.transport else {
+        return Ok(next.run(request).await);
+    };
+
+    // Private health probes intentionally run directly over loopback. Every
+    // application request must cross the same-host TLS ingress, which preserves
+    // the public Host and stamps one trusted HTTPS proto value.
+    if direct_health_path(request.uri().path()) {
+        return Ok(next.run(request).await);
+    }
+    if !single_header(request.headers(), header::HOST.as_str())
+        .is_some_and(|host| policy.accepts_host(host))
+    {
+        return Err(ApiError(
+            StatusCode::MISDIRECTED_REQUEST,
+            "wrong public host",
+        ));
+    }
+    if single_header(request.headers(), FORWARDED_PROTO_HEADER)
+        .and_then(|value| value.to_str().ok())
+        != Some("https")
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "trusted ingress did not attest HTTPS",
+        ));
+    }
+    Ok(next.run(request).await)
+}
+
+async fn security_headers(State(st): State<AppState>, request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -389,6 +614,12 @@ async fn security_headers(request: Request, next: Next) -> Response {
         HeaderValue::from_static("no-referrer"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    if st.transport.is_some() {
+        headers.insert(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=31536000"),
+        );
+    }
     response
 }
 
@@ -403,6 +634,7 @@ struct AppState {
     max_rate_entries: usize,
     rate_window: Duration,
     auth_rate_limits: AuthRateLimits,
+    transport: Option<TransportPolicy>,
 }
 
 struct Inner {
@@ -448,6 +680,7 @@ impl AppState {
         max_rate_entries: usize,
         rate_window: Duration,
         auth_rate_limits: AuthRateLimits,
+        transport: Option<TransportPolicy>,
     ) -> Self {
         let (db, accounts) = Db::open(db_path);
         Self {
@@ -463,6 +696,7 @@ impl AppState {
             max_rate_entries,
             rate_window,
             auth_rate_limits,
+            transport,
         }
     }
 
@@ -3006,6 +3240,204 @@ async fn send_inbox_delete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    fn config_from(values: &[(&str, &str)]) -> Result<ServerConfig, String> {
+        ServerConfig::from_lookup(|name| {
+            values
+                .iter()
+                .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+        })
+    }
+
+    #[test]
+    fn production_config_is_explicit_and_fail_closed() {
+        let valid = [
+            ("BASTION_ENV", "production"),
+            ("BIND_ADDR", "127.0.0.1:7777"),
+            ("BASTION_DB", "/var/lib/bastion/bastion.db"),
+            ("BASTION_PUBLIC_ORIGIN", "https://vault.example.com"),
+        ];
+        let config = config_from(&valid).unwrap();
+        assert!(config.is_production());
+        assert_eq!(config.bind_addr(), "127.0.0.1:7777".parse().unwrap());
+        assert_eq!(config.db_path(), "/var/lib/bastion/bastion.db");
+        assert_eq!(config.public_origin(), Some("https://vault.example.com"));
+
+        for (name, values) in [
+            ("unknown mode", vec![("BASTION_ENV", "prod")]),
+            (
+                "public bind",
+                vec![
+                    ("BASTION_ENV", "production"),
+                    ("BIND_ADDR", "0.0.0.0:7777"),
+                    ("BASTION_DB", "/var/lib/bastion/bastion.db"),
+                    ("BASTION_PUBLIC_ORIGIN", "https://vault.example.com"),
+                ],
+            ),
+            (
+                "relative database",
+                vec![
+                    ("BASTION_ENV", "production"),
+                    ("BIND_ADDR", "127.0.0.1:7777"),
+                    ("BASTION_DB", "bastion.db"),
+                    ("BASTION_PUBLIC_ORIGIN", "https://vault.example.com"),
+                ],
+            ),
+            (
+                "plaintext origin",
+                vec![
+                    ("BASTION_ENV", "production"),
+                    ("BIND_ADDR", "127.0.0.1:7777"),
+                    ("BASTION_DB", "/var/lib/bastion/bastion.db"),
+                    ("BASTION_PUBLIC_ORIGIN", "http://vault.example.com"),
+                ],
+            ),
+            (
+                "origin path",
+                vec![
+                    ("BASTION_ENV", "production"),
+                    ("BIND_ADDR", "127.0.0.1:7777"),
+                    ("BASTION_DB", "/var/lib/bastion/bastion.db"),
+                    ("BASTION_PUBLIC_ORIGIN", "https://vault.example.com/api"),
+                ],
+            ),
+            (
+                "explicit default port",
+                vec![
+                    ("BASTION_ENV", "production"),
+                    ("BIND_ADDR", "127.0.0.1:7777"),
+                    ("BASTION_DB", "/var/lib/bastion/bastion.db"),
+                    ("BASTION_PUBLIC_ORIGIN", "https://vault.example.com:443"),
+                ],
+            ),
+        ] {
+            assert!(config_from(&values).is_err(), "accepted {name}");
+        }
+    }
+
+    #[test]
+    fn development_config_keeps_safe_local_defaults() {
+        let config = config_from(&[]).unwrap();
+        assert!(!config.is_production());
+        assert_eq!(config.bind_addr(), "127.0.0.1:7777".parse().unwrap());
+        assert_eq!(config.db_path(), "bastion.db");
+        assert_eq!(config.public_origin(), None);
+    }
+
+    #[tokio::test]
+    async fn production_boundary_requires_exact_ingress_contract() {
+        let app = build_with_transport(
+            DEFAULT_TOKEN_TTL,
+            ":memory:",
+            MAX_CONCURRENT_AUTH,
+            Some(TransportPolicy::parse("https://vault.example.com").unwrap()),
+        );
+
+        for (name, host, proto, expected) in [
+            (
+                "missing host",
+                None,
+                Some("https"),
+                StatusCode::MISDIRECTED_REQUEST,
+            ),
+            (
+                "wrong host",
+                Some("attacker.example"),
+                Some("https"),
+                StatusCode::MISDIRECTED_REQUEST,
+            ),
+            (
+                "wrong port",
+                Some("vault.example.com:444"),
+                Some("https"),
+                StatusCode::MISDIRECTED_REQUEST,
+            ),
+            (
+                "missing proto",
+                Some("vault.example.com"),
+                None,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "plaintext proto",
+                Some("vault.example.com"),
+                Some("http"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "forwarded list",
+                Some("vault.example.com"),
+                Some("https,http"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "valid ingress",
+                Some("VAULT.EXAMPLE.COM"),
+                Some("https"),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let mut request = Request::builder().uri("/v1/accounts/nobody@example.com/prelogin");
+            if let Some(host) = host {
+                request = request.header(header::HOST, host);
+            }
+            if let Some(proto) = proto {
+                request = request.header(FORWARDED_PROTO_HEADER, proto);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{name}");
+            assert_eq!(
+                response.headers()[header::STRICT_TRANSPORT_SECURITY],
+                "max-age=31536000",
+                "{name}"
+            );
+            assert!(
+                response
+                    .headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "CORS opened for {name}"
+            );
+        }
+
+        for duplicate in [header::HOST.as_str(), FORWARDED_PROTO_HEADER] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/v1/accounts/nobody@example.com/prelogin")
+                        .header(header::HOST, "vault.example.com")
+                        .header(FORWARDED_PROTO_HEADER, "https")
+                        .header(duplicate, "https")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "accepted duplicate {duplicate}"
+            );
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn connection_pragmas_are_hardened() {
