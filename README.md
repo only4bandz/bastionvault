@@ -163,6 +163,24 @@ shared SQLite volume or removal of the exclusive lock is explicitly rejected.
 See [ADR 0001](docs/adr/0001-production-topology-and-slos.md) for the topology,
 service objectives, decision gates, and remaining production blockers.
 
+Production mode fails closed unless Axum is loopback-only, SQLite uses an
+absolute path, and one canonical HTTPS public origin is declared. Proxied API
+requests must preserve that public Host and carry the ingress-owned
+`X-Forwarded-Proto: https`; CORS remains disabled. The complete ingress and
+certificate-renewal contract is in
+[`docs/production-edge-contract.md`](docs/production-edge-contract.md).
+
+```bash
+BASTION_ENV=production \
+BIND_ADDR=127.0.0.1:7777 \
+BASTION_DB=/var/lib/bastion/bastion.db \
+BASTION_PUBLIC_ORIGIN=https://vault.example.com \
+cargo run -p server
+
+# Run against the deployed ingress, not the loopback listener.
+bash scripts/verify-production-edge.sh https://vault.example.com
+```
+
 | Method | Route | Role |
 |---|---|---|
 | `GET` | `/v1/livez` · `/v1/readyz` | Process liveness without storage · SQLite-backed routing readiness |
@@ -218,9 +236,9 @@ cd extension && ./build.sh                   # build the WASM module
 # then load `extension/` unpacked at chrome://extensions
 ```
 
-> ⚠️ The server is **not production-ready**: it has no production TLS/origin
-> boundary, its stateful controls are process-local, and off-host backup
-> scheduling plus deployment-specific RPO/RTO drills are not configured. The
-> exclusive instance lock and isolated SQLite owner reject horizontal replicas;
-> they do not make this a production deployment. This is a zero-knowledge
-> reference backend for development.
+> ⚠️ The server is **not production-ready** until the documented TLS ingress
+> passes the edge drill, durable mailbox verification is implemented, and
+> off-host backup scheduling plus deployment-specific RPO/RTO drills are
+> configured. The stateful controls remain process-local; the exclusive
+> instance lock and isolated SQLite owner reject horizontal replicas rather
+> than making them safe.

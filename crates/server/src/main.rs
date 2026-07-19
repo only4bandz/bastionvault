@@ -11,12 +11,25 @@ async fn main() {
         )
         .init();
 
-    let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:7777".to_string());
-    let listener = tokio::net::TcpListener::bind(&addr)
+    let config = server::ServerConfig::from_env().unwrap_or_else(|error| {
+        eprintln!("invalid Bastion server configuration: {error}");
+        std::process::exit(2);
+    });
+    let listener = tokio::net::TcpListener::bind(config.bind_addr())
         .await
         .expect("bind address");
-    println!("🔐 zero-knowledge server listening on http://{addr}");
-    axum::serve(listener, server::app())
+    if let Some(origin) = config.public_origin() {
+        println!(
+            "zero-knowledge server listening privately on http://{} for {origin}",
+            config.bind_addr()
+        );
+    } else {
+        println!(
+            "zero-knowledge development server listening on http://{}",
+            config.bind_addr()
+        );
+    }
+    axum::serve(listener, server::app_with_config(&config))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server run");
