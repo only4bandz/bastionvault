@@ -2,9 +2,13 @@
 
 A **zero-knowledge** password manager written in Rust: the server never sees
 your master password or a single secret in plaintext. All encryption happens
-client-side. One audited crypto core (Rust → WASM) powers **two surfaces**: a
+client-side. One shared, test-covered crypto core (Rust → WASM) powers **two surfaces**: a
 **web app** (React + TypeScript) and a **Chrome extension** (MV3) — plus
 **Bastion Send**, end-to-end encrypted notes between users.
+
+> **Audit status:** the repository has extensive deterministic, integration,
+> and WebAssembly tests plus internal security review artifacts. It has not yet
+> undergone an independent third-party security audit.
 
 ## Security model
 

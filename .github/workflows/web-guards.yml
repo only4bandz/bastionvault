@@ -13,7 +13,7 @@ jobs:
   no-browser-secret-storage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Forbid browser-side secret storage in web/
         run: bash scripts/check-no-browser-secret-storage.sh
       - name: Forbid vault metadata egress
