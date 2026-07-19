@@ -122,6 +122,23 @@ acknowledged writes across process/OS crashes and power loss to the extent that
 the host filesystem and storage honor SQLite's sync requests. This is a local
 durability guarantee, not a substitute for tested backups or replication.
 
+The schema is migrated transactionally through SQLite `user_version`; this
+binary supports schema version 2 and refuses newer databases. Foreign keys are
+enabled and checked at startup. Create a coherent snapshot of a live database
+without replacing any existing file with:
+
+```bash
+cargo run -p server --bin bastion-backup -- /secure/bastion.db /secure/backups/bastion.db
+```
+
+The backup command uses SQLite's online backup API, validates integrity,
+foreign keys and schema version, fsyncs the owner-only snapshot, and publishes
+it with no-clobber semantics. A snapshot still contains sensitive account
+metadata and verifier material: encrypt it before off-host transfer. The
+repository validates the complete live-backup/restore path with
+`bash scripts/test-backup-restore.sh`; an environment-specific scheduler,
+retention policy and recurring RPO/RTO drill are still required for production.
+
 The current server is intentionally **single-instance per database**. It holds
 an advisory `<database>-server.lock` for its full lifetime and refuses to start
 a second Bastion server against the same SQLite file. This is required because
@@ -202,8 +219,8 @@ cd extension && ./build.sh                   # build the WASM module
 ```
 
 > ⚠️ The server is **not production-ready**: it has no production TLS/origin
-> boundary, its stateful controls are process-local, and versioned
-> migrations/backup-restore drills are not implemented. The exclusive instance
-> lock and isolated SQLite owner reject horizontal replicas; they do not make
-> this a production deployment. This is a zero-knowledge reference backend for
-> development.
+> boundary, its stateful controls are process-local, and off-host backup
+> scheduling plus deployment-specific RPO/RTO drills are not configured. The
+> exclusive instance lock and isolated SQLite owner reject horizontal replicas;
+> they do not make this a production deployment. This is a zero-knowledge
+> reference backend for development.

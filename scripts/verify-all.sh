@@ -12,6 +12,7 @@ run() {
 run cargo fmt --all -- --check
 run cargo test --workspace --all-features --locked
 run cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+run bash scripts/test-backup-restore.sh
 run wasm-pack test --node crates/crypto-wasm
 
 run bash app/build-wasm.sh

@@ -1451,6 +1451,152 @@ async fn data_persists_across_restart() {
     let _ = std::fs::remove_file(format!("{path}-shm"));
 }
 
+#[tokio::test]
+async fn live_backup_restores_vault_and_send_state() {
+    let source = test_db_path("live-backup");
+    let backup_path = source.directory.join("snapshot.db");
+    let app = server::app_with_db(&source);
+    let email = "backup@example.com";
+    let (vault, registration, _secret_key) =
+        Vault::register_with(b"backup-master", fast_kdf()).unwrap();
+    let auth_secret = registration.auth_secret.expose_b64().to_string();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": email,
+            "registration": serde_json::to_value(&registration).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, login) = send(
+        &app,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": auth_secret })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = login["token"].as_str().unwrap();
+
+    let item = vault
+        .encrypt_item(b"restored-secret", "backup-item")
+        .unwrap();
+    let mut manifest = Manifest::new();
+    manifest.set("backup-item", &item).unwrap();
+    let sealed_manifest = vault.seal_manifest(&manifest).unwrap();
+    let (status, revision) = send(
+        &app,
+        "PUT",
+        "/vault/transaction",
+        Some(token),
+        Some(json!({
+            "expected_revision": 0,
+            "operations": [{ "op": "put", "id": "backup-item", "blob": item }],
+            "manifest": sealed_manifest
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revision["revision"], 1);
+
+    let identity = IdentityKeys::generate(1);
+    let public = identity.public();
+    let (status, published) = send(
+        &app,
+        "PUT",
+        "/send/identity",
+        Some(token),
+        Some(serde_json::to_value(&public).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let bastion_id = published["bastion_id"].as_str().unwrap();
+    let send_blob = send_seal(b"restored-send", bastion_id, &public, None, None).unwrap();
+    let message_id = send_blob.message_id.clone();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(token),
+        Some(json!({
+            "recipient_id": send_blob.recipient_id,
+            "message_id": send_blob.message_id,
+            "blob": send_blob,
+            "expires_at": null
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let backup_source = PathBuf::from(source.as_ref());
+    let backup_destination = backup_path.clone();
+    tokio::task::spawn_blocking(move || {
+        server::backup_database(&backup_source, &backup_destination)
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(backup_path.is_file());
+    assert!(server::backup_database(source.as_ref(), &backup_path).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&backup_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    drop(app);
+    let restored_path = backup_path.to_string_lossy().into_owned();
+    let restored = server::app_with_db(&restored_path);
+    let (status, login) = send(
+        &restored,
+        "POST",
+        "/sessions",
+        None,
+        Some(json!({
+            "email": email,
+            "auth_secret": registration.auth_secret.expose_b64()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let restored_token = login["token"].as_str().unwrap();
+    let (status, snapshot) = send(&restored, "GET", "/vault", Some(restored_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(snapshot["revision"], 1);
+    assert!(!snapshot["manifest"].is_null());
+    let restored_item: crypto_core::EncryptedBlob =
+        serde_json::from_value(snapshot["items"]["backup-item"].clone()).unwrap();
+    assert_eq!(
+        vault
+            .decrypt_item(&restored_item, "backup-item")
+            .unwrap()
+            .as_slice(),
+        b"restored-secret"
+    );
+    let (status, inbox) = send(&restored, "GET", "/send/inbox", Some(restored_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(inbox.as_array().unwrap().len(), 1);
+    assert_eq!(inbox[0]["message_id"], message_id);
+
+    drop(restored);
+    let _ = std::fs::remove_file(&backup_path);
+    for suffix in ["-wal", "-shm", "-journal", "-server.lock"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", backup_path.display()));
+    }
+}
+
 #[test]
 fn migrates_legacy_accounts_with_zero_vault_revision() {
     let path = test_db_path("revision-migration");
@@ -1466,6 +1612,7 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
     drop(server::app_with_db(&path));
 
     let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.pragma_update(None, "foreign_keys", "ON").unwrap();
     let columns = conn
         .prepare("PRAGMA table_info(accounts)")
         .unwrap()
@@ -1474,11 +1621,71 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
     assert!(columns.iter().any(|column| column == "vault_revision"));
+    let user_version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(user_version, 2);
+    assert!(conn
+        .execute(
+            "INSERT INTO items(email,id,blob) VALUES('missing@example.com','orphan','{}')",
+            [],
+        )
+        .is_err());
+    conn.execute(
+        "INSERT INTO accounts(
+           email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision
+         ) VALUES('cascade@example.com','salt','{}','{}','hash',0)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO items(email,id,blob) VALUES('cascade@example.com','item','{}')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO send_directory(email,bastion_id,public,created_at)
+         VALUES('cascade@example.com','recipient','{}',1)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO send_inbox(recipient_id,message_id,blob,created_at,expires_at)
+         VALUES('recipient','message','{}',1,NULL)",
+        [],
+    )
+    .unwrap();
+    conn.execute("DELETE FROM accounts WHERE email='cascade@example.com'", [])
+        .unwrap();
+    for table in ["items", "send_directory", "send_inbox"] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "{table} did not cascade on account deletion");
+    }
     drop(conn);
 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(format!("{path}-wal"));
     let _ = std::fs::remove_file(format!("{path}-shm"));
+}
+
+#[test]
+fn refuses_a_database_from_a_newer_schema_version() {
+    let path = test_db_path("newer-schema");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("PRAGMA user_version=999").unwrap();
+    drop(conn);
+
+    let restart = std::panic::catch_unwind(|| server::app_with_db(&path));
+    assert!(restart.is_err(), "newer database schema was accepted");
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(format!("{path}-wal"));
+    let _ = std::fs::remove_file(format!("{path}-shm"));
+    let _ = std::fs::remove_file(format!("{path}-server.lock"));
 }
 
 #[tokio::test]

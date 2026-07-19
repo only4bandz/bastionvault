@@ -71,6 +71,13 @@ under its logical cache lock before the process remains quarantined for restart.
 Unbounded `spawn_blocking` tasks and pools of competing SQLite connections are
 explicitly rejected.
 
+The schema is transactionally versioned and guarded by foreign keys. The
+repository also provides a no-clobber online snapshot command and an
+application-level restore test covering encrypted vault, manifest, and Send
+state. Production still requires an encrypted off-host scheduler, retention
+policy, monitoring of backup age, and a restore drill on the selected
+deployment environment that demonstrates the RPO and RTO below.
+
 ### Availability and durability objectives
 
 The initial objectives are:
