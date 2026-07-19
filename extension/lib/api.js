@@ -28,6 +28,7 @@ export const MAX_SERVER_DETAIL_CHARS = 200;
  */
 export function statusMessage(status) {
   if (status === 401) return "The server rejected the session or credentials.";
+  if (status === 403) return "Mailbox verification is required or has expired.";
   if (status === 404) return "Not found on the server.";
   if (status === 409) return "The server reported a conflict with another change.";
   if (status === 413) return "The request is too large for the server.";

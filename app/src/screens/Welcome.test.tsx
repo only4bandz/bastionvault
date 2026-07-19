@@ -5,8 +5,17 @@ import { Welcome } from "./Welcome";
 
 function renderWelcome() {
   const onCreate = vi.fn(async () => {});
-  render(<Welcome onCreate={onCreate} onHaveVault={vi.fn()} />);
-  return { onCreate };
+  const onRequestVerification = vi.fn(async () => {});
+  render(
+    <Welcome
+      onCreate={onCreate}
+      onHaveVault={vi.fn()}
+      verificationRequired={false}
+      verifiedEmail={null}
+      onRequestVerification={onRequestVerification}
+    />
+  );
+  return { onCreate, onRequestVerification };
 }
 
 async function fill(user: ReturnType<typeof userEvent.setup>, email: string, pw: string) {
@@ -38,5 +47,29 @@ describe("Welcome master-password strength gate", () => {
     await waitFor(() =>
       expect(onCreate).toHaveBeenCalledWith("alice@example.com", "maple-tiger-river-cloud-echo")
     );
+  });
+});
+
+describe("Welcome mailbox verification gate", () => {
+  it("requests verification before collecting a master password", async () => {
+    const user = userEvent.setup();
+    const onCreate = vi.fn(async () => {});
+    const onRequestVerification = vi.fn(async () => {});
+    render(
+      <Welcome
+        onCreate={onCreate}
+        onHaveVault={vi.fn()}
+        verificationRequired
+        verifiedEmail={null}
+        onRequestVerification={onRequestVerification}
+      />
+    );
+
+    expect(screen.queryByPlaceholderText("A long, memorable passphrase")).not.toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("you@example.com"), "alice@example.com");
+    await user.click(screen.getByRole("button", { name: "Verify email first" }));
+
+    await waitFor(() => expect(onRequestVerification).toHaveBeenCalledWith("alice@example.com"));
+    expect(onCreate).not.toHaveBeenCalled();
   });
 });

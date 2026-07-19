@@ -112,9 +112,9 @@ owner-only mode.
 
 The canonical HTTP API is namespaced under `/v1`. Unversioned routes remain as
 a temporary compatibility surface and return `Deprecation: true` plus a
-successor-version link. Account "email" values are unverified login identifiers:
-the current server has no mail-verification, recovery, or notification channel,
-so an address must never be treated as proof of mailbox ownership or identity.
+successor-version link. Production registration requires a short-lived mailbox
+proof before any account row is created. That proof is registration-only: email
+is never vault recovery, decryption, deletion, or human-identity authority.
 
 SQLite runs in WAL mode with `synchronous=FULL`. A successful mutation is not
 acknowledged until SQLite has requested a WAL sync for that commit, protecting
@@ -123,7 +123,7 @@ the host filesystem and storage honor SQLite's sync requests. This is a local
 durability guarantee, not a substitute for tested backups or replication.
 
 The schema is migrated transactionally through SQLite `user_version`; this
-binary supports schema version 3 and refuses newer databases. Foreign keys are
+binary supports schema version 4 and refuses newer databases. Foreign keys are
 enabled and checked at startup. Create a coherent snapshot of a live database
 without replacing any existing file with:
 
@@ -170,6 +170,9 @@ backoff, and scrubs message data after delivery or terminal failure. Delivery
 is at least once: a crash after relay acceptance can cause a duplicate with the
 same `Message-ID`. SMTP settings and the provider acceptance gate are documented
 in [`docs/transactional-mail-outbox.md`](docs/transactional-mail-outbox.md).
+Schema version 4 adds pre-registration mailbox challenges without reserving an
+account identifier; the complete protocol and threat boundary are documented
+in [`docs/mailbox-verification.md`](docs/mailbox-verification.md).
 
 Production mode fails closed unless Axum is loopback-only, SQLite uses an
 absolute path, and one canonical HTTPS public origin is declared. Proxied API
@@ -183,6 +186,11 @@ BASTION_ENV=production \
 BIND_ADDR=127.0.0.1:7777 \
 BASTION_DB=/var/lib/bastion/bastion.db \
 BASTION_PUBLIC_ORIGIN=https://vault.example.com \
+BASTION_SMTP_HOST=smtp.example.com \
+BASTION_SMTP_PORT=587 \
+BASTION_SMTP_USERNAME=bastion \
+BASTION_SMTP_PASSWORD=replace-with-secret-injection \
+BASTION_MAIL_FROM='Bastion <no-reply@example.com>' \
 cargo run -p server
 
 # Run against the deployed ingress, not the loopback listener.
@@ -191,8 +199,10 @@ bash scripts/verify-production-edge.sh https://vault.example.com
 
 | Method | Route | Role |
 |---|---|---|
+| `GET` | `/v1/config` | Returns public client policy, including whether mailbox proof is required |
 | `GET` | `/v1/livez` · `/v1/readyz` | Process liveness without storage · SQLite-backed routing readiness |
-| `POST` | `/v1/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
+| `POST` | `/v1/registration-challenges` · `/v1/registration-challenges/verify` | Queue/rotate a bounded proof link · confirm an unexpired mailbox proof |
+| `POST` | `/v1/accounts` | Consumes production mailbox proof and creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
 | `DELETE` | `/v1/accounts` | Permanently deletes owned state; requires a session plus fresh `auth_secret` proof |
 | `GET` | `/v1/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
 | `POST` / `DELETE` | `/v1/sessions` | Login (Argon2id) → bearer token (TTL 30 min) / logout |
@@ -245,8 +255,8 @@ cd extension && ./build.sh                   # build the WASM module
 ```
 
 > ⚠️ The server is **not production-ready** until the documented TLS ingress
-> passes the edge drill, durable mailbox verification is implemented, and
-> off-host backup scheduling plus deployment-specific RPO/RTO drills are
-> configured. The stateful controls remain process-local; the exclusive
+> passes the edge and real-provider mailbox drills, and off-host backup
+> scheduling plus deployment-specific RPO/RTO drills are configured. The
+> stateful controls remain process-local; the exclusive
 > instance lock and isolated SQLite owner reject horizontal replicas rather
 > than making them safe.

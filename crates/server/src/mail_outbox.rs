@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use lettre::message::{header::ContentType, Mailbox};
 use lettre::transport::smtp::authentication::Credentials;
+use lettre::Address;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
@@ -26,6 +27,76 @@ const MAX_RETRY_SECONDS: i64 = 6 * 60 * 60;
 const MAX_RECIPIENT_BYTES: usize = 254;
 const MAX_SUBJECT_BYTES: usize = 160;
 const MAX_BODY_BYTES: usize = 16 * 1024;
+const MAX_ACTIVE_GLOBAL: i64 = 10_000;
+const MAX_ACTIVE_PER_OWNER: i64 = 3;
+
+pub(super) struct MailDraft<'a> {
+    pub id: &'a str,
+    pub recipient: &'a str,
+    pub subject: &'a str,
+    pub text_body: &'a str,
+    pub created_at: i64,
+}
+
+pub(super) fn valid_recipient(value: &str) -> bool {
+    value.len() <= MAX_RECIPIENT_BYTES
+        && value
+            .parse::<Address>()
+            .is_ok_and(|address| address.to_string() == value)
+}
+
+/// Insert mail while the producer's authoritative SQLite transaction is still
+/// open. Returns false when the bounded active queue is full.
+pub(super) fn enqueue_registration(
+    tx: &rusqlite::Transaction<'_>,
+    challenge_email: &str,
+    draft: MailDraft<'_>,
+) -> rusqlite::Result<bool> {
+    if draft.id.len() != 32
+        || !draft
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !valid_recipient(draft.recipient)
+        || draft.subject.is_empty()
+        || draft.subject.len() > MAX_SUBJECT_BYTES
+        || draft.text_body.is_empty()
+        || draft.text_body.len() > MAX_BODY_BYTES
+        || draft.created_at < 0
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let active_global: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM mail_outbox WHERE state IN ('pending','in_flight')",
+        [],
+        |row| row.get(0),
+    )?;
+    let active_owner: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM mail_outbox
+          WHERE challenge_email=?1 AND state IN ('pending','in_flight')",
+        [challenge_email],
+        |row| row.get(0),
+    )?;
+    if active_global >= MAX_ACTIVE_GLOBAL || active_owner >= MAX_ACTIVE_PER_OWNER {
+        return Ok(false);
+    }
+    tx.execute(
+        "INSERT INTO mail_outbox(
+           id,account_email,challenge_email,recipient,subject,text_body,state,
+           attempts,available_at,created_at
+         ) VALUES(?1,?2,?3,?4,?5,?6,'pending',0,?7,?7)",
+        params![
+            draft.id,
+            Option::<&str>::None,
+            challenge_email,
+            draft.recipient,
+            draft.subject,
+            draft.text_body,
+            draft.created_at
+        ],
+    )?;
+    Ok(true)
+}
 
 #[derive(Clone)]
 pub(super) struct SmtpConfig {
@@ -207,6 +278,12 @@ async fn deliver_one_at(db: &Db, sender: &impl MailSender, now: i64) -> Result<b
 async fn claim_one(db: &Db, now: i64) -> Result<Option<MailJob>, DbError> {
     db.call_mutation(move |conn| {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Expired pre-registration challenges are useless and their outbox
+        // rows cascade away before they can emit stale verification links.
+        tx.execute(
+            "DELETE FROM registration_challenges WHERE expires_at<?1",
+            [now],
+        )?;
         // A crash can leave the final allowed attempt leased. Once that lease
         // expires, stop instead of creating an unbounded ninth delivery. The
         // stable Message-ID still gives the relay/recipient a dedupe key if the
@@ -325,7 +402,14 @@ async fn finish_attempt(
             }
         };
         if updated != 1 {
-            return Err(rusqlite::Error::InvalidQuery);
+            let still_exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM mail_outbox WHERE id=?1)",
+                [&id],
+                |row| row.get(0),
+            )?;
+            if still_exists {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
         Ok(())
     })
@@ -371,9 +455,9 @@ mod tests {
             )?;
             conn.execute(
                 "INSERT INTO mail_outbox(
-                   id,account_email,recipient,subject,text_body,state,attempts,
+                   id,account_email,challenge_email,recipient,subject,text_body,state,attempts,
                    available_at,created_at
-                 ) VALUES(?1,'alice@example.com','alice@example.com',
+                 ) VALUES(?1,'alice@example.com',NULL,'alice@example.com',
                           'Verify your Bastion account','verification body',
                           'pending',0,?2,?2)",
                 params![id, now],

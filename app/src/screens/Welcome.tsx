@@ -6,11 +6,17 @@ import { assessPassword } from "../lib/password-health";
 export function Welcome({
   onCreate,
   onHaveVault,
+  verificationRequired,
+  verifiedEmail,
+  onRequestVerification,
 }: {
   onCreate: (email: string, password: string) => Promise<void>;
   onHaveVault: () => void;
+  verificationRequired: boolean | null;
+  verifiedEmail: string | null;
+  onRequestVerification: (email: string) => Promise<void>;
 }): JSX.Element {
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(verifiedEmail ?? "");
   const [pw, setPw] = useState("");
   const [pw2, setPw2] = useState("");
   const [busy, setBusy] = useState(false);
@@ -20,6 +26,19 @@ export function Welcome({
   async function create() {
     setErr("");
     if (!/^\S+@\S+\.\S+$/.test(email)) return setErr("Enter a valid email address.");
+    if (verificationRequired === null) {
+      return setErr("Server registration policy is unavailable. Try again.");
+    }
+    if (verificationRequired && !verifiedEmail) {
+      setBusy(true);
+      try {
+        await onRequestVerification(email);
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : "Could not send the verification email.");
+        setBusy(false);
+      }
+      return;
+    }
     if (pw.length < 8) return setErr("Use at least 8 characters for your master password.");
     // The master password protects everything and cannot be reset — refuse an
     // obviously weak one (common word, sequence, single class, too short) that
@@ -62,42 +81,65 @@ export function Welcome({
               type="email"
               autoComplete="email"
               autoFocus
-              value={email}
+              value={verifiedEmail ?? email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
+              readOnly={Boolean(verifiedEmail)}
             />
-            <small>Used as an unverified login identifier, not for recovery.</small>
+            <small>
+              {verifiedEmail
+                ? "Mailbox verified for registration only — never for vault recovery."
+                : verificationRequired
+                  ? "We verify mailbox control before creating an account."
+                  : "Used as a local development login identifier, not for recovery."}
+            </small>
           </div>
-          <div className="field">
-            <label>Master password</label>
-            <SecretInput
-              label="Master password"
-              autoComplete="new-password"
-              value={pw}
-              onChange={(e) => setPw(e.target.value)}
-              placeholder="A long, memorable passphrase"
-            />
-            {pw && (
-              <div className="strength" title={s.label}>
-                <i style={{ width: `${(s.score / 4) * 100}%`, background: s.color }} />
+          {(verificationRequired === false || verifiedEmail) && (
+            <>
+              <div className="field">
+                <label>Master password</label>
+                <SecretInput
+                  label="Master password"
+                  autoComplete="new-password"
+                  value={pw}
+                  onChange={(e) => setPw(e.target.value)}
+                  placeholder="A long, memorable passphrase"
+                />
+                {pw && (
+                  <div className="strength" title={s.label}>
+                    <i style={{ width: `${(s.score / 4) * 100}%`, background: s.color }} />
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-          <div className="field">
-            <label>Confirm master password</label>
-            <SecretInput
-              label="Master password confirmation"
-              autoComplete="new-password"
-              value={pw2}
-              onChange={(e) => setPw2(e.target.value)}
-              placeholder="Repeat it"
-            />
-          </div>
+              <div className="field">
+                <label>Confirm master password</label>
+                <SecretInput
+                  label="Master password confirmation"
+                  autoComplete="new-password"
+                  value={pw2}
+                  onChange={(e) => setPw2(e.target.value)}
+                  placeholder="Repeat it"
+                />
+              </div>
+            </>
+          )}
 
           {err && <div className="callout">{err}</div>}
 
-          <button className="btn btn-primary btn-block" type="submit" disabled={busy}>
-            {busy ? "Creating your vault…" : "Create vault"}
+          <button
+            className="btn btn-primary btn-block"
+            type="submit"
+            disabled={busy || verificationRequired === null}
+          >
+            {busy
+              ? verificationRequired && !verifiedEmail
+                ? "Sending verification…"
+                : "Creating your vault…"
+              : verificationRequired === null
+                ? "Checking server policy…"
+                : verificationRequired && !verifiedEmail
+                ? "Verify email first"
+                : "Create vault"}
           </button>
         </form>
 

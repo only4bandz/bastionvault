@@ -218,6 +218,105 @@ async fn full_account_and_vault_flow() {
 }
 
 #[tokio::test]
+async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
+    let path = test_db_path("mailbox-proof");
+    let app = server::app_with_db_and_mailbox_verification(&path, "https://vault.example.com");
+    let email = "verified@example.com";
+    let (_vault, registration, _secret_key) =
+        Vault::register_with(b"verified-password", fast_kdf()).unwrap();
+    let auth_secret = registration.auth_secret.expose_b64().to_string();
+    let registration = serde_json::to_value(registration).unwrap();
+
+    let (status, config) = send(&app, "GET", "/v1/config", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(config["email_verification_required"], true);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/registration-challenges",
+        None,
+        Some(json!({ "email": email })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let account_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        account_count, 0,
+        "challenge creation squatted the account id"
+    );
+    let body: String = conn
+        .query_row("SELECT text_body FROM mail_outbox", [], |row| row.get(0))
+        .unwrap();
+    let token = body
+        .split("#token=")
+        .nth(1)
+        .and_then(|tail| tail.lines().next())
+        .unwrap()
+        .to_string();
+    drop(conn);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(json!({ "email": email, "registration": registration.clone() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, verified) = send(
+        &app,
+        "POST",
+        "/v1/registration-challenges/verify",
+        None,
+        Some(json!({ "token": token.clone() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(verified["email"], email);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(json!({
+            "email": email,
+            "registration": registration,
+            "mailbox_proof": token
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": auth_secret })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for table in ["registration_challenges", "mail_outbox"] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "{table} survived proof consumption");
+    }
+}
+
+#[tokio::test]
 async fn atomic_vault_transactions_apply_once_and_reject_stale_writers() {
     let app = server::app_in_memory();
     let (vault, token) = registered_vault_session(&app, "atomic@example.com").await;
@@ -1624,7 +1723,7 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 3);
+    assert_eq!(user_version, 4);
     assert!(conn
         .execute(
             "INSERT INTO items(email,id,blob) VALUES('missing@example.com','orphan','{}')",
@@ -1657,9 +1756,9 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
     .unwrap();
     conn.execute(
         "INSERT INTO mail_outbox(
-           id,account_email,recipient,subject,text_body,state,attempts,available_at,created_at
+           id,account_email,challenge_email,recipient,subject,text_body,state,attempts,available_at,created_at
          ) VALUES(
-           '00112233445566778899aabbccddeeff','cascade@example.com',
+           '00112233445566778899aabbccddeeff','cascade@example.com',NULL,
            'cascade@example.com','Subject','Body','pending',0,1,1
          )",
         [],
