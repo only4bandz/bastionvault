@@ -567,11 +567,13 @@ impl Db {
             // deployment — see create_account), cross-process lock contention
             // should wait a bounded moment instead of surfacing an instant
             // SQLITE_BUSY that handlers can only map to an opaque 500.
-            // synchronous=NORMAL: the durable, fsync-light setting recommended
-            // for WAL mode (FULL's extra fsyncs buy nothing under WAL).
+            // synchronous=FULL: in WAL mode SQLite syncs the WAL after every
+            // commit before acknowledging it. NORMAL preserves consistency but
+            // can lose an acknowledged transaction after an OS crash or power
+            // loss, which is unacceptable for vault mutations.
             "PRAGMA journal_mode=WAL;
              PRAGMA busy_timeout=5000;
-             PRAGMA synchronous=NORMAL;
+             PRAGMA synchronous=FULL;
              CREATE TABLE IF NOT EXISTS accounts(
                email TEXT PRIMARY KEY, salt TEXT NOT NULL, kdf TEXT NOT NULL,
                wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL,
@@ -591,6 +593,23 @@ impl Db {
              CREATE INDEX IF NOT EXISTS idx_inbox_recipient ON send_inbox(recipient_id);",
         )
         .expect("init schema");
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read SQLite synchronous mode");
+        assert_eq!(
+            synchronous, 2,
+            "SQLite must apply synchronous=FULL before the server starts"
+        );
+        if file_path.is_some() {
+            let journal_mode: String = conn
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .expect("read SQLite journal mode");
+            assert_eq!(
+                journal_mode.to_ascii_lowercase(),
+                "wal",
+                "SQLite must apply journal_mode=WAL before the server starts"
+            );
+        }
         let has_vault_revision = {
             let mut stmt = conn
                 .prepare("PRAGMA table_info(accounts)")
@@ -2261,11 +2280,11 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
             .unwrap();
         assert_eq!(busy_timeout, 5000);
-        // 1 = NORMAL, the recommended durable setting under WAL.
+        // 2 = FULL. In WAL mode this syncs every commit before acknowledgement.
         let synchronous: i64 = conn
             .query_row("PRAGMA synchronous", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(synchronous, 1);
+        assert_eq!(synchronous, 2);
     }
 
     #[test]
