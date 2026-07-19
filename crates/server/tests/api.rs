@@ -1191,6 +1191,14 @@ async fn data_persists_across_restart() {
         assert_eq!(response["revision"], 1);
     } // app (and its SQLite connection) dropped → simulates a restart
 
+    // WAL is a persistent database property. Verify the file-backed server
+    // actually selected it instead of silently accepting another journal mode.
+    let persisted_journal_mode: String = rusqlite::Connection::open(&*path)
+        .unwrap()
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(persisted_journal_mode.to_ascii_lowercase(), "wal");
+
     // ── Second "boot" from the same database ──
     let app2 = server::app_with_db(&path);
     let (s, body) = send(

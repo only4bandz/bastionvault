@@ -110,6 +110,12 @@ file (sticky temporary directories remain supported). Database artifacts with
 hard links are also rejected so an alternate pathname cannot bypass the
 owner-only mode.
 
+SQLite runs in WAL mode with `synchronous=FULL`. A successful mutation is not
+acknowledged until SQLite has requested a WAL sync for that commit, protecting
+acknowledged writes across process/OS crashes and power loss to the extent that
+the host filesystem and storage honor SQLite's sync requests. This is a local
+durability guarantee, not a substitute for tested backups or replication.
+
 | Method | Route | Role |
 |---|---|---|
 | `POST` | `/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
