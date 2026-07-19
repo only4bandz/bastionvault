@@ -134,6 +134,14 @@ semantics; network and distributed filesystems are unsupported. Stop the server
 for filesystem-level copies, or use a SQLite-aware backup tool that respects
 the live database and WAL.
 
+The accepted initial production direction remains single-instance and keeps
+SQLite on local persistent storage behind a same-origin TLS ingress. It targets
+a 15-minute RPO and a 60-minute RTO, subject to measured capacity and verified
+restore drills. Horizontal replicas require a new shared-storage design; a
+shared SQLite volume or removal of the exclusive lock is explicitly rejected.
+See [ADR 0001](docs/adr/0001-production-topology-and-slos.md) for the topology,
+service objectives, decision gates, and remaining production blockers.
+
 | Method | Route | Role |
 |---|---|---|
 | `POST` | `/v1/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
