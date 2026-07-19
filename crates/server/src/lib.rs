@@ -14,7 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -32,7 +34,9 @@ use axum::{Json, Router};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{
+    mpsc, oneshot, OwnedSemaphorePermit, RwLock, RwLockReadGuard, RwLockWriteGuard, Semaphore,
+};
 
 use crypto_core::{AuthSecret, EncryptedBlob, KdfParams, PublicIdentity, Registration, SendBlob};
 
@@ -92,6 +96,12 @@ const MAX_VAULT_REVISION_READS_PER_MIN: u32 = 300;
 const MAX_INBOX_READS_PER_MIN: u32 = 60;
 const MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN: u32 = 5;
 const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
+/// Maximum accepted SQLite commands waiting behind the dedicated connection
+/// owner. Saturation fails fast instead of allocating unbounded work.
+const DB_QUEUE_CAPACITY: usize = 256;
+/// Upper bound for an accepted storage command to produce a response. SQLite's
+/// own busy timeout is shorter, leaving headroom for queueing and validation.
+const DB_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -132,10 +142,10 @@ fn stored_data_error(
 /// Builds the router, persisting to the SQLite database at `$BASTION_DB`
 /// (default `bastion.db` in the working directory).
 ///
-/// ⚠️ NON-PRODUCTION: this server still has NO TLS or CORS. The Bastion Send
+/// ⚠️ NON-PRODUCTION: this server still has no production TLS/origin boundary. The Bastion Send
 /// endpoints have per-account rate limits + inbox quotas + size caps. Vault
 /// writes also have per-item, item-count, and aggregate encrypted-byte quotas.
-/// Add TLS/CORS and broader rate limiting before deployment.
+/// Add the same-origin TLS ingress and broader rate limiting before deployment.
 pub fn app() -> Router {
     let db_path = std::env::var("BASTION_DB").unwrap_or_else(|_| "bastion.db".to_string());
     build(DEFAULT_TOKEN_TTL, &db_path, MAX_CONCURRENT_AUTH)
@@ -248,8 +258,7 @@ fn build_with_rate_limits(
             state.clone(),
             authenticate_vault_transaction,
         ));
-    let routes = Router::new()
-        .route("/health", get(health))
+    let protected_routes = Router::new()
         .route("/accounts", post(create_account).delete(delete_account))
         .route("/accounts/:email/prelogin", get(prelogin))
         .route("/sessions", post(create_session).delete(delete_session))
@@ -267,7 +276,16 @@ fn build_with_rate_limits(
         .route(
             "/send/inbox/:message_id",
             axum::routing::delete(send_inbox_delete),
-        );
+        )
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            storage_availability_gate,
+        ));
+    let routes = Router::new()
+        .route("/health", get(health))
+        .route("/livez", get(liveness))
+        .route("/readyz", get(readiness))
+        .merge(protected_routes);
     let legacy = routes
         .clone()
         .layer(middleware::from_fn(legacy_api_headers));
@@ -278,6 +296,20 @@ fn build_with_rate_limits(
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(request_log))
         .with_state(state)
+}
+
+async fn storage_availability_gate(
+    State(st): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    if !st.db.is_available() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "storage unavailable",
+        ));
+    }
+    Ok(next.run(request).await)
 }
 
 async fn legacy_api_headers(request: Request, next: Next) -> Response {
@@ -414,8 +446,7 @@ impl AppState {
         rate_window: Duration,
         auth_rate_limits: AuthRateLimits,
     ) -> Self {
-        let db = Db::open(db_path);
-        let accounts = db.load_accounts().expect("load persisted vault state");
+        let (db, accounts) = Db::open(db_path);
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 accounts,
@@ -432,15 +463,16 @@ impl AppState {
         }
     }
 
-    /// Read lock, **recovering** from any poisoning: a panic in another
-    /// handler must not bring the whole server into a DoS.
-    fn read(&self) -> RwLockReadGuard<'_, Inner> {
-        self.inner.read().unwrap_or_else(|e| e.into_inner())
+    /// Tokio-aware state locks preserve cache/database ordering without
+    /// blocking an executor thread while the storage owner is working.
+    async fn read(&self) -> RwLockReadGuard<'_, Inner> {
+        self.inner.read().await
     }
 
-    /// Same for writing.
-    fn write(&self) -> RwLockWriteGuard<'_, Inner> {
-        self.inner.write().unwrap_or_else(|e| e.into_inner())
+    /// Mutations hold this logical lock across their awaited database command
+    /// so the write-through cache cannot become observably inconsistent.
+    async fn write(&self) -> RwLockWriteGuard<'_, Inner> {
+        self.inner.write().await
     }
 }
 
@@ -448,12 +480,45 @@ impl AppState {
 
 #[derive(Clone)]
 struct Db {
-    conn: Arc<Mutex<Connection>>,
-    // The open file owns the advisory lock for the lifetime of every Db clone.
-    // It is deliberately unused otherwise.
-    _instance_lock: Option<Arc<File>>,
+    // Field order matters on final drop: close the last sender before joining
+    // the worker, allowing blocking_recv() to finish.
+    sender: mpsc::Sender<DbJob>,
+    _worker: Arc<DbWorker>,
+    available: Arc<AtomicBool>,
+    response_timeout: Duration,
 }
 
+type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
+
+struct DbWorker {
+    join: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for DbWorker {
+    fn drop(&mut self) {
+        if let Some(join) = self
+            .join
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            // All Db senders have gone away before the final worker Arc, so the
+            // receive loop can drain accepted commands and exit deterministically.
+            let _ = join.join();
+        }
+    }
+}
+
+#[derive(Debug)]
+enum DbError {
+    Sqlite,
+    QueueFull,
+    WorkerClosed,
+    ResponseTimeout,
+    Quarantined,
+}
+
+#[derive(Clone)]
 enum PreparedVaultOperation {
     Put {
         id: String,
@@ -614,13 +679,67 @@ fn acquire_instance_lock(path: &FsPath) -> io::Result<File> {
 }
 
 impl Db {
-    fn open(path: &str) -> Self {
+    fn open(path: &str) -> (Self, HashMap<String, AccountRecord>) {
+        Self::open_with_limits(path, DB_QUEUE_CAPACITY, DB_RESPONSE_TIMEOUT)
+    }
+
+    fn open_with_limits(
+        path: &str,
+        queue_capacity: usize,
+        response_timeout: Duration,
+    ) -> (Self, HashMap<String, AccountRecord>) {
+        let (sender, mut receiver) = mpsc::channel::<DbJob>(queue_capacity);
+        let (init_sender, init_receiver) = std::sync::mpsc::sync_channel(1);
+        let path = path.to_owned();
+        let available = Arc::new(AtomicBool::new(true));
+        let worker_available = available.clone();
+        let worker = thread::Builder::new()
+            .name("bastion-sqlite".to_string())
+            .spawn(move || {
+                let (mut conn, _instance_lock) = Self::open_connection(&path);
+                let accounts = Self::load_accounts_from(&conn).expect("load persisted vault state");
+                if init_sender.send(accounts).is_err() {
+                    return;
+                }
+                while let Some(job) = receiver.blocking_recv() {
+                    job(&mut conn);
+                }
+                worker_available.store(false, Ordering::Release);
+                if path != ":memory:" {
+                    // Best-effort clean shutdown. A failed checkpoint cannot
+                    // invalidate committed WAL transactions, but is surfaced
+                    // by readiness/restore checks on the next start.
+                    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+                }
+            })
+            .expect("spawn SQLite owner");
+        let accounts = match init_receiver.recv() {
+            Ok(accounts) => accounts,
+            Err(_) => {
+                let _ = worker.join();
+                panic!("SQLite owner failed to initialize");
+            }
+        };
+        (
+            Self {
+                sender,
+                _worker: Arc::new(DbWorker {
+                    join: Mutex::new(Some(worker)),
+                }),
+                available,
+                response_timeout,
+            },
+            accounts,
+        )
+    }
+
+    fn open_connection(path: &str) -> (Connection, Option<File>) {
         let file_path = (path != ":memory:").then(|| FsPath::new(path));
         if let Some(file_path) = file_path {
             prepare_database_path(file_path).expect("secure database path");
         }
         let instance_lock = file_path.map(|file_path| {
-            Arc::new(acquire_instance_lock(file_path).expect("acquire exclusive server ownership"))
+            acquire_instance_lock(file_path).expect("acquire exclusive server ownership")
         });
         let conn = if path == ":memory:" {
             Connection::open_in_memory()
@@ -701,104 +820,186 @@ impl Db {
         if let Some(file_path) = file_path {
             secure_database_artifacts(file_path).expect("secure database artifacts");
         }
-        Self {
-            conn: Arc::new(Mutex::new(conn)),
-            _instance_lock: instance_lock,
+        (conn, instance_lock)
+    }
+
+    async fn call<T, F>(&self, operation: F) -> Result<T, DbError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> rusqlite::Result<T> + Send + 'static,
+    {
+        self.call_inner(operation, false).await
+    }
+
+    async fn call_mutation<T, F>(&self, operation: F) -> Result<T, DbError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> rusqlite::Result<T> + Send + 'static,
+    {
+        self.call_inner(operation, true).await
+    }
+
+    async fn call_inner<T, F>(&self, operation: F, finish_after_timeout: bool) -> Result<T, DbError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> rusqlite::Result<T> + Send + 'static,
+    {
+        if !self.is_available() {
+            return Err(DbError::Quarantined);
+        }
+        let (result_sender, result_receiver) = oneshot::channel();
+        let mut result_receiver = result_receiver;
+        let job = Box::new(move |conn: &mut Connection| {
+            let _ = result_sender.send(operation(conn).map_err(|_| DbError::Sqlite));
+        });
+        self.sender.try_send(job).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => DbError::QueueFull,
+            mpsc::error::TrySendError::Closed(_) => {
+                self.available.store(false, Ordering::Release);
+                DbError::WorkerClosed
+            }
+        })?;
+        match tokio::time::timeout(self.response_timeout, &mut result_receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => {
+                self.available.store(false, Ordering::Release);
+                Err(DbError::WorkerClosed)
+            }
+            Err(_) => {
+                // The job was accepted and cannot be removed from the worker
+                // queue safely. Quarantine the instance immediately. Durable
+                // mutations must still finish while their logical cache lock
+                // is held, preventing a late commit from diverging the cache.
+                self.available.store(false, Ordering::Release);
+                if finish_after_timeout {
+                    result_receiver.await.map_err(|_| DbError::WorkerClosed)?
+                } else {
+                    Err(DbError::ResponseTimeout)
+                }
+            }
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Connection> {
-        self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    fn is_available(&self) -> bool {
+        self.available.load(Ordering::Acquire)
+    }
+
+    async fn ready(&self) -> Result<(), DbError> {
+        let result = self
+            .call(|conn| conn.query_row("SELECT COUNT(*) FROM accounts", [], |_| Ok(())))
+            .await;
+        if result.is_err() && !matches!(&result, Err(DbError::QueueFull)) {
+            // A readiness failure means operators can no longer trust this
+            // process to serve its cache consistently with durable state.
+            // Recovery is a process restart after the storage fault is fixed.
+            self.available.store(false, Ordering::Release);
+        }
+        result
     }
 
     /// Inserts a new account without ever replacing an existing credential.
     /// Returns `false` when a competing insert already claimed `email`.
-    fn create_account(
+    async fn create_account(
         &self,
         email: &str,
         salt: &str,
         kdf_json: &str,
         wrapped_json: &str,
         auth_hash: &str,
-    ) -> rusqlite::Result<bool> {
-        let inserted = self.lock().execute(
-            "INSERT INTO accounts(email,salt,kdf,wrapped_vault_key,auth_hash) \
-             VALUES(?1,?2,?3,?4,?5) ON CONFLICT(email) DO NOTHING",
-            params![email, salt, kdf_json, wrapped_json, auth_hash],
-        )?;
-        Ok(inserted == 1)
+    ) -> Result<bool, DbError> {
+        let email = email.to_owned();
+        let salt = salt.to_owned();
+        let kdf_json = kdf_json.to_owned();
+        let wrapped_json = wrapped_json.to_owned();
+        let auth_hash = auth_hash.to_owned();
+        self.call_mutation(move |conn| {
+            let inserted = conn.execute(
+                "INSERT INTO accounts(email,salt,kdf,wrapped_vault_key,auth_hash) \
+                 VALUES(?1,?2,?3,?4,?5) ON CONFLICT(email) DO NOTHING",
+                params![email, salt, kdf_json, wrapped_json, auth_hash],
+            )?;
+            Ok(inserted == 1)
+        })
+        .await
     }
 
     /// Delete every server-owned record for an account in one transaction.
     /// Messages already delivered to other recipients cannot be attributed to
     /// or recalled by the zero-knowledge server.
-    fn delete_account(&self, email: &str) -> rusqlite::Result<bool> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM send_inbox WHERE recipient_id IN (
-               SELECT bastion_id FROM send_directory WHERE email=?1
-             )",
-            [email],
-        )?;
-        tx.execute("DELETE FROM send_directory WHERE email=?1", [email])?;
-        tx.execute("DELETE FROM items WHERE email=?1", [email])?;
-        tx.execute("DELETE FROM manifests WHERE email=?1", [email])?;
-        let deleted = tx.execute("DELETE FROM accounts WHERE email=?1", [email])?;
-        tx.commit()?;
-        Ok(deleted == 1)
+    async fn delete_account(&self, email: &str) -> Result<bool, DbError> {
+        let email = email.to_owned();
+        self.call_mutation(move |conn| {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM send_inbox WHERE recipient_id IN (
+                   SELECT bastion_id FROM send_directory WHERE email=?1
+                 )",
+                [&email],
+            )?;
+            tx.execute("DELETE FROM send_directory WHERE email=?1", [&email])?;
+            tx.execute("DELETE FROM items WHERE email=?1", [&email])?;
+            tx.execute("DELETE FROM manifests WHERE email=?1", [&email])?;
+            let deleted = tx.execute("DELETE FROM accounts WHERE email=?1", [&email])?;
+            tx.commit()?;
+            Ok(deleted == 1)
+        })
+        .await
     }
 
-    fn commit_vault_mutation(
+    async fn commit_vault_mutation(
         &self,
         email: &str,
         expected_revision: u64,
         next_revision: u64,
         operations: &[PreparedVaultOperation],
         manifest_json: Option<&str>,
-    ) -> rusqlite::Result<DbVaultMutation> {
-        let expected_revision = persisted_revision(expected_revision)?;
-        let next_revision = persisted_revision(next_revision)?;
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        let updated = tx.execute(
-            "UPDATE accounts SET vault_revision=?1 WHERE email=?2 AND vault_revision=?3",
-            params![next_revision, email, expected_revision],
-        )?;
-        if updated != 1 {
-            return Ok(DbVaultMutation::Stale);
-        }
-        for operation in operations {
-            match operation {
-                PreparedVaultOperation::Put { id, blob_json, .. } => {
-                    tx.execute(
-                        "INSERT OR REPLACE INTO items(email,id,blob) VALUES(?1,?2,?3)",
-                        params![email, id, blob_json],
-                    )?;
-                }
-                PreparedVaultOperation::Delete { id } => {
-                    tx.execute(
-                        "DELETE FROM items WHERE email=?1 AND id=?2",
-                        params![email, id],
-                    )?;
+    ) -> Result<DbVaultMutation, DbError> {
+        let email = email.to_owned();
+        let operations = operations.to_vec();
+        let manifest_json = manifest_json.map(str::to_owned);
+        self.call_mutation(move |conn| {
+            let expected_revision = persisted_revision(expected_revision)?;
+            let next_revision = persisted_revision(next_revision)?;
+            let tx = conn.transaction()?;
+            let updated = tx.execute(
+                "UPDATE accounts SET vault_revision=?1 WHERE email=?2 AND vault_revision=?3",
+                params![next_revision, email, expected_revision],
+            )?;
+            if updated != 1 {
+                return Ok(DbVaultMutation::Stale);
+            }
+            for operation in operations {
+                match operation {
+                    PreparedVaultOperation::Put { id, blob_json, .. } => {
+                        tx.execute(
+                            "INSERT OR REPLACE INTO items(email,id,blob) VALUES(?1,?2,?3)",
+                            params![email, id, blob_json],
+                        )?;
+                    }
+                    PreparedVaultOperation::Delete { id } => {
+                        tx.execute(
+                            "DELETE FROM items WHERE email=?1 AND id=?2",
+                            params![email, id],
+                        )?;
+                    }
                 }
             }
-        }
-        if let Some(manifest_json) = manifest_json {
-            tx.execute(
-                "INSERT OR REPLACE INTO manifests(email,blob) VALUES(?1,?2)",
-                params![email, manifest_json],
-            )?;
-        }
-        tx.commit()?;
-        Ok(DbVaultMutation::Applied)
+            if let Some(manifest_json) = manifest_json {
+                tx.execute(
+                    "INSERT OR REPLACE INTO manifests(email,blob) VALUES(?1,?2)",
+                    params![email, manifest_json],
+                )?;
+            }
+            tx.commit()?;
+            Ok(DbVaultMutation::Applied)
+        })
+        .await
     }
 
     /// Loads all accounts (with their items and manifest) at startup.
-    fn load_accounts(
-        &self,
+    fn load_accounts_from(
+        conn: &Connection,
     ) -> Result<HashMap<String, AccountRecord>, Box<dyn std::error::Error + Send + Sync>> {
-        let conn = self.lock();
         let mut accounts: HashMap<String, AccountRecord> = HashMap::new();
 
         {
@@ -935,6 +1136,16 @@ impl IntoResponse for ApiError {
     }
 }
 
+fn db_api_error(error: DbError) -> ApiError {
+    match error {
+        DbError::Sqlite => ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"),
+        DbError::QueueFull
+        | DbError::WorkerClosed
+        | DbError::ResponseTimeout
+        | DbError::Quarantined => ApiError(StatusCode::SERVICE_UNAVAILABLE, "storage unavailable"),
+    }
+}
+
 // ─── DTO ───
 
 #[derive(Deserialize)]
@@ -1014,24 +1225,28 @@ struct AuthenticatedAccount(String);
 
 // ─── Handlers ───
 
-/// Liveness + DB readiness. A wedged, deleted or corrupted database must not
-/// report healthy, or an orchestrator will keep routing traffic to a server
-/// whose every stateful endpoint 500s. Runs a trivial `SELECT 1`; the body
-/// stays static so nothing internal leaks.
-async fn health(State(st): State<AppState>) -> Response {
-    // Read a real table so a corrupt/dropped schema (not just a live socket)
-    // surfaces as unhealthy, rather than a bare `SELECT 1` the connection can
-    // answer even when the data is gone.
-    let db_ok = st
-        .db
-        .lock()
-        .query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get::<_, i64>(0))
-        .is_ok();
-    if db_ok {
+/// Process liveness deliberately avoids the storage queue. It must remain
+/// responsive while readiness is withdrawn for a busy or failed database.
+async fn liveness() -> Response {
+    (StatusCode::OK, "ok").into_response()
+}
+
+/// Database readiness. A wedged, saturated, deleted, or corrupted database
+/// must not report ready, or an ingress will continue routing stateful work to
+/// an instance that cannot complete it.
+async fn readiness(State(st): State<AppState>) -> Response {
+    if st.db.ready().await.is_ok() {
         (StatusCode::OK, "ok").into_response()
     } else {
         (StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response()
     }
+}
+
+/// Backward-compatible aggregate health route. Historically this route was a
+/// DB readiness check, so preserve those semantics while `/livez` gives
+/// operators an independent process signal.
+async fn health(state: State<AppState>) -> Response {
+    readiness(state).await
 }
 
 async fn create_account(
@@ -1045,16 +1260,18 @@ async fn create_account(
         "global",
         "account-create-global",
         st.auth_rate_limits.account_creations_global,
-    )?;
+    )
+    .await?;
     auth_rate_limit(
         &st,
         &req.email,
         "account-create-account",
         st.auth_rate_limits.account_creations_per_account,
-    )?;
+    )
+    .await?;
     // Reject a known duplicate before paying the Argon2 cost. The authoritative
     // collision check is repeated under the write lock after hashing.
-    if st.read().accounts.contains_key(&req.email) {
+    if st.read().await.accounts.contains_key(&req.email) {
         return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
     }
     // Slow hash on a dedicated blocking thread (no starvation of the async runtime).
@@ -1074,7 +1291,7 @@ async fn create_account(
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
     // Serialize the authoritative insert and cache update. SQLite's conflict
     // clause remains authoritative if the cache and database ever diverge.
-    let mut inner = st.write();
+    let mut inner = st.write().await;
     if inner.accounts.contains_key(&req.email) {
         return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
     }
@@ -1087,7 +1304,8 @@ async fn create_account(
             &wrapped_json,
             &auth_hash,
         )
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+        .await
+        .map_err(db_api_error)?;
     if !created {
         return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
     }
@@ -1114,18 +1332,20 @@ async fn delete_account(
     headers: HeaderMap,
     Json(req): Json<DeleteAccountRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let email = require_auth(&st, &headers)?;
+    let email = require_auth(&st, &headers).await?;
     rate_limit(
         &st,
         &email,
         "account-delete",
         MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN,
-    )?;
+    )
+    .await?;
     if !is_exact_b64(req.auth_secret.expose_b64(), AUTH_SECRET_BYTES) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
     let phc = st
         .read()
+        .await
         .accounts
         .get(&email)
         .map(|account| account.auth_hash.clone())
@@ -1144,14 +1364,11 @@ async fn delete_account(
 
     // Serialize deletion with every cache-backed account mutation. Database
     // deletion commits before the cache and all account sessions disappear.
-    let mut inner = st.write();
+    let mut inner = st.write().await;
     if !inner.accounts.contains_key(&email) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
-    let deleted = st
-        .db
-        .delete_account(&email)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    let deleted = st.db.delete_account(&email).await.map_err(db_api_error)?;
     if !deleted {
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
     }
@@ -1172,14 +1389,16 @@ async fn prelogin(
         "global",
         "prelogin-global",
         st.auth_rate_limits.prelogins_global,
-    )?;
+    )
+    .await?;
     auth_rate_limit(
         &st,
         &email,
         "prelogin-account",
         st.auth_rate_limits.prelogins_per_account,
-    )?;
-    let inner = st.read();
+    )
+    .await?;
+    let inner = st.read().await;
     let acc = inner
         .accounts
         .get(&email)
@@ -1204,16 +1423,19 @@ async fn create_session(
         "global",
         "login-global",
         st.auth_rate_limits.login_attempts_global,
-    )?;
+    )
+    .await?;
     auth_rate_limit(
         &st,
         &req.email,
         "login-account",
         st.auth_rate_limits.login_attempts_per_account,
-    )?;
+    )
+    .await?;
     // We copy the hash, then release the lock before the slow verification.
     let phc = st
         .read()
+        .await
         .accounts
         .get(&req.email)
         .map(|a| a.auth_hash.clone());
@@ -1235,7 +1457,7 @@ async fn create_session(
     }
     let now = Instant::now();
     let expires_at = now + st.token_ttl;
-    let mut inner = st.write();
+    let mut inner = st.write().await;
     inner.sessions.retain(|_, session| now < session.expires_at);
     let oldest = inner
         .sessions
@@ -1281,7 +1503,7 @@ async fn authenticate_vault_transaction(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    let email = require_auth(&st, request.headers())?;
+    let email = require_auth(&st, request.headers()).await?;
     request.extensions_mut().insert(AuthenticatedAccount(email));
     Ok(next.run(request).await)
 }
@@ -1290,9 +1512,9 @@ async fn get_vault(
     State(st): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<VaultResponse>, ApiError> {
-    let email = require_auth(&st, &headers)?;
-    rate_limit(&st, &email, "vault-read", MAX_VAULT_READS_PER_MIN)?;
-    let inner = st.read();
+    let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "vault-read", MAX_VAULT_READS_PER_MIN).await?;
+    let inner = st.read().await;
     let acc = inner
         .accounts
         .get(&email)
@@ -1311,14 +1533,15 @@ async fn get_vault_revision(
     State(st): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<VaultRevisionResponse>, ApiError> {
-    let email = require_auth(&st, &headers)?;
+    let email = require_auth(&st, &headers).await?;
     rate_limit(
         &st,
         &email,
         "vault-revision-read",
         MAX_VAULT_REVISION_READS_PER_MIN,
-    )?;
-    let inner = st.read();
+    )
+    .await?;
+    let inner = st.read().await;
     let revision = inner
         .accounts
         .get(&email)
@@ -1384,7 +1607,7 @@ async fn apply_vault_transaction(
         operations.push(prepared);
     }
 
-    let mut inner = st.write();
+    let mut inner = st.write().await;
     let acc = inner
         .accounts
         .get_mut(&email)
@@ -1415,7 +1638,8 @@ async fn apply_vault_transaction(
         next_revision,
         &operations,
         Some(&manifest_json),
-    )?;
+    )
+    .await?;
 
     for operation in operations {
         match operation {
@@ -1450,7 +1674,7 @@ async fn put_item(
     Json(body): Json<BlobBody>,
 ) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
     validate_item_id(&id)?;
-    let email = require_auth(&st, &headers)?;
+    let email = require_auth(&st, &headers).await?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
     if blob_json.len() > MAX_VAULT_BLOB_BYTES {
@@ -1459,7 +1683,7 @@ async fn put_item(
     // Keep persistence and the read cache in one ordered critical section. If
     // concurrent requests write the same id, the cache winner must be the same
     // request as the SQLite winner.
-    let mut inner = st.write();
+    let mut inner = st.write().await;
     let acc = inner
         .accounts
         .get_mut(&email)
@@ -1494,7 +1718,8 @@ async fn put_item(
         next_revision,
         &operations,
         None,
-    )?;
+    )
+    .await?;
     acc.stored_bytes = next_bytes;
     acc.item_bytes.insert(id.clone(), blob_json.len());
     acc.items.insert(id, body.blob);
@@ -1508,8 +1733,8 @@ async fn delete_item(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
     validate_item_id(&id)?;
-    let email = require_auth(&st, &headers)?;
-    let mut inner = st.write();
+    let email = require_auth(&st, &headers).await?;
+    let mut inner = st.write().await;
     let acc = inner
         .accounts
         .get_mut(&email)
@@ -1523,7 +1748,8 @@ async fn delete_item(
         next_revision,
         &operations,
         None,
-    )?;
+    )
+    .await?;
     if let Some(bytes) = acc.item_bytes.remove(&id) {
         acc.stored_bytes = acc.stored_bytes.saturating_sub(bytes);
     }
@@ -1537,7 +1763,7 @@ async fn put_manifest(
     headers: HeaderMap,
     Json(body): Json<BlobBody>,
 ) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
-    let email = require_auth(&st, &headers)?;
+    let email = require_auth(&st, &headers).await?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
     if blob_json.len() > MAX_VAULT_MANIFEST_BYTES {
@@ -1546,7 +1772,7 @@ async fn put_manifest(
             "manifest too large",
         ));
     }
-    let mut inner = st.write();
+    let mut inner = st.write().await;
     let acc = inner
         .accounts
         .get_mut(&email)
@@ -1568,7 +1794,8 @@ async fn put_manifest(
         next_revision,
         &[],
         Some(&blob_json),
-    )?;
+    )
+    .await?;
     acc.stored_bytes = next_bytes;
     acc.manifest_bytes = blob_json.len();
     acc.manifest = Some(body.blob);
@@ -1641,7 +1868,7 @@ fn projected_vault_usage(
     Ok((item_count, stored_bytes))
 }
 
-fn persist_vault_mutation(
+async fn persist_vault_mutation(
     st: &AppState,
     email: &str,
     expected_revision: u64,
@@ -1658,7 +1885,8 @@ fn persist_vault_mutation(
             operations,
             manifest_json,
         )
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+        .await
+        .map_err(db_api_error)?
     {
         DbVaultMutation::Applied => Ok(()),
         // The instance lock excludes other Bastion servers. A DB-only conflict
@@ -1811,7 +2039,7 @@ async fn delete_session(
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let token = bearer_token(&headers)?.to_string();
-    st.write().sessions.remove(&token);
+    st.write().await.sessions.remove(&token);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1826,14 +2054,14 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
 
 /// Validates the token (existence + non-expiration) and returns the email.
 /// Evicts an expired token along the way.
-fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
+async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     let token = bearer_token(headers)?.to_string();
     let now = Instant::now();
     // Fast path: a valid, unexpired token needs only a READ lock, so concurrent
     // authenticated requests (every GET /vault, /send/inbox…) don't serialize on
     // the global write lock just to be validated.
     {
-        let inner = st.read();
+        let inner = st.read().await;
         match inner.sessions.get(&token) {
             Some(s) if now < s.expires_at => return Ok(s.email.clone()),
             Some(_) => {} // expired → fall through to evict under the write lock
@@ -1842,7 +2070,7 @@ fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> 
     }
     // Slow path: the token exists but is expired — take the write lock to evict
     // it. Re-check under the lock in case another request already refreshed it.
-    let mut inner = st.write();
+    let mut inner = st.write().await;
     match inner.sessions.get(&token) {
         Some(s) if now < s.expires_at => Ok(s.email.clone()),
         Some(_) => {
@@ -1959,8 +2187,8 @@ fn rate_limit_map(
 
 /// Send abuse limits are kept separate from unauthenticated auth limits so an
 /// attacker cannot consume one subsystem's counter capacity through the other.
-fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
-    let mut inner = st.write();
+async fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
+    let mut inner = st.write().await;
     rate_limit_map(
         &mut inner.rate,
         st.max_rate_entries,
@@ -1971,8 +2199,13 @@ fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<()
     )
 }
 
-fn auth_rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
-    let mut inner = st.write();
+async fn auth_rate_limit(
+    st: &AppState,
+    subject: &str,
+    bucket: &str,
+    max: u32,
+) -> Result<(), ApiError> {
+    let mut inner = st.write().await;
     rate_limit_map(
         &mut inner.auth_rate,
         st.auth_rate_limits.max_entries,
@@ -2003,224 +2236,254 @@ impl Db {
 
     /// Publish once. Identical retries are idempotent; changing either key or
     /// the version requires a future proof-authorized rotation protocol.
-    fn publish_identity(
+    async fn publish_identity(
         &self,
         email: &str,
         public: &PublicIdentity,
         public_json: &str,
-    ) -> rusqlite::Result<IdentityPublication> {
-        let conn = self.lock();
-        let existing: Option<(String, String)> = conn
-            .query_row(
-                "SELECT bastion_id, public FROM send_directory WHERE email=?1",
-                [email],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if let Some((bastion_id, stored_public)) = existing {
-            return Self::classify_existing_identity(bastion_id, &stored_public, public);
-        }
-        // New account: retry generation on the (astronomically rare) id collision.
-        for _ in 0..8 {
-            let id = new_bastion_id();
-            match conn.execute(
-                "INSERT INTO send_directory(email, bastion_id, public, created_at) VALUES(?1,?2,?3,?4)",
-                params![email, id, public_json, now_secs()],
-            ) {
-                Ok(_) => return Ok(IdentityPublication::Published(id)),
-                Err(rusqlite::Error::SqliteFailure(e, _))
-                    if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    // Resolve any competing/direct insert as either an
-                    // idempotent success or an immutable-identity conflict.
-                    let existing: Option<(String, String)> = conn
-                        .query_row(
-                            "SELECT bastion_id, public FROM send_directory WHERE email=?1",
-                            [email],
-                            |row| Ok((row.get(0)?, row.get(1)?)),
-                        )
-                        .optional()?;
-                    if let Some((bastion_id, stored_public)) = existing {
-                        return Self::classify_existing_identity(
-                            bastion_id,
-                            &stored_public,
-                            public,
-                        );
-                    }
-                    continue;
-                }
-                Err(e) => return Err(e),
+    ) -> Result<IdentityPublication, DbError> {
+        let email = email.to_owned();
+        let public = public.clone();
+        let public_json = public_json.to_owned();
+        self.call_mutation(move |conn| {
+            let existing: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT bastion_id, public FROM send_directory WHERE email=?1",
+                    [&email],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+            if let Some((bastion_id, stored_public)) = existing {
+                return Self::classify_existing_identity(bastion_id, &stored_public, &public);
             }
-        }
-        // 8 consecutive 128-bit collisions is statistically impossible; surface
-        // a generic error (the handler maps it to 500).
-        Err(rusqlite::Error::QueryReturnedNoRows)
+            // New account: retry generation on the (astronomically rare) id collision.
+            for _ in 0..8 {
+                let id = new_bastion_id();
+                match conn.execute(
+                    "INSERT INTO send_directory(email, bastion_id, public, created_at) VALUES(?1,?2,?3,?4)",
+                    params![email, id, public_json, now_secs()],
+                ) {
+                    Ok(_) => return Ok(IdentityPublication::Published(id)),
+                    Err(rusqlite::Error::SqliteFailure(e, _))
+                        if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+                    {
+                        // Resolve any competing/direct insert as either an
+                        // idempotent success or an immutable-identity conflict.
+                        let existing: Option<(String, String)> = conn
+                            .query_row(
+                                "SELECT bastion_id, public FROM send_directory WHERE email=?1",
+                                [&email],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .optional()?;
+                        if let Some((bastion_id, stored_public)) = existing {
+                            return Self::classify_existing_identity(
+                                bastion_id,
+                                &stored_public,
+                                &public,
+                            );
+                        }
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            // 8 consecutive 128-bit collisions is statistically impossible; surface
+            // a generic error (the handler maps it to 500).
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        })
+        .await
     }
 
-    fn whoami(&self, email: &str) -> rusqlite::Result<Option<(String, String)>> {
-        self.lock()
-            .query_row(
+    async fn whoami(&self, email: &str) -> Result<Option<(String, String)>, DbError> {
+        let email = email.to_owned();
+        self.call(move |conn| {
+            conn.query_row(
                 "SELECT bastion_id, public FROM send_directory WHERE email=?1",
-                [email],
+                [&email],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
             )
             .optional()
+        })
+        .await
     }
 
-    fn directory_lookup(&self, bastion_id: &str) -> rusqlite::Result<Option<String>> {
-        self.lock()
-            .query_row(
+    async fn directory_lookup(&self, bastion_id: &str) -> Result<Option<String>, DbError> {
+        let bastion_id = bastion_id.to_owned();
+        self.call(move |conn| {
+            conn.query_row(
                 "SELECT public FROM send_directory WHERE bastion_id=?1",
-                [bastion_id],
+                [&bastion_id],
                 |r| r.get(0),
             )
             .optional()
+        })
+        .await
     }
 
-    fn bastion_id_for(&self, email: &str) -> rusqlite::Result<Option<String>> {
-        self.lock()
-            .query_row(
+    async fn bastion_id_for(&self, email: &str) -> Result<Option<String>, DbError> {
+        let email = email.to_owned();
+        self.call(move |conn| {
+            conn.query_row(
                 "SELECT bastion_id FROM send_directory WHERE email=?1",
-                [email],
+                [&email],
                 |r| r.get(0),
             )
             .optional()
+        })
+        .await
     }
 
     /// Atomically enforce the quota and insert (one lock hold → no count/insert
     /// TOCTOU). Dedupe is per-recipient (PK is `(recipient_id, message_id)`).
-    fn insert_inbox(
+    async fn insert_inbox(
         &self,
         message_id: &str,
         recipient_id: &str,
         blob: &str,
         expires_at: Option<i64>,
         max: i64,
-    ) -> rusqlite::Result<InboxInsert> {
-        let conn = self.lock();
-        let recipient_exists = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM send_directory WHERE bastion_id=?1)",
-            [recipient_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !recipient_exists {
-            return Ok(InboxInsert::UnknownRecipient);
-        }
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM send_inbox WHERE recipient_id=?1",
-            [recipient_id],
-            |r| r.get(0),
-        )?;
-        if count >= max {
-            return Ok(InboxInsert::Full);
-        }
-        let n = conn.execute(
-            "INSERT OR IGNORE INTO send_inbox(message_id, recipient_id, blob, created_at, expires_at)
-             VALUES(?1,?2,?3,?4,?5)",
-            params![message_id, recipient_id, blob, now_secs(), expires_at],
-        )?;
-        Ok(if n > 0 {
-            InboxInsert::Inserted
-        } else {
-            InboxInsert::Duplicate
+    ) -> Result<InboxInsert, DbError> {
+        let message_id = message_id.to_owned();
+        let recipient_id = recipient_id.to_owned();
+        let blob = blob.to_owned();
+        self.call_mutation(move |conn| {
+            let recipient_exists = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM send_directory WHERE bastion_id=?1)",
+                [&recipient_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !recipient_exists {
+                return Ok(InboxInsert::UnknownRecipient);
+            }
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM send_inbox WHERE recipient_id=?1",
+                [&recipient_id],
+                |r| r.get(0),
+            )?;
+            if count >= max {
+                return Ok(InboxInsert::Full);
+            }
+            let n = conn.execute(
+                "INSERT OR IGNORE INTO send_inbox(message_id, recipient_id, blob, created_at, expires_at)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![message_id, recipient_id, blob, now_secs(), expires_at],
+            )?;
+            Ok(if n > 0 {
+                InboxInsert::Inserted
+            } else {
+                InboxInsert::Duplicate
+            })
         })
+        .await
     }
 
-    fn purge_expired(&self, recipient_id: &str, now: i64) -> rusqlite::Result<()> {
-        let mut conn = self.lock();
-        let tx = conn.transaction()?;
-        {
-            let mut stmt = tx.prepare(
-                "SELECT created_at, expires_at FROM send_inbox
+    async fn purge_expired(&self, recipient_id: &str, now: i64) -> Result<(), DbError> {
+        let recipient_id = recipient_id.to_owned();
+        self.call_mutation(move |conn| {
+            let tx = conn.transaction()?;
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT created_at, expires_at FROM send_inbox
+                     WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
+                )?;
+                let rows = stmt.query_map(params![recipient_id, now], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                for row in rows {
+                    let (created_at, expires_at) = row?;
+                    if created_at <= 0
+                        || expires_at <= created_at
+                        || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
+                    {
+                        return Err(stored_data_error(
+                            1,
+                            rusqlite::types::Type::Integer,
+                            io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
+                        ));
+                    }
+                }
+            }
+            tx.execute(
+                "DELETE FROM send_inbox
                  WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
+                params![recipient_id, now],
             )?;
-            let rows = stmt.query_map(params![recipient_id, now], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })?;
-            for row in rows {
-                let (created_at, expires_at) = row?;
-                if created_at <= 0
-                    || expires_at <= created_at
-                    || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
-                {
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn inbox_list(&self, recipient_id: &str, now: i64) -> Result<Vec<InboxItem>, DbError> {
+        let recipient_id = recipient_id.to_owned();
+        self.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT message_id, blob, created_at, expires_at FROM send_inbox
+             WHERE recipient_id=?1 AND (expires_at IS NULL OR expires_at >= ?2)
+             ORDER BY created_at ASC LIMIT ?3",
+            )?;
+            let rows = stmt.query_map(params![recipient_id, now, MAX_INBOX_PAGE], |r| {
+                let message_id: String = r.get(0)?;
+                let blob_json: String = r.get(1)?;
+                let created_at: i64 = r.get(2)?;
+                let expires_at: Option<i64> = r.get(3)?;
+                let blob: SendBlob = serde_json::from_str(&blob_json)
+                    .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
+                if !valid_message_id(&message_id) {
                     return Err(stored_data_error(
-                        1,
+                        0,
+                        rusqlite::types::Type::Text,
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid stored message id"),
+                    ));
+                }
+                blob.validate_stored_routing(&message_id, &recipient_id)
+                    .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
+                if created_at <= 0 {
+                    return Err(stored_data_error(
+                        2,
+                        rusqlite::types::Type::Integer,
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid stored creation time"),
+                    ));
+                }
+                if expires_at.is_some_and(|expires_at| {
+                    expires_at <= created_at
+                        || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
+                }) {
+                    return Err(stored_data_error(
+                        3,
                         rusqlite::types::Type::Integer,
                         io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
                     ));
                 }
+                Ok(InboxItem {
+                    message_id,
+                    blob,
+                    created_at,
+                    expires_at,
+                })
+            })?;
+            // Propagate DB row errors instead of silently dropping them.
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
             }
-        }
-        tx.execute(
-            "DELETE FROM send_inbox
-             WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
-            params![recipient_id, now],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    fn inbox_list(&self, recipient_id: &str, now: i64) -> rusqlite::Result<Vec<InboxItem>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare(
-            "SELECT message_id, blob, created_at, expires_at FROM send_inbox
-             WHERE recipient_id=?1 AND (expires_at IS NULL OR expires_at >= ?2)
-             ORDER BY created_at ASC LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(params![recipient_id, now, MAX_INBOX_PAGE], |r| {
-            let message_id: String = r.get(0)?;
-            let blob_json: String = r.get(1)?;
-            let created_at: i64 = r.get(2)?;
-            let expires_at: Option<i64> = r.get(3)?;
-            let blob: SendBlob = serde_json::from_str(&blob_json)
-                .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
-            if !valid_message_id(&message_id) {
-                return Err(stored_data_error(
-                    0,
-                    rusqlite::types::Type::Text,
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid stored message id"),
-                ));
-            }
-            blob.validate_stored_routing(&message_id, recipient_id)
-                .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
-            if created_at <= 0 {
-                return Err(stored_data_error(
-                    2,
-                    rusqlite::types::Type::Integer,
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid stored creation time"),
-                ));
-            }
-            if expires_at.is_some_and(|expires_at| {
-                expires_at <= created_at
-                    || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
-            }) {
-                return Err(stored_data_error(
-                    3,
-                    rusqlite::types::Type::Integer,
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
-                ));
-            }
-            Ok(InboxItem {
-                message_id,
-                blob,
-                created_at,
-                expires_at,
-            })
-        })?;
-        // Propagate DB row errors instead of silently dropping them.
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
+            Ok(out)
+        })
+        .await
     }
 
     /// Delete a message only if it belongs to `recipient_id` (read-once).
-    fn inbox_delete(&self, message_id: &str, recipient_id: &str) -> rusqlite::Result<usize> {
-        self.lock().execute(
-            "DELETE FROM send_inbox WHERE message_id=?1 AND recipient_id=?2",
-            params![message_id, recipient_id],
-        )
+    async fn inbox_delete(&self, message_id: &str, recipient_id: &str) -> Result<usize, DbError> {
+        let message_id = message_id.to_owned();
+        let recipient_id = recipient_id.to_owned();
+        self.call_mutation(move |conn| {
+            conn.execute(
+                "DELETE FROM send_inbox WHERE message_id=?1 AND recipient_id=?2",
+                params![message_id, recipient_id],
+            )
+        })
+        .await
     }
 }
 
@@ -2267,7 +2530,7 @@ async fn publish_identity(
     headers: HeaderMap,
     Json(public): Json<PublicIdentity>,
 ) -> Result<Json<PublishResponse>, ApiError> {
-    let email = require_auth(&st, &headers)?;
+    let email = require_auth(&st, &headers).await?;
     public
         .validate()
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid public identity"))?;
@@ -2281,14 +2544,15 @@ async fn publish_identity(
     }
     // Serialize publication with account deletion. A request authenticated just
     // before deletion must not recreate an orphaned directory entry afterward.
-    let inner = st.write();
+    let inner = st.write().await;
     if !inner.accounts.contains_key(&email) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
     }
     let publication = st
         .db
         .publish_identity(&email, &public, &public_json)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+        .await
+        .map_err(db_api_error)?;
     match publication {
         IdentityPublication::Published(bastion_id) => Ok(Json(PublishResponse { bastion_id })),
         IdentityPublication::Conflict => Err(ApiError(
@@ -2303,12 +2567,8 @@ async fn send_whoami(
     State(st): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<WhoAmI>, ApiError> {
-    let email = require_auth(&st, &headers)?;
-    match st
-        .db
-        .whoami(&email)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
-    {
+    let email = require_auth(&st, &headers).await?;
+    match st.db.whoami(&email).await.map_err(db_api_error)? {
         Some((bastion_id, public)) => {
             let public = serde_json::from_str::<PublicIdentity>(&public).map_err(|_| {
                 ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid stored identity")
@@ -2329,15 +2589,16 @@ async fn send_directory(
     headers: HeaderMap,
     Path(bastion_id): Path<String>,
 ) -> Result<Json<PublicIdentity>, ApiError> {
-    let email = require_auth(&st, &headers)?;
-    rate_limit(&st, &email, "lookup", MAX_LOOKUPS_PER_MIN)?;
+    let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "lookup", MAX_LOOKUPS_PER_MIN).await?;
     if !valid_bastion_id(&bastion_id) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad bastion id"));
     }
     match st
         .db
         .directory_lookup(&bastion_id)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+        .await
+        .map_err(db_api_error)?
     {
         Some(public) => {
             let public = serde_json::from_str::<PublicIdentity>(&public).map_err(|_| {
@@ -2358,8 +2619,8 @@ async fn send_post(
     headers: HeaderMap,
     Json(body): Json<SendPost>,
 ) -> Result<StatusCode, ApiError> {
-    let email = require_auth(&st, &headers)?;
-    rate_limit(&st, &email, "send", MAX_SENDS_PER_MIN)?;
+    let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "send", MAX_SENDS_PER_MIN).await?;
 
     let blob_str = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad blob"))?;
@@ -2376,7 +2637,8 @@ async fn send_post(
     let recipient_json = st
         .db
         .directory_lookup(&body.recipient_id)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+        .await
+        .map_err(db_api_error)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "unknown recipient"))?;
     let recipient = serde_json::from_str::<PublicIdentity>(&recipient_json)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "invalid stored identity"))?;
@@ -2390,10 +2652,11 @@ async fn send_post(
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid expiration"));
     }
     // Per-recipient throttle (anti inbox-flood), on top of the per-sender cap.
-    rate_limit(&st, &body.recipient_id, "inbound", MAX_INBOUND_PER_MIN)?;
+    rate_limit(&st, &body.recipient_id, "inbound", MAX_INBOUND_PER_MIN).await?;
     st.db
         .purge_expired(&body.recipient_id, now)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+        .await
+        .map_err(db_api_error)?;
     // Atomic quota + dedupe (single lock → no TOCTOU).
     match st
         .db
@@ -2404,7 +2667,8 @@ async fn send_post(
             body.expires_at,
             MAX_INBOX,
         )
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+        .await
+        .map_err(db_api_error)?
     {
         InboxInsert::Inserted => Ok(StatusCode::NO_CONTENT),
         InboxInsert::Duplicate => Err(ApiError(StatusCode::CONFLICT, "duplicate message")),
@@ -2421,21 +2685,20 @@ async fn send_inbox(
     State(st): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<InboxItem>>, ApiError> {
-    let email = require_auth(&st, &headers)?;
-    rate_limit(&st, &email, "inbox-read", MAX_INBOX_READS_PER_MIN)?;
+    let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "inbox-read", MAX_INBOX_READS_PER_MIN).await?;
     let mine = st
         .db
         .bastion_id_for(&email)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+        .await
+        .map_err(db_api_error)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no identity published"))?;
     let now = now_secs();
     st.db
         .purge_expired(&mine, now)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
-    let items = st
-        .db
-        .inbox_list(&mine, now)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+        .await
+        .map_err(db_api_error)?;
+    let items = st.db.inbox_list(&mine, now).await.map_err(db_api_error)?;
     Ok(Json(items))
 }
 
@@ -2445,18 +2708,20 @@ async fn send_inbox_delete(
     headers: HeaderMap,
     Path(message_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let email = require_auth(&st, &headers)?;
+    let email = require_auth(&st, &headers).await?;
     if !valid_message_id(&message_id) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad message id"));
     }
     let mine = st
         .db
         .bastion_id_for(&email)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
+        .await
+        .map_err(db_api_error)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no identity published"))?;
     st.db
         .inbox_delete(&message_id, &mine)
-        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+        .await
+        .map_err(db_api_error)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2464,19 +2729,90 @@ async fn send_inbox_delete(
 mod tests {
     use super::*;
 
-    #[test]
-    fn connection_pragmas_are_hardened() {
-        let db = Db::open(":memory:");
-        let conn = db.lock();
-        let busy_timeout: i64 = conn
-            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+    #[tokio::test(flavor = "current_thread")]
+    async fn connection_pragmas_are_hardened() {
+        let (db, _) = Db::open(":memory:");
+        let (busy_timeout, synchronous) = db
+            .call(|conn| {
+                Ok((
+                    conn.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, i64>(0))?,
+                    conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))?,
+                ))
+            })
+            .await
             .unwrap();
         assert_eq!(busy_timeout, 5000);
         // 2 = FULL. In WAL mode this syncs every commit before acknowledgement.
-        let synchronous: i64 = conn
-            .query_row("PRAGMA synchronous", [], |r| r.get(0))
-            .unwrap();
         assert_eq!(synchronous, 2);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_sqlite_does_not_block_tokio_and_queue_saturation_fails_fast() {
+        let (db, _) = Db::open_with_limits(":memory:", 1, Duration::from_secs(1));
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+
+        let blocked_db = db.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_db
+                .call(move |_| {
+                    entered_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        // A current-thread timer and liveness response still progress while the
+        // SQLite owner is deliberately blocked on another OS thread.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            assert_eq!(liveness().await.status(), StatusCode::OK);
+        })
+        .await
+        .unwrap();
+
+        let queued_db = db.clone();
+        let queued = tokio::spawn(async move { queued_db.call(|_| Ok(())).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while db.sender.capacity() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(db.call(|_| Ok(())).await, Err(DbError::QueueFull)));
+
+        release_sender.send(()).unwrap();
+        blocked.await.unwrap().unwrap();
+        queued.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delayed_accepted_mutation_finishes_then_quarantines_the_instance() {
+        let (db, _) = Db::open_with_limits(":memory:", 1, Duration::from_millis(10));
+        let completed = Arc::new(AtomicBool::new(false));
+        let worker_completed = completed.clone();
+
+        db.call_mutation(move |conn| {
+            thread::sleep(Duration::from_millis(50));
+            conn.execute("CREATE TABLE delayed(value INTEGER)", [])?;
+            worker_completed.store(true, Ordering::Release);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(completed.load(Ordering::Acquire));
+        assert!(!db.is_available());
+        assert!(matches!(db.ready().await, Err(DbError::Quarantined)));
     }
 
     #[test]
@@ -2499,6 +2835,8 @@ mod tests {
         // Fixed routes pass through unchanged.
         assert_eq!(redacted_path("/vault"), "/vault");
         assert_eq!(redacted_path("/health"), "/health");
+        assert_eq!(redacted_path("/livez"), "/livez");
+        assert_eq!(redacted_path("/readyz"), "/readyz");
         assert_eq!(redacted_path("/send/inbox"), "/send/inbox");
     }
 }

@@ -1042,9 +1042,11 @@ async fn rejects_invalid_item_ids_and_oversized_blobs() {
 #[tokio::test]
 async fn health_ok() {
     let app = server::app_in_memory();
-    let (s, body) = send(&app, "GET", "/health", None, None).await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(body, Value::Null); // "ok" is plain text, not JSON
+    for route in ["/health", "/livez", "/readyz"] {
+        let (status, body) = send(&app, "GET", route, None, None).await;
+        assert_eq!(status, StatusCode::OK, "{route} was not healthy");
+        assert_eq!(body, Value::Null); // "ok" is plain text, not JSON
+    }
 }
 
 #[tokio::test]
@@ -1234,6 +1236,12 @@ async fn health_reports_unavailable_when_the_schema_is_gone() {
     drop(breaker);
 
     let (s, _) = send(&app, "GET", "/health", None, None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    let (s, _) = send(&app, "GET", "/readyz", None, None).await;
+    assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
+    let (s, _) = send(&app, "GET", "/livez", None, None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(&app, "POST", "/accounts", None, Some(json!({}))).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
 }
 
