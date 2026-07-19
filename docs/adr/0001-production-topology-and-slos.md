@@ -63,10 +63,13 @@ and simultaneous server replicas are unsupported. Backups must use a
 SQLite-aware snapshot mechanism and be copied, encrypted, to a failure domain
 outside the application host.
 
-The next storage change must move synchronous SQLite work off Tokio executor
-threads without weakening the single-owner boundary. A bounded command queue
-and one dedicated storage owner are preferred over unbounded `spawn_blocking`
-tasks or a pool of competing connections.
+Synchronous SQLite work runs off Tokio executor threads without weakening the
+single-owner boundary. A bounded command queue feeds one dedicated storage
+owner. Queue saturation fails fast. If an accepted command exceeds its response
+deadline, the process withdraws readiness; an accepted mutation still finishes
+under its logical cache lock before the process remains quarantined for restart.
+Unbounded `spawn_blocking` tasks and pools of competing SQLite connections are
+explicitly rejected.
 
 ### Availability and durability objectives
 

@@ -126,9 +126,13 @@ The current server is intentionally **single-instance per database**. It holds
 an advisory `<database>-server.lock` for its full lifetime and refuses to start
 a second Bastion server against the same SQLite file. This is required because
 the account read cache, sessions, and rate-limit counters are process-local.
-The server also serializes synchronous `rusqlite` operations through one
-connection; storage latency can therefore block request executor threads. Do
-not deploy multiple replicas or treat this backend as production-scale. The
+The server serializes synchronous `rusqlite` operations through one dedicated
+storage thread behind a bounded command queue. Storage latency therefore does
+not block Tokio executor threads; queue saturation fails fast and a delayed
+accepted mutation is completed under its logical cache lock before the
+instance quarantines itself. `/livez` remains independent of storage, while
+`/readyz` and the legacy `/health` route fail closed on storage faults. Do not
+deploy multiple replicas or treat this backend as production-scale. The
 database must live on a local filesystem with reliable advisory locks and sync
 semantics; network and distributed filesystems are unsupported. Stop the server
 for filesystem-level copies, or use a SQLite-aware backup tool that respects
@@ -144,6 +148,7 @@ service objectives, decision gates, and remaining production blockers.
 
 | Method | Route | Role |
 |---|---|---|
+| `GET` | `/v1/livez` · `/v1/readyz` | Process liveness without storage · SQLite-backed routing readiness |
 | `POST` | `/v1/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
 | `DELETE` | `/v1/accounts` | Permanently deletes owned state; requires a session plus fresh `auth_secret` proof |
 | `GET` | `/v1/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
@@ -196,8 +201,9 @@ cd extension && ./build.sh                   # build the WASM module
 # then load `extension/` unpacked at chrome://extensions
 ```
 
-> ⚠️ The server is **not production-ready**: it has no TLS/CORS, its stateful
-> controls are process-local, and synchronous SQLite calls can block request
-> executor threads. The exclusive instance lock rejects horizontal replicas;
-> it does not make this a production deployment. This is a zero-knowledge
-> reference backend for development.
+> ⚠️ The server is **not production-ready**: it has no production TLS/origin
+> boundary, its stateful controls are process-local, and versioned
+> migrations/backup-restore drills are not implemented. The exclusive instance
+> lock and isolated SQLite owner reject horizontal replicas; they do not make
+> this a production deployment. This is a zero-knowledge reference backend for
+> development.
