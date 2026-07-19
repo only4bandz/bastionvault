@@ -1,7 +1,7 @@
 // Client for the zero-knowledge sync server. In dev, requests go through the
 // Vite proxy (/api -> http://127.0.0.1:7777). The server only ever sees opaque
 // encrypted blobs + a hash of the auth secret — never plaintext.
-const BASE = "/api";
+const BASE = "/api/v1";
 const REQUEST_TIMEOUT_MS = 15_000;
 export const MAX_ERROR_BODY_CHARS = 4096;
 export const MAX_SERVER_DETAIL_CHARS = 200;
@@ -148,6 +148,8 @@ export const api = {
   login: (email: string, auth_secret: string) =>
     req<{ token: string }>("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),
   logout: (token: string) => req<void>("DELETE", "/sessions", token),
+  deleteAccount: (token: string, auth_secret: string) =>
+    req<void>("DELETE", "/accounts", token, { auth_secret }),
   getVault: (token: string) => req<VaultData>("GET", "/vault", token),
   mutateVault: (
     token: string,

@@ -110,6 +110,12 @@ file (sticky temporary directories remain supported). Database artifacts with
 hard links are also rejected so an alternate pathname cannot bypass the
 owner-only mode.
 
+The canonical HTTP API is namespaced under `/v1`. Unversioned routes remain as
+a temporary compatibility surface and return `Deprecation: true` plus a
+successor-version link. Account "email" values are unverified login identifiers:
+the current server has no mail-verification, recovery, or notification channel,
+so an address must never be treated as proof of mailbox ownership or identity.
+
 SQLite runs in WAL mode with `synchronous=FULL`. A successful mutation is not
 acknowledged until SQLite has requested a WAL sync for that commit, protecting
 acknowledged writes across process/OS crashes and power loss to the extent that
@@ -130,16 +136,17 @@ the live database and WAL.
 
 | Method | Route | Role |
 |---|---|---|
-| `POST` | `/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
-| `GET` | `/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
-| `POST` / `DELETE` | `/sessions` | Login (Argon2id) → bearer token (TTL 30 min) / logout |
-| `GET` | `/vault` | Encrypted items + manifest + CAS revision (auth) |
-| `PUT` | `/vault/transaction` | Atomically apply item operations + sealed manifest at an expected revision |
-| `PUT`/`DELETE` | `/vault/items/:id` | Deprecated compatibility endpoint; use `/vault/transaction` |
-| `PUT` | `/vault/manifest` | Deprecated compatibility endpoint; use `/vault/transaction` |
-| `PUT` | `/send/identity` | Publish a Send identity once (identical retries allowed) → stable Bastion address |
-| `GET` | `/send/whoami` · `/send/directory/:id` | Your address · resolve a contact (exact-match, rate-limited) |
-| `POST` `/send` · `GET` `/send/inbox` · `DELETE` `/send/inbox/:id` | Validate and deliver / pull / read-once delete an opaque blob (explicit expiry ≤ 7 days) |
+| `POST` | `/v1/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
+| `DELETE` | `/v1/accounts` | Permanently deletes owned state; requires a session plus fresh `auth_secret` proof |
+| `GET` | `/v1/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
+| `POST` / `DELETE` | `/v1/sessions` | Login (Argon2id) → bearer token (TTL 30 min) / logout |
+| `GET` | `/v1/vault` | Encrypted items + manifest + CAS revision (auth) |
+| `PUT` | `/v1/vault/transaction` | Atomically apply item operations + sealed manifest at an expected revision |
+| `PUT`/`DELETE` | `/v1/vault/items/:id` | Deprecated compatibility endpoint; use `/v1/vault/transaction` |
+| `PUT` | `/v1/vault/manifest` | Deprecated compatibility endpoint; use `/v1/vault/transaction` |
+| `PUT` | `/v1/send/identity` | Publish a Send identity once (identical retries allowed) → stable Bastion address |
+| `GET` | `/v1/send/whoami` · `/v1/send/directory/:id` | Your address · resolve a contact (exact-match, rate-limited) |
+| `POST` `/v1/send` · `GET` `/v1/send/inbox` · `DELETE` `/v1/send/inbox/:id` | Validate and deliver / pull / read-once delete an opaque blob (explicit expiry ≤ 7 days) |
 
 ```bash
 cargo run -p server          # listens on http://127.0.0.1:7777

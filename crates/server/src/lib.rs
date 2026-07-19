@@ -89,6 +89,7 @@ const MAX_LOOKUPS_PER_MIN: u32 = 120;
 // are cheap amplification levers for a hostile-but-authenticated client.
 const MAX_VAULT_READS_PER_MIN: u32 = 60;
 const MAX_INBOX_READS_PER_MIN: u32 = 60;
+const MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN: u32 = 5;
 const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
 
 fn now_secs() -> i64 {
@@ -246,9 +247,9 @@ fn build_with_rate_limits(
             state.clone(),
             authenticate_vault_transaction,
         ));
-    Router::new()
+    let routes = Router::new()
         .route("/health", get(health))
-        .route("/accounts", post(create_account))
+        .route("/accounts", post(create_account).delete(delete_account))
         .route("/accounts/:email/prelogin", get(prelogin))
         .route("/sessions", post(create_session).delete(delete_session))
         .route("/vault", get(get_vault))
@@ -264,11 +265,29 @@ fn build_with_rate_limits(
         .route(
             "/send/inbox/:message_id",
             axum::routing::delete(send_inbox_delete),
-        )
+        );
+    let legacy = routes
+        .clone()
+        .layer(middleware::from_fn(legacy_api_headers));
+    Router::new()
+        .merge(legacy)
+        .nest("/v1", routes)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(request_log))
         .with_state(state)
+}
+
+async fn legacy_api_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert("deprecation", HeaderValue::from_static("true"));
+    response.headers_mut().insert(
+        header::LINK,
+        HeaderValue::from_static("</v1>; rel=\"successor-version\""),
+    );
+    response
 }
 
 /// Stamps defensive headers on every response, including errors.
@@ -279,6 +298,9 @@ fn build_with_rate_limits(
 /// request log never records an email address (`/accounts/:email/prelogin`) or
 /// an opaque routing id. Everything else is a fixed route shape.
 fn redacted_path(path: &str) -> String {
+    if let Some(versioned) = path.strip_prefix("/v1") {
+        return format!("/v1{}", redacted_path(versioned));
+    }
     if path.starts_with("/accounts/") && path.ends_with("/prelogin") {
         return "/accounts/{email}/prelogin".to_string();
     }
@@ -610,10 +632,9 @@ impl Db {
         }
         .expect("open database");
         conn.execute_batch(
-            // busy_timeout: with several processes sharing the DB (a supported
-            // deployment — see create_account), cross-process lock contention
-            // should wait a bounded moment instead of surfacing an instant
-            // SQLITE_BUSY that handlers can only map to an opaque 500.
+            // busy_timeout: a SQLite-aware backup or administrative connection
+            // can briefly hold a database lock. Wait a bounded moment instead
+            // of surfacing an immediate SQLITE_BUSY as an opaque 500.
             // synchronous=FULL: in WAL mode SQLite syncs the WAL after every
             // commit before acknowledging it. NORMAL preserves consistency but
             // can lose an acknowledged transaction after an OS crash or power
@@ -689,7 +710,7 @@ impl Db {
     }
 
     /// Inserts a new account without ever replacing an existing credential.
-    /// Returns `false` when another request or process already claimed `email`.
+    /// Returns `false` when a competing insert already claimed `email`.
     fn create_account(
         &self,
         email: &str,
@@ -704,6 +725,26 @@ impl Db {
             params![email, salt, kdf_json, wrapped_json, auth_hash],
         )?;
         Ok(inserted == 1)
+    }
+
+    /// Delete every server-owned record for an account in one transaction.
+    /// Messages already delivered to other recipients cannot be attributed to
+    /// or recalled by the zero-knowledge server.
+    fn delete_account(&self, email: &str) -> rusqlite::Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM send_inbox WHERE recipient_id IN (
+               SELECT bastion_id FROM send_directory WHERE email=?1
+             )",
+            [email],
+        )?;
+        tx.execute("DELETE FROM send_directory WHERE email=?1", [email])?;
+        tx.execute("DELETE FROM items WHERE email=?1", [email])?;
+        tx.execute("DELETE FROM manifests WHERE email=?1", [email])?;
+        let deleted = tx.execute("DELETE FROM accounts WHERE email=?1", [email])?;
+        tx.commit()?;
+        Ok(deleted == 1)
     }
 
     fn commit_vault_mutation(
@@ -916,6 +957,13 @@ struct LoginRequest {
     auth_secret: AuthSecret,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeleteAccountRequest {
+    /// Fresh client-derived proof. A bearer token alone is not deletion authority.
+    auth_secret: AuthSecret,
+}
+
 #[derive(Serialize)]
 struct LoginResponse {
     token: String,
@@ -1018,7 +1066,7 @@ async fn create_account(
     let wrapped_json = serde_json::to_string(&req.registration.wrapped_vault_key)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
     // Serialize the authoritative insert and cache update. SQLite's conflict
-    // clause also protects deployments with multiple processes sharing the DB.
+    // clause remains authoritative if the cache and database ever diverge.
     let mut inner = st.write();
     if inner.accounts.contains_key(&req.email) {
         return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
@@ -1052,6 +1100,57 @@ async fn create_account(
         },
     );
     Ok(StatusCode::CREATED)
+}
+
+async fn delete_account(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DeleteAccountRequest>,
+) -> Result<StatusCode, ApiError> {
+    let email = require_auth(&st, &headers)?;
+    rate_limit(
+        &st,
+        &email,
+        "account-delete",
+        MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN,
+    )?;
+    if !is_exact_b64(req.auth_secret.expose_b64(), AUTH_SECRET_BYTES) {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
+    }
+    let phc = st
+        .read()
+        .accounts
+        .get(&email)
+        .map(|account| account.auth_hash.clone())
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"))?;
+    let secret = req.auth_secret;
+    let permit = auth_permit(&st)?;
+    let verified = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        verify_secret(secret.expose_b64(), &phc)
+    })
+    .await
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?;
+    if !verified {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
+    }
+
+    // Serialize deletion with every cache-backed account mutation. Database
+    // deletion commits before the cache and all account sessions disappear.
+    let mut inner = st.write();
+    if !inner.accounts.contains_key(&email) {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
+    }
+    let deleted = st
+        .db
+        .delete_account(&email)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?;
+    if !deleted {
+        return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"));
+    }
+    inner.accounts.remove(&email);
+    inner.sessions.retain(|_, session| session.email != email);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn prelogin(
@@ -1532,9 +1631,9 @@ fn persist_vault_mutation(
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "db error"))?
     {
         DbVaultMutation::Applied => Ok(()),
-        // The in-memory cache is process-local. A DB-only conflict means
-        // another process changed the same account and this process must not
-        // pretend its cache can satisfy a client retry.
+        // The instance lock excludes other Bastion servers. A DB-only conflict
+        // therefore means the cache invariant was violated (for example by a
+        // direct administrative write), and this process must fail closed.
         DbVaultMutation::Stale => Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "vault cache out of sync",
@@ -1902,8 +2001,7 @@ impl Db {
                 Err(rusqlite::Error::SqliteFailure(e, _))
                     if e.code == rusqlite::ErrorCode::ConstraintViolation =>
                 {
-                    // Another server process may have published this account
-                    // after our initial read. Resolve that race as either an
+                    // Resolve any competing/direct insert as either an
                     // idempotent success or an immutable-identity conflict.
                     let existing: Option<(String, String)> = conn
                         .query_row(
@@ -1970,6 +2068,14 @@ impl Db {
         max: i64,
     ) -> rusqlite::Result<InboxInsert> {
         let conn = self.lock();
+        let recipient_exists = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM send_directory WHERE bastion_id=?1)",
+            [recipient_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if !recipient_exists {
+            return Ok(InboxInsert::UnknownRecipient);
+        }
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM send_inbox WHERE recipient_id=?1",
             [recipient_id],
@@ -2121,6 +2227,7 @@ enum InboxInsert {
     Inserted,
     Duplicate,
     Full,
+    UnknownRecipient,
 }
 
 /// Publish the caller's validated Send public identity. Identical retries are
@@ -2141,6 +2248,12 @@ async fn publish_identity(
             StatusCode::PAYLOAD_TOO_LARGE,
             "identity too large",
         ));
+    }
+    // Serialize publication with account deletion. A request authenticated just
+    // before deletion must not recreate an orphaned directory entry afterward.
+    let inner = st.write();
+    if !inner.accounts.contains_key(&email) {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
     }
     let publication = st
         .db
@@ -2269,6 +2382,7 @@ async fn send_post(
             StatusCode::TOO_MANY_REQUESTS,
             "recipient inbox full",
         )),
+        InboxInsert::UnknownRecipient => Err(ApiError(StatusCode::NOT_FOUND, "unknown recipient")),
     }
 }
 
@@ -2341,6 +2455,10 @@ mod tests {
         assert_eq!(
             redacted_path("/accounts/alice%40example.com/prelogin"),
             "/accounts/{email}/prelogin"
+        );
+        assert_eq!(
+            redacted_path("/v1/accounts/alice%40example.com/prelogin"),
+            "/v1/accounts/{email}/prelogin"
         );
         assert_eq!(
             redacted_path("/send/directory/ABCDEF"),

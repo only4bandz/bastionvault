@@ -24,6 +24,32 @@ async function captureApiError(promise: Promise<unknown>): Promise<ApiError> {
   throw new Error("Expected API request to fail.");
 }
 
+describe("versioned account lifecycle client", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it("sends deletion proof only to the canonical v1 endpoint", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(null, { status: 204 })
+    );
+    globalThis.fetch = fetchMock;
+
+    await api.deleteAccount("token", "derived-secret");
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/accounts");
+    expect(options).toMatchObject({
+      method: "DELETE",
+      body: JSON.stringify({ auth_secret: "derived-secret" }),
+    });
+    expect(options?.headers).toMatchObject({ Authorization: "Bearer token" });
+  });
+});
+
 describe("session-expiry signaling", () => {
   const originalFetch = globalThis.fetch;
   let expired: number;

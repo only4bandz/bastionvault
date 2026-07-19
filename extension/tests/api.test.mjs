@@ -3,6 +3,26 @@ import test from "node:test";
 
 import { ApiError, makeApi } from "../lib/api.js";
 
+test("sends account deletion proof to the canonical v1 endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return new Response(null, { status: 204 });
+  };
+  try {
+    await makeApi("https://vault.example.com").deleteAccount("token", "derived-secret");
+    assert.equal(request.url, "https://vault.example.com/v1/accounts");
+    assert.equal(request.options.method, "DELETE");
+    assert.equal(request.options.headers.Authorization, "Bearer token");
+    assert.deepEqual(JSON.parse(request.options.body), {
+      auth_secret: "derived-secret",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("aborts a request that exceeds its deadline", async () => {
   const originalFetch = globalThis.fetch;
   let observedSignal;
@@ -79,7 +99,7 @@ test("sends atomic vault operations with the expected revision and manifest", as
       manifest
     );
     assert.equal(response.revision, 8);
-    assert.equal(request.url, "https://vault.example.com/vault/transaction");
+    assert.equal(request.url, "https://vault.example.com/v1/vault/transaction");
     assert.equal(request.options.method, "PUT");
     assert.equal(request.options.headers.Authorization, "Bearer token");
     assert.deepEqual(JSON.parse(request.options.body), {
