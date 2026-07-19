@@ -23,6 +23,26 @@ test("sends account deletion proof to the canonical v1 endpoint", async () => {
   }
 });
 
+test("reads the canonical authenticated vault revision probe", async () => {
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url, options };
+    return new Response(JSON.stringify({ revision: 9 }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const head = await makeApi("https://vault.example.com").getVaultRevision("token");
+    assert.deepEqual(head, { revision: 9 });
+    assert.equal(request.url, "https://vault.example.com/v1/vault/revision");
+    assert.equal(request.options.headers.Authorization, "Bearer token");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("aborts a request that exceeds its deadline", async () => {
   const originalFetch = globalThis.fetch;
   let observedSignal;

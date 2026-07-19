@@ -198,6 +198,9 @@ async fn full_account_and_vault_flow() {
         serde_json::from_value(body["items"]["github.com"].clone()).unwrap();
     let plain = vault.decrypt_item(&stored, "github.com").unwrap();
     assert_eq!(plain.as_slice(), b"hunter2");
+    let (s, revision) = send(&app, "GET", "/v1/vault/revision", Some(&token), None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(revision, json!({ "revision": 1 }));
 
     // Deletion.
     let (s, _) = send(

@@ -53,6 +53,14 @@ function requireSafeRevision(revision) {
   if (!Number.isSafeInteger(revision) || revision < 0) throw new VaultIntegrityError();
 }
 
+/** Decide whether a previously verified snapshot needs a full refetch. */
+export function vaultRefreshRequired(currentRevision, remoteRevision) {
+  requireSafeRevision(currentRevision);
+  requireSafeRevision(remoteRevision);
+  if (remoteRevision < currentRevision) throw new VaultIntegrityError();
+  return remoteRevision > currentRevision;
+}
+
 function parseBlob(json) {
   const blob = JSON.parse(json);
   if (!isRecord(blob) || typeof blob.v !== "number" || typeof blob.nonce !== "string" || typeof blob.ct !== "string") {

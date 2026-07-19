@@ -11,10 +11,20 @@ import {
   prepareVaultMutation,
   reconcileVaultMutation,
   verifyVaultSnapshot,
+  vaultRefreshRequired,
   VaultIntegrityError,
 } from "../lib/vault-load.js";
 
 const digest = (blob) => JSON.stringify(blob);
+
+test("vault revision probes skip unchanged snapshots and reject rollback", () => {
+  assert.equal(vaultRefreshRequired(7, 7), false);
+  assert.equal(vaultRefreshRequired(7, 8), true);
+  assert.throws(() => vaultRefreshRequired(7, 6), VaultIntegrityError);
+  for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, undefined]) {
+    assert.throws(() => vaultRefreshRequired(7, invalid), VaultIntegrityError);
+  }
+});
 
 function account() {
   const parse = (json) => JSON.parse(json);

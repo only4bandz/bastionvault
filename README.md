@@ -141,6 +141,7 @@ the live database and WAL.
 | `GET` | `/v1/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
 | `POST` / `DELETE` | `/v1/sessions` | Login (Argon2id) → bearer token (TTL 30 min) / logout |
 | `GET` | `/v1/vault` | Encrypted items + manifest + CAS revision (auth) |
+| `GET` | `/v1/vault/revision` | Cheap authenticated freshness probe; changed revisions still require a full verified fetch |
 | `PUT` | `/v1/vault/transaction` | Atomically apply item operations + sealed manifest at an expected revision |
 | `PUT`/`DELETE` | `/v1/vault/items/:id` | Deprecated compatibility endpoint; use `/v1/vault/transaction` |
 | `PUT` | `/v1/vault/manifest` | Deprecated compatibility endpoint; use `/v1/vault/transaction` |
