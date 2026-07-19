@@ -148,7 +148,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .nav-item.active { background: var(--accent-soft); color: var(--text); }
 .nav-item .ico { color: var(--text-faint); display: inline-flex; }
 .nav-item.active .ico { color: var(--accent-2); }
-.nav-soon { margin-left: auto; padding: 2px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-faint); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+.nav-status { margin-left: auto; padding: 2px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-faint); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; }
+.nav-count { margin-left: auto; min-width: 20px; text-align: center; color: var(--text-faint); font-size: 11px; }
 .nav-sep { height: 1px; background: var(--line); margin: 10px 8px; }
 .nav-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-faint); padding: 10px 11px 4px; }
 .sidebar-foot { margin-top: auto; }
@@ -252,6 +253,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .health-row:hover { background: var(--surface-2); }
 .health-section-title { margin-bottom: 10px; font-weight: 700; }
 .health-meta { max-width: 230px; font-size: 12px; text-align: right; }
+.breach-consent { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0; color: var(--text-dim); line-height: 1.45; }
+.breach-consent input { margin-top: 3px; }
 .reuse-group { padding-top: 8px; border-top: 1px solid var(--line); }
 .health-section-title + .reuse-group { border-top: 0; }
 .reuse-group-title { padding: 6px 0 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }

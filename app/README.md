@@ -8,9 +8,9 @@ the browser; secrets live in WASM memory only and never touch browser storage
 Vault items are exposed only after the encrypted integrity manifest matches the
 complete server response. Existing vaults receive a one-time trust-on-first-use
 manifest after every encrypted payload decrypts and validates. The trusted
-manifest sequence lives only in memory: rollback is detected within an unlocked
-session, but not across a complete browser restart without an independent
-persistent checkpoint.
+manifest sequence and revision are anchored as non-secret metadata in browser
+storage, so later sessions reject rollback and same-sequence substitution for
+the same server/account scope.
 
 The document CSP denies all resources by default. It permits same-origin
 scripts, API calls, fonts and images plus the minimum `wasm-unsafe-eval`
@@ -36,11 +36,14 @@ npm run dev            # http://localhost:5173
   + printable Emergency Kit (the two-secret model).
 - **Unlock / auto-lock**: master password + Secret Key; auto-locks on inactivity
   and when the tab is hidden (`Account.lock()` zeroizes the vault key).
-- **Vault**: create/edit/delete items (logins, secure notes, cards), search,
-  type tabs, copy-to-clipboard with reveal.
+- **Vault**: create/edit items (logins, secure notes, cards), encrypted folders,
+  restorable trash, search, type tabs, copy-to-clipboard with reveal.
 - **Password Generator** (browser CSPRNG) and **Password Health** (weak/reused).
+- **Data Breach Scanner**: explicit, in-memory Pwned Passwords checks using
+  padded k-anonymous range requests; plaintext and full hashes never leave the
+  browser.
 
 ## Next
 
-- Wire to the Axum server (`crates/server`) for encrypted, multi-device sync.
-- Folders, sharing, breach scanner, email masking.
+- Email masking requires a separately reviewed alias/forwarding provider or
+  Bastion-operated mail relay; plus-addressing is not treated as masking.

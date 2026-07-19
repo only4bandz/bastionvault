@@ -10,7 +10,7 @@ fi
 
 if ! rg -q "default-src 'none'" app/index.html \
   || ! rg -q "script-src 'self' 'wasm-unsafe-eval'" app/index.html \
-  || ! rg -q "connect-src 'self'" app/index.html \
+  || ! rg -q "connect-src 'self' https://api\.pwnedpasswords\.com" app/index.html \
   || ! rg -q "object-src 'none'" app/index.html \
   || ! rg -q "base-uri 'none'" app/index.html; then
   echo "The main app must enforce its reviewed Content Security Policy." >&2

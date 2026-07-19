@@ -26,7 +26,9 @@ const CARD: VaultItem = {
 
 function renderVault(items: VaultItem[] = [LOGIN], syncStatus: "saved" | "saving" | "error" = "saved") {
   const onUpsert = vi.fn(async () => true);
+  const onTrash = vi.fn(async () => true);
   const onDelete = vi.fn(async () => true);
+  const onDeleteMany = vi.fn(async () => true);
   render(
     <Vault
       email="general@example.com"
@@ -37,7 +39,9 @@ function renderVault(items: VaultItem[] = [LOGIN], syncStatus: "saved" | "saving
       setSendContacts={vi.fn()}
       persistEncryptedItem={vi.fn(async () => {})}
       onUpsert={onUpsert}
+      onTrash={onTrash}
       onDelete={onDelete}
+      onDeleteMany={onDeleteMany}
       onImport={vi.fn(async (result) => ({
         requested: result.items.length,
         imported: result.items.length,
@@ -47,16 +51,16 @@ function renderVault(items: VaultItem[] = [LOGIN], syncStatus: "saved" | "saving
       toast={vi.fn()}
     />
   );
-  return { onDelete, onUpsert };
+  return { onDelete, onDeleteMany, onTrash, onUpsert };
 }
 
 describe("Vault dashboard accessibility", () => {
-  it("marks unavailable destinations as disabled roadmap entries", () => {
+  it("enables implemented destinations and leaves email masking unavailable", () => {
     renderVault();
-    expect(screen.getByRole("button", { name: "Trash Soon" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Personal Soon" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Email Masking Soon" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Data Breach Scanner Soon" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Trash 0" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Personal" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Email Masking Requires relay" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Breach Scanner" })).toBeEnabled();
   });
 
   it("reveals card secrets independently and conceals them after the deadline", async () => {
@@ -178,20 +182,64 @@ describe("Vault dashboard accessibility", () => {
     expect(open).toHaveAttribute("referrerpolicy", "no-referrer");
   });
 
-  it("requires explicit confirmation before deleting a vault item", async () => {
+  it("requires explicit confirmation before moving a vault item to trash", async () => {
     const user = userEvent.setup();
-    const { onDelete } = renderVault();
+    const { onTrash } = renderVault();
 
     await user.click(screen.getByRole("button", { name: "Open GitHub" }));
-    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await user.click(screen.getByRole("button", { name: "Move to trash" }));
 
-    expect(screen.getByRole("dialog", { name: "Delete GitHub?" })).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Move GitHub to trash?" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
-    expect(onDelete).not.toHaveBeenCalled();
+    expect(onTrash).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Delete item" }));
-    expect(onDelete).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Move to trash" }));
+    expect(onTrash).toHaveBeenCalledOnce();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("restores a trashed item without exposing it in the active vault", async () => {
+    const user = userEvent.setup();
+    const deleted = { ...LOGIN, deletedAt: LOGIN.updatedAt + 1 };
+    const { onUpsert } = renderVault([deleted]);
+
+    expect(screen.queryByRole("button", { name: "Open GitHub" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Trash 1" }));
+    await user.click(screen.getByRole("button", { name: "Restore" }));
+
+    expect(onUpsert).toHaveBeenCalledWith(expect.objectContaining({ id: LOGIN.id, deletedAt: undefined }));
+  });
+
+  it("filters items through encrypted folder metadata", async () => {
+    const user = userEvent.setup();
+    renderVault([
+      { ...LOGIN, folder: "Personal" },
+      { ...LOGIN, id: "work", title: "Work account", folder: "Work" },
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "Work" }));
+    expect(screen.getByRole("button", { name: "Open Work account" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Open GitHub" })).not.toBeInTheDocument();
+  });
+
+  it("treats existing unfiled items as Personal", async () => {
+    const user = userEvent.setup();
+    renderVault([LOGIN, { ...LOGIN, id: "work", title: "Work account", folder: "Work" }]);
+
+    await user.click(screen.getByRole("button", { name: "Personal" }));
+    expect(screen.getByRole("button", { name: "Open GitHub" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Open Work account" })).not.toBeInTheDocument();
+  });
+
+  it("requires explicit consent before a breach scan can start", async () => {
+    const user = userEvent.setup();
+    renderVault();
+
+    await user.click(screen.getByRole("button", { name: "Breach Scanner" }));
+    const scan = screen.getByRole("button", { name: "Scan passwords" });
+    expect(scan).toBeDisabled();
+    await user.click(screen.getByRole("checkbox"));
+    expect(scan).toBeEnabled();
   });
 
   it("controls the mobile navigation drawer and contains its keyboard focus", async () => {

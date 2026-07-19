@@ -176,6 +176,7 @@ export function csvToItems(text: string): ImportResult {
     cardBank: idx("cardbank", "card_bank"),
     cardBankDomain: idx("cardbankdomain", "card_bank_domain"),
     cardType: idx("cardtype", "card_type"),
+    folder: idx("folder"),
   };
   if (col.name === -1) {
     throw new CsvImportError('CSV header must include a "name" or "title" column.');
@@ -209,7 +210,11 @@ export function csvToItems(text: string): ImportResult {
       title: name,
       notes: cell(row, col.note) || undefined,
       updatedAt: optionalTimestamp(cell(row, col.updatedAt), r + 1, "updated timestamp") ?? Date.now(),
+      folder: cell(row, col.folder) || undefined,
     };
+    if (item.folder && item.folder.length > 80) {
+      throw new CsvImportError(`CSV row ${r + 1} has a folder name longer than 80 characters.`);
+    }
     item.favorite = optionalBoolean(cell(row, col.favorite).toLowerCase(), r + 1, "favorite value");
     item.passwordChangedAt = optionalTimestamp(
       cell(row, col.passwordChangedAt),

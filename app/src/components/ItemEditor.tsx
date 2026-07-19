@@ -7,23 +7,28 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { Dialog } from "./Dialog";
 import { SecretInput } from "./SecretInput";
 
-const NEW = (): VaultItem => ({
+const NEW = (folder?: string): VaultItem => ({
   id: crypto.randomUUID(),
   type: "login",
   title: "",
   updatedAt: Date.now(),
+  ...(folder ? { folder } : {}),
 });
 
 export function ItemEditor({
   initial,
+  folders = [],
+  defaultFolder,
   onSave,
   onClose,
 }: {
   initial: VaultItem | null;
+  folders?: string[];
+  defaultFolder?: string;
   onSave: (item: VaultItem) => Promise<boolean>;
   onClose: () => void;
 }): JSX.Element {
-  const [item, setItem] = useState<VaultItem>(initial ?? NEW());
+  const [item, setItem] = useState<VaultItem>(initial ?? NEW(defaultFolder));
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
@@ -70,8 +75,10 @@ export function ItemEditor({
       item.password && item.password !== initial?.password
         ? now
         : item.passwordChangedAt ?? initial?.passwordChangedAt;
+    const folder = item.folder?.trim();
     const saved = await onSave({
       ...item,
+      folder: folder || undefined,
       updatedAt: now,
       ...(passwordChangedAt !== undefined ? { passwordChangedAt } : {}),
     });
@@ -124,6 +131,23 @@ export function ItemEditor({
           <div className="field">
             <label htmlFor="item-title">Name</label>
             <input id="item-title" ref={titleRef} className="input" autoComplete="off" value={item.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. GitHub" />
+          </div>
+
+          <div className="field">
+            <label htmlFor="item-folder">Folder</label>
+            <input
+              id="item-folder"
+              className="input"
+              autoComplete="off"
+              list="vault-folders"
+              maxLength={80}
+              value={item.folder ?? ""}
+              onChange={(e) => set("folder", e.target.value)}
+              placeholder="Personal"
+            />
+            <datalist id="vault-folders">
+              {folders.map((folder) => <option key={folder} value={folder} />)}
+            </datalist>
           </div>
 
           {item.type === "login" && (

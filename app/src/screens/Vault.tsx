@@ -23,6 +23,7 @@ import { copySecretWithFeedback, copyWithFeedback } from "../lib/clipboard";
 import { safeWebsiteUrl } from "../lib/safe-url";
 import { relativeItemTime } from "../lib/item-time";
 import { Send } from "./Send";
+import { BreachScanner } from "./BreachScanner";
 
 /** Card subtitle that shows "Debit Card" / "Credit Card" once the BIN resolves. */
 function CardSubtitle({ item }: { item: VaultItem }): JSX.Element {
@@ -44,11 +45,16 @@ function CardSubtitle({ item }: { item: VaultItem }): JSX.Element {
   return <>{label}</>;
 }
 
-type Nav = "vault" | "generator" | "health" | "send";
+type Nav = "vault" | "trash" | "generator" | "health" | "breach" | "send";
 export type VaultSyncStatus = "saved" | "saving" | "error";
 
 const PAGE_SIZE = 50;
 export const SECRET_REVEAL_MS = 30_000;
+const DEFAULT_FOLDER = "Personal";
+
+function itemFolder(item: VaultItem): string {
+  return item.folder?.trim() || DEFAULT_FOLDER;
+}
 
 /** Page numbers to show, with "…" gaps for long ranges (e.g. 1 … 4 5 6 … 12). */
 function pageNumbers(cur: number, total: number): (number | "…")[] {
@@ -75,7 +81,9 @@ export function Vault({
   setSendContacts,
   persistEncryptedItem,
   onUpsert,
+  onTrash,
   onDelete,
+  onDeleteMany,
   onImport,
   syncStatus,
   onLock,
@@ -89,7 +97,9 @@ export function Vault({
   setSendContacts: (c: Contact[]) => void;
   persistEncryptedItem: (id: string, blob: Blob) => Promise<void>;
   onUpsert: (i: VaultItem) => Promise<boolean>;
+  onTrash: (i: VaultItem) => Promise<boolean>;
   onDelete: (id: string) => Promise<boolean>;
+  onDeleteMany: (ids: string[]) => Promise<boolean>;
   onImport: (r: ImportResult, onProgress: ImportProgress) => Promise<ImportOutcome>;
   syncStatus: VaultSyncStatus;
   onLock: () => void;
@@ -99,12 +109,15 @@ export function Vault({
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"all" | ItemType>("all");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [sort, setSort] = useState<VaultSort>("favorites-recent");
   const [now, setNow] = useState(() => Date.now());
   const [editor, setEditor] = useState<null | "new" | VaultItem>(null);
   const [detail, setDetail] = useState<VaultItem | null>(null);
   const [importing, setImporting] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [permanentDelete, setPermanentDelete] = useState<VaultItem | null>(null);
+  const [emptyingTrash, setEmptyingTrash] = useState(false);
   const [page, setPage] = useState(1);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
@@ -113,16 +126,30 @@ export function Vault({
   const sidebarRef = useRef<HTMLElement>(null);
   const mobileNavWasOpen = useRef(false);
 
+  const activeItems = useMemo(() => items.filter((item) => item.deletedAt === undefined), [items]);
+  const trashedItems = useMemo(
+    () => items.filter((item) => item.deletedAt !== undefined).sort((a, b) => b.deletedAt! - a.deletedAt!),
+    [items]
+  );
+  const folders = useMemo(
+    () => [...new Set(["Personal", ...activeItems.map((item) => item.folder?.trim()).filter((folder): folder is string => Boolean(folder))])]
+      .sort((a, b) => a.localeCompare(b)),
+    [activeItems]
+  );
+  const folderItems = useMemo(
+    () => selectedFolder === null ? activeItems : activeItems.filter((item) => itemFolder(item) === selectedFolder),
+    [activeItems, selectedFolder]
+  );
   const filtered = useMemo(
-    () => filterVaultItems(items, tab, query, favoritesOnly, sort),
-    [favoritesOnly, items, query, sort, tab]
+    () => filterVaultItems(folderItems, tab, query, favoritesOnly, sort),
+    [favoritesOnly, folderItems, query, sort, tab]
   );
 
   // Paginate so a 270-item vault doesn't scroll forever.
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount);
   const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-  useEffect(() => { setPage(1); }, [favoritesOnly, query, tab]); // reset to first page on filter change
+  useEffect(() => { setPage(1); }, [favoritesOnly, query, selectedFolder, tab]); // reset to first page on filter change
 
   useEffect(() => {
     if (nav !== "vault") return;
@@ -179,6 +206,7 @@ export function Vault({
       if (!commandK && !slash) return;
 
       event.preventDefault();
+      setSelectedFolder(null);
       setNav("vault");
       searchInputRef.current?.focus();
     }
@@ -193,15 +221,21 @@ export function Vault({
   }
 
   const counts = {
-    all: items.length,
-    login: items.filter((i) => i.type === "login").length,
-    note: items.filter((i) => i.type === "note").length,
-    card: items.filter((i) => i.type === "card").length,
-    favorite: items.filter((i) => i.favorite).length,
+    all: folderItems.length,
+    login: folderItems.filter((i) => i.type === "login").length,
+    note: folderItems.filter((i) => i.type === "note").length,
+    card: folderItems.filter((i) => i.type === "card").length,
+    favorite: folderItems.filter((i) => i.favorite).length,
   };
 
   function go(n: Nav) {
     setNav(n);
+    setMobileNavOpen(false);
+  }
+
+  function goFolder(folder: string | null): void {
+    setSelectedFolder(folder);
+    setNav("vault");
     setMobileNavOpen(false);
   }
 
@@ -248,9 +282,9 @@ export function Vault({
         <Brand size={30} />
         <button
           ref={firstNavRef}
-          className={`nav-item${nav === "vault" ? " active" : ""}`}
-          aria-current={nav === "vault" ? "page" : undefined}
-          onClick={() => go("vault")}
+          className={`nav-item${nav === "vault" && selectedFolder === null ? " active" : ""}`}
+          aria-current={nav === "vault" && selectedFolder === null ? "page" : undefined}
+          onClick={() => goFolder(null)}
         >
           <span className="ico"><IcVault /></span> Vault
         </button>
@@ -261,14 +295,25 @@ export function Vault({
         >
           <span className="ico"><IcShared /></span> Send
         </button>
-        <button className="nav-item" disabled aria-disabled="true">
-          <span className="ico"><IcTrash /></span> Trash <span className="nav-soon">Soon</span>
+        <button
+          className={`nav-item${nav === "trash" ? " active" : ""}`}
+          aria-current={nav === "trash" ? "page" : undefined}
+          onClick={() => go("trash")}
+        >
+          <span className="ico"><IcTrash /></span> Trash <span className="nav-count">{trashedItems.length}</span>
         </button>
 
         <div className="nav-label">Folders</div>
-        <button className="nav-item" disabled aria-disabled="true">
-          <span className="ico"><IcFolder /></span> Personal <span className="nav-soon">Soon</span>
-        </button>
+        {folders.map((folder) => (
+          <button
+            key={folder}
+            className={`nav-item${nav === "vault" && selectedFolder === folder ? " active" : ""}`}
+            aria-current={nav === "vault" && selectedFolder === folder ? "page" : undefined}
+            onClick={() => goFolder(folder)}
+          >
+            <span className="ico"><IcFolder /></span> {folder}
+          </button>
+        ))}
 
         <div className="nav-sep" />
         <div className="nav-label">Tools</div>
@@ -286,11 +331,20 @@ export function Vault({
         >
           <span className="ico"><IcHealth /></span> Password Health
         </button>
-        <button className="nav-item" disabled aria-disabled="true">
-          <span className="ico"><IcMask /></span> Email Masking <span className="nav-soon">Soon</span>
+        <button
+          className="nav-item"
+          disabled
+          aria-disabled="true"
+          title="Requires a configured and reviewed mail relay"
+        >
+          <span className="ico"><IcMask /></span> Email Masking <span className="nav-status">Requires relay</span>
         </button>
-        <button className="nav-item" disabled aria-disabled="true">
-          <span className="ico"><IcBreach /></span> Data Breach Scanner <span className="nav-soon">Soon</span>
+        <button
+          className={`nav-item${nav === "breach" ? " active" : ""}`}
+          aria-current={nav === "breach" ? "page" : undefined}
+          onClick={() => go("breach")}
+        >
+          <span className="ico"><IcBreach /></span> Breach Scanner
         </button>
 
         <div className="sidebar-foot">
@@ -357,12 +411,12 @@ export function Vault({
           {nav === "vault" && (
             <>
               <div className="page-head">
-                <h2>Vault</h2>
+                <h2>{selectedFolder ?? "Vault"}</h2>
                 <div className="right" style={{ display: "flex", gap: 8 }}>
                   <button className="btn" onClick={() => setImporting(true)}>
                     <IcUpload size={16} /> Import
                   </button>
-                  {items.length > 0 && (
+                  {activeItems.length > 0 && (
                     <button className="btn" onClick={() => setExporting(true)}>
                       <IcDownload size={16} /> Export
                     </button>
@@ -421,22 +475,26 @@ export function Vault({
 
               {filtered.length === 0 ? (
                 <div className="empty">
-                  <div className="big">{items.length === 0 ? <IcVault size={54} /> : <IcSearch size={54} />}</div>
+                  <div className="big">{folderItems.length === 0 && !selectedFolder ? <IcVault size={54} /> : <IcSearch size={54} />}</div>
                   <div style={{ fontSize: 16, color: "var(--text-dim)" }}>
-                    {items.length === 0
+                    {activeItems.length === 0
                       ? "No items yet"
+                      : selectedFolder && folderItems.length === 0
+                        ? `No items in ${selectedFolder}`
                       : favoritesOnly && !query.trim() && tab === "all"
                         ? "No favorite items"
                         : "No matching items"}
                   </div>
                   <div style={{ marginTop: 6 }}>
-                    {items.length === 0
+                    {activeItems.length === 0
                       ? "Create your first item to get started."
+                      : selectedFolder && folderItems.length === 0
+                        ? "Assign this folder while creating or editing an item."
                       : favoritesOnly && !query.trim() && tab === "all"
                         ? "Mark an item as a favorite to see it here."
                         : "Try another search or item type."}
                   </div>
-                  {items.length > 0 && (
+                  {activeItems.length > 0 && filtered.length === 0 && (
                     <button
                       className="btn"
                       style={{ marginTop: 16 }}
@@ -544,7 +602,60 @@ export function Vault({
             </>
           )}
 
-          {nav === "health" && <Health items={items} onOpen={(i) => setDetail(i)} />}
+          {nav === "health" && <Health items={activeItems} onOpen={(i) => setDetail(i)} />}
+
+          {nav === "breach" && <BreachScanner items={activeItems} onOpen={(i) => setDetail(i)} />}
+
+          {nav === "trash" && (
+            <>
+              <div className="page-head">
+                <h2>Trash</h2>
+                {trashedItems.length > 0 && (
+                  <button className="btn btn-danger" onClick={() => setEmptyingTrash(true)}>
+                    <IcTrash size={16} /> Empty trash
+                  </button>
+                )}
+              </div>
+              {trashedItems.length === 0 ? (
+                <div className="empty">
+                  <div className="big"><IcTrash size={54} /></div>
+                  <div style={{ fontSize: 16, color: "var(--text-dim)" }}>Trash is empty</div>
+                  <div style={{ marginTop: 6 }}>Deleted items will appear here until permanently removed.</div>
+                </div>
+              ) : (
+                <div className="list">
+                  <div className="list-head"><span>Title</span><span>Deleted</span><span style={{ textAlign: "right" }}>Actions</span></div>
+                  {trashedItems.map((item) => (
+                    <div className="row" key={item.id}>
+                      <div className="row-open">
+                        <span className="title">
+                          <Favicon item={item} size={36} />
+                          <span style={{ minWidth: 0 }}>
+                            <span className="ttl">{item.title}</span>
+                            <span className="sub">{item.folder || TYPE_LABEL[item.type]}</span>
+                          </span>
+                        </span>
+                        <time className="when" dateTime={new Date(item.deletedAt!).toISOString()}>
+                          {relativeItemTime(item.deletedAt!, now)}
+                        </time>
+                      </div>
+                      <div className="actions">
+                        <button
+                          className="btn btn-ghost"
+                          onClick={() => void onUpsert({ ...item, deletedAt: undefined, updatedAt: Date.now() })}
+                        >
+                          Restore
+                        </button>
+                        <button className="icon-btn" aria-label={`Delete ${item.title} permanently`} onClick={() => setPermanentDelete(item)}>
+                          <IcTrash size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
 
           {nav === "send" && account && token && (
             <Send
@@ -564,6 +675,8 @@ export function Vault({
       {editor && (
         <ItemEditor
           initial={editor === "new" ? null : editor}
+          folders={folders}
+          defaultFolder={selectedFolder ?? undefined}
           onClose={() => setEditor(null)}
           onSave={async (i) => {
             const saved = await onUpsert(i);
@@ -581,10 +694,10 @@ export function Vault({
           item={detail}
           onClose={() => setDetail(null)}
           onEdit={() => { setEditor(detail); setDetail(null); }}
-          onDelete={async () => {
-            if (await onDelete(detail.id)) {
+          onTrash={async () => {
+            if (await onTrash(detail)) {
               setDetail(null);
-              toast("Item deleted");
+              toast("Item moved to trash");
               return true;
             }
             return false;
@@ -609,11 +722,11 @@ export function Vault({
       {exporting && (
         <ConfirmDialog
           title="Export vault?"
-          confirmLabel={`Export ${items.length} ${items.length === 1 ? "item" : "items"}`}
+          confirmLabel={`Export ${activeItems.length} ${activeItems.length === 1 ? "item" : "items"}`}
           pendingLabel="Exporting…"
           onClose={() => setExporting(false)}
           onConfirm={async () => {
-            const ok = downloadCsv(itemsToCsv(items), exportFilename(new Date()));
+            const ok = downloadCsv(itemsToCsv(activeItems), exportFilename(new Date()));
             toast(ok ? "Vault exported" : "Export failed");
             return ok;
           }}
@@ -623,18 +736,50 @@ export function Vault({
           delete it as soon as you are done.
         </ConfirmDialog>
       )}
+
+      {permanentDelete && (
+        <ConfirmDialog
+          title={`Delete ${permanentDelete.title} permanently?`}
+          confirmLabel="Delete permanently"
+          pendingLabel="Deleting…"
+          onClose={() => setPermanentDelete(null)}
+          onConfirm={async () => {
+            const deleted = await onDelete(permanentDelete.id);
+            if (deleted) setPermanentDelete(null);
+            return deleted;
+          }}
+        >
+          This permanently removes the encrypted item. This action cannot be undone.
+        </ConfirmDialog>
+      )}
+
+      {emptyingTrash && (
+        <ConfirmDialog
+          title="Empty trash?"
+          confirmLabel={`Delete ${trashedItems.length} permanently`}
+          pendingLabel="Deleting…"
+          onClose={() => setEmptyingTrash(false)}
+          onConfirm={async () => {
+            const deleted = await onDeleteMany(trashedItems.map((item) => item.id));
+            if (deleted) setEmptyingTrash(false);
+            return deleted;
+          }}
+        >
+          Every item in trash will be permanently removed. This action cannot be undone.
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
 
 // ── Item detail overlay ──
 function ItemDetailView({
-  item, onClose, onEdit, onDelete, copy,
+  item, onClose, onEdit, onTrash, copy,
 }: {
   item: VaultItem;
   onClose: () => void;
   onEdit: () => void;
-  onDelete: () => Promise<boolean>;
+  onTrash: () => Promise<boolean>;
   copy: (t: string, w: string, secret?: boolean) => void;
 }): JSX.Element {
   const [revealed, setRevealed] = useState<Set<string>>(() => new Set());
@@ -699,7 +844,7 @@ function ItemDetailView({
         footer={
           <>
             <button className="btn btn-danger" onClick={() => setConfirmingDelete(true)}>
-              <IcTrash size={16} /> Delete
+              <IcTrash size={16} /> Move to trash
             </button>
             <span className="spacer" />
             <button className="btn btn-primary" onClick={onEdit}>
@@ -746,16 +891,22 @@ function ItemDetailView({
               <span className="v" style={{ whiteSpace: "pre-wrap" }}>{item.notes}</span>
             </div>
           )}
+          {item.folder && (
+            <div className="row-copy">
+              <span className="k">Folder</span>
+              <span className="v">{item.folder}</span>
+            </div>
+          )}
       </Dialog>
       {confirmingDelete && (
         <ConfirmDialog
-          title={`Delete ${item.title}?`}
-          confirmLabel="Delete item"
-          pendingLabel="Deleting…"
+          title={`Move ${item.title} to trash?`}
+          confirmLabel="Move to trash"
+          pendingLabel="Moving…"
           onClose={() => setConfirmingDelete(false)}
-          onConfirm={onDelete}
+          onConfirm={onTrash}
         >
-          This permanently removes the item from your encrypted vault. This action cannot be undone.
+          The item will stop appearing in your vault and extension, but can be restored from Trash.
         </ConfirmDialog>
       )}
     </>

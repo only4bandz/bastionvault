@@ -14,6 +14,7 @@ const LOGIN: VaultItem = {
   favorite: true,
   updatedAt: 1_700_000_000_000,
   passwordChangedAt: 1_600_000_000_000,
+  folder: "Personal",
 };
 
 const CARD: VaultItem = {
@@ -62,6 +63,7 @@ describe("itemsToCsv", () => {
       favorite: true,
       updatedAt: LOGIN.updatedAt,
       passwordChangedAt: LOGIN.passwordChangedAt,
+      folder: LOGIN.folder,
     });
     expect(card).toMatchObject({
       type: "card",

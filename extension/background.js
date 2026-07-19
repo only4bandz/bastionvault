@@ -272,6 +272,52 @@ async function commitVaultOperations(s, operations) {
   return scheduled;
 }
 
+// Re-read and verify the remote vault before returning decrypted item data.
+// The web app can soft-delete an item while this worker remains unlocked; a
+// cached item must not keep releasing secrets after that deletion. Refreshes
+// share the mutation queue so they cannot race a local extension write.
+async function refreshSessionVault(s) {
+  const execute = async () => {
+    try {
+      if (session !== s || !s.integrity) throw new VaultIntegrityError();
+      const api = makeApi(s.server);
+      const vault = await api.getVault(s.token);
+      const checkpoint = {
+        revision: s.integrity.revision,
+        manifestSeq: s.integrity.manifestSeq,
+      };
+      const loaded = await loadSessionVaultAnchored(
+        s.account,
+        api,
+        s.token,
+        vault,
+        s.email,
+        s.server,
+        checkpoint
+      );
+      if (session !== s) throw new VaultIntegrityError();
+      s.items = loaded.items;
+      s.contacts = loaded.contacts;
+      s.lockedRecords = loaded.lockedRecords;
+      s.integrity = loaded.integrity;
+      await persistSession();
+    } catch (error) {
+      const mustLock =
+        error instanceof VaultIntegrityError ||
+        error instanceof VaultRollbackError ||
+        (error instanceof ApiError && error.status === 401);
+      if (mustLock && session === s) await lock();
+      throw error;
+    }
+  };
+  const scheduled = (s.mutationTail || Promise.resolve()).then(execute, execute);
+  s.mutationTail = scheduled.then(
+    () => undefined,
+    () => undefined
+  );
+  return scheduled;
+}
+
 async function getServerUrl() {
   const { serverUrl } = await chrome.storage.local.get("serverUrl");
   try {
@@ -729,6 +775,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "LIST": {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await refreshSessionVault(s);
           await touchSession();
           sendResponse({ ok: true, items: [...s.items.values()].map(toMeta).sort(sortItems) });
           break;
@@ -736,6 +783,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "REVEAL": {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await refreshSessionVault(s);
           await touchSession();
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
@@ -764,6 +812,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           }
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await refreshSessionVault(s);
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
           if (!senderHost || !matchesSite(it.url || it.title, senderHost)) {
@@ -867,6 +916,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // individual secrets via REVEAL); content scripts never see this.
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await refreshSessionVault(s);
           await touchSession();
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
@@ -876,6 +926,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "FILL": {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await refreshSessionVault(s);
           await touchSession();
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");

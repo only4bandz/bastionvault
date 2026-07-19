@@ -47,7 +47,7 @@ const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
 const SEND_LOCKED_PREFIX = "bastion:send-locked:";
 const OPTIONAL_ITEM_STRINGS: (keyof VaultItem)[] = [
   "username", "password", "url", "cardNumber", "cardholderName", "cardExp", "cardCvv",
-  "cardBrand", "cardBank", "cardBankDomain", "cardType", "notes",
+  "cardBrand", "cardBank", "cardBankDomain", "cardType", "notes", "folder",
 ];
 
 function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
@@ -74,8 +74,13 @@ function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
           (field) => (item as VaultItem)[field] !== undefined && typeof (item as VaultItem)[field] !== "string"
         ) ||
         ((item as VaultItem).favorite !== undefined && typeof (item as VaultItem).favorite !== "boolean") ||
+        ((item as VaultItem).folder !== undefined && (item as VaultItem).folder!.length > 80) ||
         ((item as VaultItem).passwordChangedAt !== undefined &&
-          !Number.isFinite((item as VaultItem).passwordChangedAt))
+          !Number.isFinite((item as VaultItem).passwordChangedAt)) ||
+        ((item as VaultItem).deletedAt !== undefined &&
+          (!Number.isSafeInteger((item as VaultItem).deletedAt) ||
+            (item as VaultItem).deletedAt! < 0 ||
+            (item as VaultItem).deletedAt! > 8_640_000_000_000_000))
       ) {
         throw new Error("invalid item payload");
       }
@@ -509,6 +514,47 @@ export default function App(): JSX.Element {
     [account, commitVaultOperations, token, toast]
   );
 
+  const trash = useCallback(
+    (item: VaultItem): Promise<boolean> => {
+      const now = Date.now();
+      return upsert({ ...item, deletedAt: now, updatedAt: now });
+    },
+    [upsert]
+  );
+
+  const removeMany = useCallback(
+    async (ids: string[]): Promise<boolean> => {
+      if (!account || !token) {
+        toast("Vault is locked — trash was not emptied");
+        return false;
+      }
+      const unique = [...new Set(ids)];
+      if (unique.length === 0) return true;
+      const epoch = sessionEpoch.current;
+      const removed: string[] = [];
+      try {
+        for (let start = 0; start < unique.length; start += 256) {
+          const batch = unique.slice(start, start + 256);
+          await commitVaultOperations(batch.map((id) => ({ op: "delete" as const, id })));
+          removed.push(...batch);
+          if (sessionEpoch.current === epoch) {
+            const removedIds = new Set(removed);
+            setItems((prev) => prev.filter((item) => !removedIds.has(item.id)));
+          }
+        }
+        return true;
+      } catch {
+        toast(
+          sessionEpoch.current !== epoch
+            ? "Empty trash was not confirmed — vault locked"
+            : `Empty trash stopped after ${removed.length}/${unique.length} items`
+        );
+        return false;
+      }
+    },
+    [account, commitVaultOperations, token, toast]
+  );
+
   // ── bulk import (CSV): expose only items confirmed by the server ──
   const importItems = useCallback(
     async (
@@ -578,7 +624,9 @@ export default function App(): JSX.Element {
           setSendContacts={setSendContacts}
           persistEncryptedItem={persistEncryptedItem}
           onUpsert={upsert}
+          onTrash={trash}
           onDelete={remove}
+          onDeleteMany={removeMany}
           onImport={importItems}
           syncStatus={syncStatus}
           onLock={lock}
