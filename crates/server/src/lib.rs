@@ -36,12 +36,17 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD},
+    Engine,
+};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{
     mpsc, oneshot, OwnedSemaphorePermit, RwLock, RwLockReadGuard, RwLockWriteGuard, Semaphore,
 };
+use zeroize::Zeroize;
 
 use crypto_core::{AuthSecret, EncryptedBlob, KdfParams, PublicIdentity, Registration, SendBlob};
 
@@ -109,7 +114,14 @@ const DB_QUEUE_CAPACITY: usize = 256;
 const DB_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Latest schema understood by this binary. Startup refuses newer databases
 /// instead of silently running code against an incompatible layout.
-const CURRENT_SCHEMA_VERSION: i64 = 3;
+const CURRENT_SCHEMA_VERSION: i64 = 4;
+const VERIFICATION_TOKEN_BYTES: usize = 32;
+const VERIFICATION_TTL_SECONDS: i64 = 30 * 60;
+const VERIFICATION_RESEND_SECONDS: i64 = 2 * 60;
+const MAX_CHALLENGES_GLOBAL_PER_MIN: u32 = 30;
+const MAX_CHALLENGES_PER_EMAIL_PER_MIN: u32 = 2;
+const MAX_VERIFICATIONS_GLOBAL_PER_MIN: u32 = 120;
+const MAX_VERIFICATIONS_PER_TOKEN_PER_MIN: u32 = 5;
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:7777";
 const DEFAULT_DB_PATH: &str = "bastion.db";
 const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
@@ -164,11 +176,16 @@ impl ServerConfig {
                     );
                 }
                 let public_origin = required_setting(&mut lookup, "BASTION_PUBLIC_ORIGIN")?;
+                let transport = TransportPolicy::parse(&public_origin)?;
+                let smtp = smtp.ok_or_else(|| {
+                    "complete SMTP configuration is required when BASTION_ENV=production"
+                        .to_string()
+                })?;
                 Ok(Self {
                     bind_addr,
                     db_path,
-                    transport: Some(TransportPolicy::parse(&public_origin)?),
-                    smtp,
+                    transport: Some(transport),
+                    smtp: Some(smtp),
                 })
             }
             _ => Err("BASTION_ENV must be either development or production".to_string()),
@@ -322,6 +339,21 @@ pub fn app_with_db(db_path: &str) -> Router {
     build(DEFAULT_TOKEN_TTL, db_path, MAX_CONCURRENT_AUTH)
 }
 
+/// Test-only topology for exercising mailbox proof without contacting an SMTP
+/// relay. Production obtains this policy only through validated `ServerConfig`.
+#[doc(hidden)]
+pub fn app_with_db_and_mailbox_verification(db_path: &str, origin: &str) -> Router {
+    build_with_rate_limits(
+        DEFAULT_TOKEN_TTL,
+        db_path,
+        MAX_CONCURRENT_AUTH,
+        RuntimeOptions {
+            verification_origin: Some(origin.to_string()),
+            ..RuntimeOptions::default()
+        },
+    )
+}
+
 /// In-memory (non-persistent) variant — used by tests for isolation.
 pub fn app_in_memory() -> Router {
     build(DEFAULT_TOKEN_TTL, ":memory:", MAX_CONCURRENT_AUTH)
@@ -400,6 +432,7 @@ struct RuntimeOptions {
     auth_rate_limits: AuthRateLimits,
     transport: Option<TransportPolicy>,
     smtp: Option<mail_outbox::SmtpConfig>,
+    verification_origin: Option<String>,
 }
 
 impl Default for RuntimeOptions {
@@ -410,6 +443,7 @@ impl Default for RuntimeOptions {
             auth_rate_limits: AuthRateLimits::default(),
             transport: None,
             smtp: None,
+            verification_origin: None,
         }
     }
 }
@@ -425,6 +459,9 @@ fn build_with_transport(
     transport: Option<TransportPolicy>,
     smtp: Option<mail_outbox::SmtpConfig>,
 ) -> Router {
+    let verification_origin = transport
+        .as_ref()
+        .map(|policy| policy.public_origin.clone());
     build_with_rate_limits(
         token_ttl,
         db_path,
@@ -432,6 +469,7 @@ fn build_with_transport(
         RuntimeOptions {
             transport,
             smtp,
+            verification_origin,
             ..RuntimeOptions::default()
         },
     )
@@ -453,6 +491,14 @@ fn build_with_rate_limits(
     let protected_routes = Router::new()
         .route("/accounts", post(create_account).delete(delete_account))
         .route("/accounts/:email/prelogin", get(prelogin))
+        .route(
+            "/registration-challenges",
+            post(request_registration_challenge),
+        )
+        .route(
+            "/registration-challenges/verify",
+            post(verify_registration_challenge),
+        )
         .route("/sessions", post(create_session).delete(delete_session))
         .route("/vault", get(get_vault))
         .route("/vault/revision", get(get_vault_revision))
@@ -474,6 +520,7 @@ fn build_with_rate_limits(
             storage_availability_gate,
         ));
     let routes = Router::new()
+        .route("/config", get(public_config))
         .route("/health", get(health))
         .route("/livez", get(liveness))
         .route("/readyz", get(readiness))
@@ -654,6 +701,7 @@ struct AppState {
     rate_window: Duration,
     auth_rate_limits: AuthRateLimits,
     transport: Option<TransportPolicy>,
+    verification_origin: Option<String>,
 }
 
 struct Inner {
@@ -683,6 +731,7 @@ struct AccountRecord {
     wrapped_vault_key: EncryptedBlob,
     /// Argon2id hash (PHC) of the authentication secret.
     auth_hash: String,
+    email_verified_at: Option<i64>,
     items: HashMap<String, EncryptedBlob>,
     item_bytes: HashMap<String, usize>,
     manifest: Option<EncryptedBlob>,
@@ -699,6 +748,7 @@ impl AppState {
             auth_rate_limits,
             transport,
             smtp,
+            verification_origin,
         } = options;
         let (db, accounts) = Db::open(db_path);
         let state = Self {
@@ -715,6 +765,7 @@ impl AppState {
             rate_window,
             auth_rate_limits,
             transport,
+            verification_origin,
         };
         if let Some(config) = smtp {
             mail_outbox::spawn(state.db.clone(), config);
@@ -792,6 +843,39 @@ enum PreparedVaultOperation {
 enum DbVaultMutation {
     Applied,
     Stale,
+}
+
+struct RegistrationMail {
+    outbox_id: String,
+    recipient: String,
+    subject: String,
+    text_body: String,
+    token_hash: [u8; 32],
+    expires_at: i64,
+    resend_after: i64,
+    created_at: i64,
+}
+
+enum ChallengeRequestOutcome {
+    Queued,
+    Noop,
+    QueueFull,
+}
+
+enum AccountCreateOutcome {
+    Created,
+    Conflict,
+    InvalidMailboxProof,
+}
+
+struct NewAccount {
+    email: String,
+    salt: String,
+    kdf_json: String,
+    wrapped_json: String,
+    auth_hash: String,
+    mailbox_proof: Option<[u8; 32]>,
+    created_at: i64,
 }
 
 enum IdentityPublication {
@@ -1258,6 +1342,80 @@ fn migrate_v2_to_v3(conn: &mut Connection) -> rusqlite::Result<()> {
     tx.commit()
 }
 
+fn migrate_v3_to_v4(conn: &mut Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let migration = (|| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "ALTER TABLE accounts ADD COLUMN email_verified_at INTEGER;
+             UPDATE accounts SET email_verified_at=unixepoch();
+
+             CREATE TABLE registration_challenges(
+               email TEXT PRIMARY KEY,
+               token_hash BLOB UNIQUE NOT NULL,
+               expires_at INTEGER NOT NULL,
+               resend_after INTEGER NOT NULL,
+               verified_at INTEGER,
+               created_at INTEGER NOT NULL,
+               CHECK(length(token_hash)=32),
+               CHECK(expires_at>=created_at),
+               CHECK(resend_after>=created_at),
+               CHECK(verified_at IS NULL OR verified_at>=created_at));
+
+             CREATE TABLE mail_outbox_v4(
+               id TEXT PRIMARY KEY,
+               account_email TEXT,
+               challenge_email TEXT,
+               recipient TEXT NOT NULL,
+               subject TEXT NOT NULL,
+               text_body TEXT NOT NULL,
+               state TEXT NOT NULL,
+               attempts INTEGER NOT NULL DEFAULT 0,
+               available_at INTEGER NOT NULL,
+               lease_until INTEGER,
+               created_at INTEGER NOT NULL,
+               delivered_at INTEGER,
+               last_error_code TEXT,
+               FOREIGN KEY(account_email) REFERENCES accounts(email) ON DELETE CASCADE,
+               FOREIGN KEY(challenge_email) REFERENCES registration_challenges(email)
+                 ON DELETE CASCADE,
+               CHECK((account_email IS NOT NULL)+(challenge_email IS NOT NULL)=1),
+               CHECK(length(id)=32 AND id=lower(id)),
+               CHECK(state IN ('pending','in_flight','delivered','dead')),
+               CHECK(attempts BETWEEN 0 AND 8),
+               CHECK(available_at>=0 AND created_at>=0),
+               CHECK((state='in_flight')=(lease_until IS NOT NULL)),
+               CHECK((state='delivered')=(delivered_at IS NOT NULL)),
+               CHECK(last_error_code IS NULL OR length(last_error_code)<=64),
+               CHECK(
+                 (state IN ('pending','in_flight')
+                   AND length(recipient) BETWEEN 1 AND 254
+                   AND length(subject) BETWEEN 1 AND 160
+                   AND length(text_body) BETWEEN 1 AND 16384)
+                 OR
+                 (state IN ('delivered','dead')
+                   AND recipient='' AND subject='' AND text_body='')
+               ));
+             INSERT INTO mail_outbox_v4(
+               id,account_email,challenge_email,recipient,subject,text_body,state,
+               attempts,available_at,lease_until,created_at,delivered_at,last_error_code
+             ) SELECT
+               id,account_email,NULL,recipient,subject,text_body,state,
+               attempts,available_at,lease_until,created_at,delivered_at,last_error_code
+             FROM mail_outbox;
+             DROP TABLE mail_outbox;
+             ALTER TABLE mail_outbox_v4 RENAME TO mail_outbox;
+             CREATE INDEX idx_mail_outbox_due
+               ON mail_outbox(state,available_at,lease_until,created_at);
+             PRAGMA user_version=4;",
+        )?;
+        tx.commit()
+    })();
+    let foreign_keys = conn.pragma_update(None, "foreign_keys", "ON");
+    migration?;
+    foreign_keys
+}
+
 fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     assert!(
@@ -1269,6 +1427,7 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
             0 => migrate_v0_to_v1(conn)?,
             1 => migrate_v1_to_v2(conn)?,
             2 => migrate_v2_to_v3(conn)?,
+            3 => migrate_v3_to_v4(conn)?,
             _ => unreachable!("all schema migrations are explicit"),
         }
         version = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -1472,28 +1631,175 @@ impl Db {
         result
     }
 
-    /// Inserts a new account without ever replacing an existing credential.
-    /// Returns `false` when a competing insert already claimed `email`.
-    async fn create_account(
+    async fn mailbox_proof_valid(
         &self,
         email: &str,
-        salt: &str,
-        kdf_json: &str,
-        wrapped_json: &str,
-        auth_hash: &str,
+        token_hash: [u8; 32],
+        now: i64,
     ) -> Result<bool, DbError> {
         let email = email.to_owned();
-        let salt = salt.to_owned();
-        let kdf_json = kdf_json.to_owned();
-        let wrapped_json = wrapped_json.to_owned();
-        let auth_hash = auth_hash.to_owned();
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM registration_challenges
+                    WHERE email=?1 AND token_hash=?2 AND verified_at IS NOT NULL
+                      AND expires_at>=?3
+                 )",
+                params![email, token_hash.as_slice(), now],
+                |row| row.get(0),
+            )
+        })
+        .await
+    }
+
+    async fn request_registration_challenge(
+        &self,
+        mail: RegistrationMail,
+    ) -> Result<ChallengeRequestOutcome, DbError> {
         self.call_mutation(move |conn| {
-            let inserted = conn.execute(
-                "INSERT INTO accounts(email,salt,kdf,wrapped_vault_key,auth_hash) \
-                 VALUES(?1,?2,?3,?4,?5) ON CONFLICT(email) DO NOTHING",
-                params![email, salt, kdf_json, wrapped_json, auth_hash],
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            tx.execute(
+                "DELETE FROM registration_challenges WHERE expires_at<?1",
+                [mail.created_at],
             )?;
-            Ok(inserted == 1)
+            let account_exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE email=?1)",
+                [&mail.recipient],
+                |row| row.get(0),
+            )?;
+            if account_exists {
+                tx.commit()?;
+                return Ok(ChallengeRequestOutcome::Noop);
+            }
+            let resend_after = tx
+                .query_row(
+                    "SELECT resend_after FROM registration_challenges WHERE email=?1",
+                    [&mail.recipient],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?;
+            if resend_after.is_some_and(|until| mail.created_at < until) {
+                tx.commit()?;
+                return Ok(ChallengeRequestOutcome::Noop);
+            }
+            // Replacing the challenge cascades any queued stale message before
+            // the new token and mail are inserted atomically.
+            tx.execute(
+                "DELETE FROM registration_challenges WHERE email=?1",
+                [&mail.recipient],
+            )?;
+            tx.execute(
+                "INSERT INTO registration_challenges(
+                   email,token_hash,expires_at,resend_after,verified_at,created_at
+                 ) VALUES(?1,?2,?3,?4,NULL,?5)",
+                params![
+                    mail.recipient,
+                    mail.token_hash.as_slice(),
+                    mail.expires_at,
+                    mail.resend_after,
+                    mail.created_at
+                ],
+            )?;
+            let queued = mail_outbox::enqueue_registration(
+                &tx,
+                &mail.recipient,
+                mail_outbox::MailDraft {
+                    id: &mail.outbox_id,
+                    recipient: &mail.recipient,
+                    subject: &mail.subject,
+                    text_body: &mail.text_body,
+                    created_at: mail.created_at,
+                },
+            )?;
+            if !queued {
+                return Ok(ChallengeRequestOutcome::QueueFull);
+            }
+            tx.commit()?;
+            Ok(ChallengeRequestOutcome::Queued)
+        })
+        .await
+    }
+
+    async fn verify_registration_challenge(
+        &self,
+        token_hash: [u8; 32],
+        now: i64,
+    ) -> Result<Option<String>, DbError> {
+        self.call_mutation(move |conn| {
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let email = tx
+                .query_row(
+                    "SELECT email FROM registration_challenges
+                      WHERE token_hash=?1 AND expires_at>=?2",
+                    params![token_hash.as_slice(), now],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if let Some(email) = &email {
+                tx.execute(
+                    "UPDATE registration_challenges
+                        SET verified_at=COALESCE(verified_at,?1)
+                      WHERE email=?2",
+                    params![now, email],
+                )?;
+            }
+            tx.commit()?;
+            Ok(email)
+        })
+        .await
+    }
+
+    /// Inserts a new account and consumes an independently verified mailbox
+    /// proof in the same transaction. Development callers pass no proof.
+    async fn create_account(&self, account: NewAccount) -> Result<AccountCreateOutcome, DbError> {
+        self.call_mutation(move |conn| {
+            let NewAccount {
+                email,
+                salt,
+                kdf_json,
+                wrapped_json,
+                auth_hash,
+                mailbox_proof,
+                created_at,
+            } = account;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM accounts WHERE email=?1)",
+                [&email],
+                |row| row.get::<_, bool>(0),
+            )? {
+                tx.commit()?;
+                return Ok(AccountCreateOutcome::Conflict);
+            }
+            if let Some(token_hash) = mailbox_proof {
+                let valid: bool = tx.query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM registration_challenges
+                        WHERE email=?1 AND token_hash=?2 AND verified_at IS NOT NULL
+                          AND expires_at>=?3
+                     )",
+                    params![email, token_hash.as_slice(), created_at],
+                    |row| row.get(0),
+                )?;
+                if !valid {
+                    tx.commit()?;
+                    return Ok(AccountCreateOutcome::InvalidMailboxProof);
+                }
+            }
+            tx.execute(
+                "INSERT INTO accounts(
+                   email,salt,kdf,wrapped_vault_key,auth_hash,email_verified_at
+                 ) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![email, salt, kdf_json, wrapped_json, auth_hash, created_at],
+            )?;
+            if mailbox_proof.is_some() {
+                tx.execute(
+                    "DELETE FROM registration_challenges WHERE email=?1",
+                    [&email],
+                )?;
+            }
+            tx.commit()?;
+            Ok(AccountCreateOutcome::Created)
         })
         .await
     }
@@ -1579,7 +1885,8 @@ impl Db {
 
         {
             let mut stmt = conn.prepare(
-                "SELECT email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision FROM accounts",
+                "SELECT email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision,email_verified_at
+                   FROM accounts",
             )?;
             let rows = stmt.query_map([], |r| {
                 Ok((
@@ -1589,16 +1896,25 @@ impl Db {
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, i64>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
                 ))
             })?;
             for row in rows {
-                let (email, salt, kdf_s, wrapped_s, auth_hash, vault_revision) = row?;
+                let (email, salt, kdf_s, wrapped_s, auth_hash, vault_revision, email_verified_at) =
+                    row?;
                 let kdf: KdfParams = serde_json::from_str(&kdf_s)?;
                 let wrapped_vault_key: EncryptedBlob = serde_json::from_str(&wrapped_s)?;
                 validate_persisted_credentials(&email, &salt, kdf, &wrapped_vault_key, &auth_hash)?;
                 let vault_revision = u64::try_from(vault_revision).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "negative vault revision")
                 })?;
+                if email_verified_at.is_some_and(|verified_at| verified_at < 0) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "negative email verification timestamp",
+                    )
+                    .into());
+                }
                 accounts.insert(
                     email,
                     AccountRecord {
@@ -1606,6 +1922,7 @@ impl Db {
                         kdf,
                         wrapped_vault_key,
                         auth_hash,
+                        email_verified_at,
                         items: HashMap::new(),
                         item_bytes: HashMap::new(),
                         manifest: None,
@@ -1728,6 +2045,30 @@ fn db_api_error(error: DbError) -> ApiError {
 struct CreateAccount {
     email: String,
     registration: Registration,
+    #[serde(default)]
+    mailbox_proof: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistrationChallengeRequest {
+    email: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifyRegistrationChallengeRequest {
+    token: String,
+}
+
+#[derive(Serialize)]
+struct VerifyRegistrationChallengeResponse {
+    email: String,
+}
+
+#[derive(Serialize)]
+struct PublicConfig {
+    email_verification_required: bool,
 }
 
 #[derive(Serialize)]
@@ -1824,12 +2165,157 @@ async fn health(state: State<AppState>) -> Response {
     readiness(state).await
 }
 
+async fn public_config(State(st): State<AppState>) -> Json<PublicConfig> {
+    Json(PublicConfig {
+        email_verification_required: st.verification_origin.is_some(),
+    })
+}
+
+fn verification_token_hash(token: &str) -> Option<[u8; 32]> {
+    let mut decoded = [0u8; VERIFICATION_TOKEN_BYTES];
+    let decoded_len = URL_SAFE_NO_PAD
+        .decode_slice(token.as_bytes(), &mut decoded)
+        .ok()?;
+    if decoded_len != VERIFICATION_TOKEN_BYTES || URL_SAFE_NO_PAD.encode(decoded) != token {
+        decoded.zeroize();
+        return None;
+    }
+    let hash = Sha256::digest(decoded).into();
+    decoded.zeroize();
+    Some(hash)
+}
+
+fn new_registration_mail(email: &str, origin: &str, now: i64) -> RegistrationMail {
+    let mut raw_token = [0u8; VERIFICATION_TOKEN_BYTES];
+    OsRng.fill_bytes(&mut raw_token);
+    let token = URL_SAFE_NO_PAD.encode(raw_token);
+    let token_hash = Sha256::digest(raw_token).into();
+    raw_token.zeroize();
+    let mut raw_id = [0u8; 16];
+    OsRng.fill_bytes(&mut raw_id);
+    let outbox_id = data_encoding::HEXLOWER.encode(&raw_id);
+    let text_body = format!(
+        "Verify this mailbox for a new Bastion vault:\n\n{origin}/verify-email#token={token}\n\nThis link expires in 30 minutes. It proves mailbox control only. It cannot recover your vault, master password, or Secret Key. If you did not request this, ignore this message."
+    );
+    RegistrationMail {
+        outbox_id,
+        recipient: email.to_string(),
+        subject: "Verify your Bastion mailbox".to_string(),
+        text_body,
+        token_hash,
+        expires_at: now.saturating_add(VERIFICATION_TTL_SECONDS),
+        resend_after: now.saturating_add(VERIFICATION_RESEND_SECONDS),
+        created_at: now,
+    }
+}
+
+async fn request_registration_challenge(
+    State(st): State<AppState>,
+    Json(req): Json<RegistrationChallengeRequest>,
+) -> Result<StatusCode, ApiError> {
+    let origin = st.verification_origin.as_deref().ok_or(ApiError(
+        StatusCode::NOT_FOUND,
+        "mailbox verification disabled",
+    ))?;
+    validate_account_id(&req.email)?;
+    if !mail_outbox::valid_recipient(&req.email) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "invalid mailbox"));
+    }
+    auth_rate_limit(
+        &st,
+        "global",
+        "challenge-global",
+        MAX_CHALLENGES_GLOBAL_PER_MIN,
+    )
+    .await?;
+    auth_rate_limit(
+        &st,
+        &req.email,
+        "challenge-email",
+        MAX_CHALLENGES_PER_EMAIL_PER_MIN,
+    )
+    .await?;
+    let mail = new_registration_mail(&req.email, origin, now_secs());
+    match st
+        .db
+        .request_registration_challenge(mail)
+        .await
+        .map_err(db_api_error)?
+    {
+        ChallengeRequestOutcome::Queued | ChallengeRequestOutcome::Noop => Ok(StatusCode::ACCEPTED),
+        ChallengeRequestOutcome::QueueFull => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mail queue unavailable",
+        )),
+    }
+}
+
+async fn verify_registration_challenge(
+    State(st): State<AppState>,
+    Json(mut req): Json<VerifyRegistrationChallengeRequest>,
+) -> Result<Json<VerifyRegistrationChallengeResponse>, ApiError> {
+    if st.verification_origin.is_none() {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "mailbox verification disabled",
+        ));
+    }
+    let token_hash = verification_token_hash(&req.token);
+    req.token.zeroize();
+    let token_hash = token_hash.ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "invalid or expired proof",
+    ))?;
+    auth_rate_limit(
+        &st,
+        "global",
+        "verify-global",
+        MAX_VERIFICATIONS_GLOBAL_PER_MIN,
+    )
+    .await?;
+    let rate_key = data_encoding::HEXLOWER.encode(&token_hash[..8]);
+    auth_rate_limit(
+        &st,
+        &rate_key,
+        "verify-token",
+        MAX_VERIFICATIONS_PER_TOKEN_PER_MIN,
+    )
+    .await?;
+    let email = st
+        .db
+        .verify_registration_challenge(token_hash, now_secs())
+        .await
+        .map_err(db_api_error)?
+        .ok_or(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid or expired proof",
+        ))?;
+    Ok(Json(VerifyRegistrationChallengeResponse { email }))
+}
+
 async fn create_account(
     State(st): State<AppState>,
-    Json(req): Json<CreateAccount>,
+    Json(mut req): Json<CreateAccount>,
 ) -> Result<StatusCode, ApiError> {
     validate_account_id(&req.email)?;
     validate_registration(&req.registration)?;
+    let now = now_secs();
+    let mailbox_proof = if st.verification_origin.is_some() {
+        if !mail_outbox::valid_recipient(&req.email) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "invalid mailbox"));
+        }
+        let mut proof = req
+            .mailbox_proof
+            .take()
+            .ok_or(ApiError(StatusCode::FORBIDDEN, "mailbox proof required"))?;
+        let token_hash = verification_token_hash(&proof);
+        proof.zeroize();
+        let token_hash =
+            token_hash.ok_or(ApiError(StatusCode::FORBIDDEN, "mailbox proof required"))?;
+        Some(token_hash)
+    } else {
+        None
+    };
     auth_rate_limit(
         &st,
         "global",
@@ -1848,6 +2334,16 @@ async fn create_account(
     // collision check is repeated under the write lock after hashing.
     if st.read().await.accounts.contains_key(&req.email) {
         return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
+    }
+    if let Some(token_hash) = mailbox_proof {
+        if !st
+            .db
+            .mailbox_proof_valid(&req.email, token_hash, now)
+            .await
+            .map_err(db_api_error)?
+        {
+            return Err(ApiError(StatusCode::FORBIDDEN, "mailbox proof required"));
+        }
     }
     // Slow hash on a dedicated blocking thread (no starvation of the async runtime).
     let secret = req.registration.auth_secret;
@@ -1872,17 +2368,25 @@ async fn create_account(
     }
     let created = st
         .db
-        .create_account(
-            &req.email,
-            &req.registration.salt,
-            &kdf_json,
-            &wrapped_json,
-            &auth_hash,
-        )
+        .create_account(NewAccount {
+            email: req.email.clone(),
+            salt: req.registration.salt.clone(),
+            kdf_json,
+            wrapped_json,
+            auth_hash: auth_hash.clone(),
+            mailbox_proof,
+            created_at: now,
+        })
         .await
         .map_err(db_api_error)?;
-    if !created {
-        return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
+    match created {
+        AccountCreateOutcome::Created => {}
+        AccountCreateOutcome::Conflict => {
+            return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
+        }
+        AccountCreateOutcome::InvalidMailboxProof => {
+            return Err(ApiError(StatusCode::FORBIDDEN, "mailbox proof required"));
+        }
     }
     inner.accounts.insert(
         req.email,
@@ -1891,6 +2395,7 @@ async fn create_account(
             kdf: req.registration.kdf,
             wrapped_vault_key: req.registration.wrapped_vault_key,
             auth_hash,
+            email_verified_at: Some(now),
             items: HashMap::new(),
             item_bytes: HashMap::new(),
             manifest: None,
@@ -2008,17 +2513,17 @@ async fn create_session(
     )
     .await?;
     // We copy the hash, then release the lock before the slow verification.
-    let phc = st
+    let account = st
         .read()
         .await
         .accounts
         .get(&req.email)
-        .map(|a| a.auth_hash.clone());
+        .map(|a| (a.auth_hash.clone(), a.email_verified_at.is_some()));
     // Same response for "unknown account" and "wrong secret" — and the same
     // Argon2id cost: unknown accounts verify against a process-constant dummy
     // hash so response timing cannot separate the two cases.
-    let known = phc.is_some();
-    let phc = phc.unwrap_or_else(|| DUMMY_PHC.clone());
+    let known = account.is_some();
+    let (phc, mailbox_verified) = account.unwrap_or_else(|| (DUMMY_PHC.clone(), false));
     let secret = req.auth_secret;
     let permit = auth_permit(&st)?;
     let ok = tokio::task::spawn_blocking(move || {
@@ -2029,6 +2534,9 @@ async fn create_session(
     .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?;
     if !ok || !known {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
+    }
+    if !mailbox_verified {
+        return Err(ApiError(StatusCode::FORBIDDEN, "mailbox proof required"));
     }
     let now = Instant::now();
     let expires_at = now + st.token_ttl;
@@ -3321,6 +3829,11 @@ mod tests {
             ("BIND_ADDR", "127.0.0.1:7777"),
             ("BASTION_DB", "/var/lib/bastion/bastion.db"),
             ("BASTION_PUBLIC_ORIGIN", "https://vault.example.com"),
+            ("BASTION_SMTP_HOST", "smtp.example.com"),
+            ("BASTION_SMTP_PORT", "587"),
+            ("BASTION_SMTP_USERNAME", "bastion"),
+            ("BASTION_SMTP_PASSWORD", "secret"),
+            ("BASTION_MAIL_FROM", "no-reply@example.com"),
         ];
         let config = config_from(&valid).unwrap();
         assert!(config.is_production());
@@ -3420,6 +3933,125 @@ mod tests {
         ] {
             assert!(config_from(&partial).is_err());
         }
+
+        assert!(config_from(&[
+            ("BASTION_ENV", "production"),
+            ("BIND_ADDR", "127.0.0.1:7777"),
+            ("BASTION_DB", "/var/lib/bastion/bastion.db"),
+            ("BASTION_PUBLIC_ORIGIN", "https://vault.example.com"),
+        ])
+        .is_err());
+    }
+
+    fn registration_mail(email: &str, token: [u8; 32], now: i64) -> RegistrationMail {
+        RegistrationMail {
+            outbox_id: data_encoding::HEXLOWER.encode(&[9u8; 16]),
+            recipient: email.to_string(),
+            subject: "Verify your Bastion mailbox".to_string(),
+            text_body: "bounded verification body".to_string(),
+            token_hash: Sha256::digest(token).into(),
+            expires_at: now + VERIFICATION_TTL_SECONDS,
+            resend_after: now + VERIFICATION_RESEND_SECONDS,
+            created_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_proof_is_rotated_then_consumed_with_account_creation() {
+        let (db, _) = Db::open(":memory:");
+        let email = "proof@example.com";
+        let first = [1u8; 32];
+        let second = [2u8; 32];
+        assert!(matches!(
+            db.request_registration_challenge(registration_mail(email, first, 100))
+                .await
+                .unwrap(),
+            ChallengeRequestOutcome::Queued
+        ));
+        // A resend inside the durable cooldown is a generic no-op.
+        assert!(matches!(
+            db.request_registration_challenge(registration_mail(email, second, 150))
+                .await
+                .unwrap(),
+            ChallengeRequestOutcome::Noop
+        ));
+        // After the cooldown, replacement invalidates the first proof and its
+        // queued message through the challenge foreign key.
+        assert!(matches!(
+            db.request_registration_challenge(registration_mail(email, second, 220))
+                .await
+                .unwrap(),
+            ChallengeRequestOutcome::Queued
+        ));
+        assert!(db
+            .verify_registration_challenge(Sha256::digest(first).into(), 220)
+            .await
+            .unwrap()
+            .is_none());
+        let second_hash: [u8; 32] = Sha256::digest(second).into();
+        assert!(matches!(
+            db.create_account(NewAccount {
+                email: email.to_string(),
+                salt: "salt".to_string(),
+                kdf_json: "{}".to_string(),
+                wrapped_json: "{}".to_string(),
+                auth_hash: "hash".to_string(),
+                mailbox_proof: Some(second_hash),
+                created_at: 220,
+            })
+            .await
+            .unwrap(),
+            AccountCreateOutcome::InvalidMailboxProof
+        ));
+        assert_eq!(
+            db.verify_registration_challenge(second_hash, 220)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(email)
+        );
+        assert!(db
+            .mailbox_proof_valid(email, second_hash, 220)
+            .await
+            .unwrap());
+
+        assert!(matches!(
+            db.create_account(NewAccount {
+                email: email.to_string(),
+                salt: "salt".to_string(),
+                kdf_json: "{}".to_string(),
+                wrapped_json: "{}".to_string(),
+                auth_hash: "hash".to_string(),
+                mailbox_proof: Some(second_hash),
+                created_at: 220,
+            })
+            .await
+            .unwrap(),
+            AccountCreateOutcome::Created
+        ));
+        assert!(!db
+            .mailbox_proof_valid(email, second_hash, 220)
+            .await
+            .unwrap());
+        let (verified_at, challenges, queued): (Option<i64>, i64, i64) = db
+            .call(move |conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT email_verified_at FROM accounts WHERE email=?1",
+                        [email],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row("SELECT COUNT(*) FROM registration_challenges", [], |row| {
+                        row.get(0)
+                    })?,
+                    conn.query_row("SELECT COUNT(*) FROM mail_outbox", [], |row| row.get(0))?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(verified_at, Some(220));
+        assert_eq!(challenges, 0);
+        assert_eq!(queued, 0);
     }
 
     #[tokio::test]

@@ -50,7 +50,7 @@ export function Unlock({
           <div className="field">
             <label>Email</label>
             <input className="input" type="email" autoComplete="email" autoFocus value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" />
-            <small>This server does not verify mailbox ownership or provide email recovery.</small>
+            <small>Mailbox verification is for registration only and never enables email recovery.</small>
           </div>
           <div className="field">
             <label>Master password</label>

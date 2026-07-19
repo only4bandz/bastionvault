@@ -31,7 +31,7 @@ authenticated private-hop design and a new reviewed configuration contract.
 The ingress and Axum process run on the same host. The ingress must:
 
 1. serve the immutable web application and proxy `/api/*` to the loopback
-   listener;
+   listener; `/verify-email` must resolve to the SPA entry point, never Axum;
 2. redirect plaintext HTTP to the exact HTTPS URL before any application
    request reaches Axum;
 3. preserve the original public `Host` header;
@@ -40,6 +40,11 @@ The ingress and Axum process run on the same host. The ingress must:
 5. use a publicly trusted certificate, renew it automatically, and alert while
    at least 30 days of validity remain;
 6. pass through Bastion's `Strict-Transport-Security: max-age=31536000` header.
+
+Mailbox verification proofs are encoded in the URL fragment of
+`/verify-email#token=...`; fragments never reach HTTP servers. Ingress request
+logs must still exclude query strings by policy so future application URLs
+cannot accidentally turn secrets into telemetry.
 
 Axum rejects non-health application requests unless `Host` exactly matches the
 configured public authority and the trusted proto value is exactly `https`.

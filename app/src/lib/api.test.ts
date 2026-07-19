@@ -48,6 +48,34 @@ describe("versioned account lifecycle client", () => {
     });
     expect(options?.headers).toMatchObject({ Authorization: "Bearer token" });
   });
+
+  it("sends mailbox challenges and proof only to canonical endpoints", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(null, { status: 204 })
+    );
+    globalThis.fetch = fetchMock;
+
+    await api.requestRegistrationChallenge("alice@example.com");
+    await api.verifyRegistrationChallenge("proof-token");
+    await api.createAccount(
+      "alice@example.com",
+      {
+        version: 1,
+        salt: "salt",
+        kdf: { mem_kib: 65536, iterations: 3, parallelism: 1 },
+        wrapped_vault_key: { v: 1, nonce: "nonce", ct: "ciphertext" },
+        auth_secret: "secret",
+      },
+      "proof-token"
+    );
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "/api/v1/registration-challenges",
+      "/api/v1/registration-challenges/verify",
+      "/api/v1/accounts",
+    ]);
+    expect(fetchMock.mock.calls[2][1]?.body).toContain('"mailbox_proof":"proof-token"');
+  });
 });
 
 describe("session-expiry signaling", () => {
@@ -116,6 +144,7 @@ describe("hostile server error handling", () => {
 
   it("maps status classes to deterministic local copy", () => {
     expect(statusMessage(401)).toMatch(/session or credentials/i);
+    expect(statusMessage(403)).toMatch(/mailbox verification/i);
     expect(statusMessage(404)).toMatch(/not found/i);
     expect(statusMessage(409)).toMatch(/conflict/i);
     expect(statusMessage(413)).toMatch(/too large/i);

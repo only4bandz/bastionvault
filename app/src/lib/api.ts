@@ -23,6 +23,9 @@ export interface Prelogin {
   kdf: Registration["kdf"];
   wrapped_vault_key: Blob;
 }
+export interface PublicConfig {
+  email_verification_required: boolean;
+}
 export interface VaultData {
   items: Record<string, Blob>;
   manifest: Blob | null;
@@ -64,6 +67,7 @@ export class ApiError extends Error {
  */
 export function statusMessage(status: number): string {
   if (status === 401) return "The server rejected the session or credentials.";
+  if (status === 403) return "Mailbox verification is required or has expired.";
   if (status === 404) return "Not found on the server.";
   if (status === 409) return "The server reported a conflict with another change.";
   if (status === 413) return "The request is too large for the server.";
@@ -142,8 +146,17 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
 }
 
 export const api = {
-  createAccount: (email: string, registration: Registration) =>
-    req<void>("POST", "/accounts", undefined, { email, registration }),
+  config: () => req<PublicConfig>("GET", "/config"),
+  requestRegistrationChallenge: (email: string) =>
+    req<void>("POST", "/registration-challenges", undefined, { email }),
+  verifyRegistrationChallenge: (token: string) =>
+    req<{ email: string }>("POST", "/registration-challenges/verify", undefined, { token }),
+  createAccount: (email: string, registration: Registration, mailboxProof?: string) =>
+    req<void>("POST", "/accounts", undefined, {
+      email,
+      registration,
+      ...(mailboxProof ? { mailbox_proof: mailboxProof } : {}),
+    }),
   prelogin: (email: string) => req<Prelogin>("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
   login: (email: string, auth_secret: string) =>
     req<{ token: string }>("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),

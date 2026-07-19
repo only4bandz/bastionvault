@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { Welcome } from "./screens/Welcome";
 import { RevealSecret } from "./screens/RevealSecret";
 import { Unlock } from "./screens/Unlock";
+import { EmailVerification } from "./screens/EmailVerification";
 import { Vault, type VaultSyncStatus } from "./screens/Vault";
 import { ensureWasm, register, unlock, type Account } from "./lib/wasm";
 import {
@@ -37,7 +38,7 @@ import {
   type VaultRollbackAnchor,
 } from "./lib/vault-anchor";
 
-type Phase = "welcome" | "reveal" | "unlock" | "vault";
+type Phase = "welcome" | "verify" | "reveal" | "unlock" | "vault";
 
 const AUTO_LOCK_MS = 10 * 60 * 1000; // lock after 10 minutes of inactivity
 const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
@@ -183,6 +184,9 @@ async function persistVaultIntegrityAnchor(
 
 export default function App(): JSX.Element {
   const [phase, setPhase] = useState<Phase>("welcome");
+  const [emailVerificationRequired, setEmailVerificationRequired] = useState<boolean | null>(null);
+  const [mailboxProof, setMailboxProof] = useState<string | null>(null);
+  const [verificationError, setVerificationError] = useState<string | null>(null);
   const [account, setAccount] = useState<Account | null>(null);
   const [email, setEmail] = useState("");
   const [token, setToken] = useState<string | null>(null);
@@ -196,6 +200,49 @@ export default function App(): JSX.Element {
   const mutationTail = useRef<Promise<void>>(Promise.resolve());
   const pendingMutations = useRef(0);
   const mutationFailed = useRef(false);
+  const verificationStarted = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    api.config()
+      .then((config) => {
+        if (active) setEmailVerificationRequired(config.email_verification_required);
+      })
+      .catch(() => {
+        if (active) setEmailVerificationRequired(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const tokenFromLink = new URLSearchParams(window.location.hash.slice(1)).get("token");
+    if (
+      verificationStarted.current ||
+      window.location.pathname !== "/verify-email" ||
+      !tokenFromLink
+    ) {
+      return;
+    }
+    verificationStarted.current = true;
+    // URL fragments are not sent to the ingress. Remove the proof from the
+    // address bar before the verification request or any subsequent navigation.
+    window.history.replaceState({}, "", "/");
+    setPhase("verify");
+    setVerificationError(null);
+    api.verifyRegistrationChallenge(tokenFromLink)
+      .then(({ email: verifiedEmail }) => {
+        setEmail(verifiedEmail);
+        setMailboxProof(tokenFromLink);
+        setVerificationError(null);
+        setPhase("welcome");
+      })
+      .catch(() => {
+        setMailboxProof(null);
+        setVerificationError("This verification link is invalid or expired. Request a new one.");
+      });
+  }, []);
 
   const toast = useCallback((m: string) => {
     setToastMsg(m);
@@ -264,6 +311,12 @@ export default function App(): JSX.Element {
 
   // ── create a new vault locally; persist only after the recovery key is saved ──
   const onCreate = useCallback(async (em: string, pw: string) => {
+    if (emailVerificationRequired === null) {
+      throw new Error("Server registration policy is unavailable. Try again.");
+    }
+    if (emailVerificationRequired && (!mailboxProof || em !== email)) {
+      throw new Error("Verify this mailbox before creating the vault.");
+    }
     await ensureWasm();
     const acc = register(pw);
     setAccount(acc);
@@ -271,6 +324,14 @@ export default function App(): JSX.Element {
     setToken(null);
     setItems([]);
     setPhase("reveal");
+  }, [email, emailVerificationRequired, mailboxProof]);
+
+  const requestMailboxVerification = useCallback(async (em: string) => {
+    await api.requestRegistrationChallenge(em);
+    setEmail(em);
+    setMailboxProof(null);
+    setVerificationError(null);
+    setPhase("verify");
   }, []);
 
   const finishCreate = useCallback(async () => {
@@ -278,7 +339,7 @@ export default function App(): JSX.Element {
     const registration = JSON.parse(account.registration_json) as Registration;
     let collided = false;
     try {
-      await api.createAccount(email, registration);
+      await api.createAccount(email, registration, mailboxProof ?? undefined);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) collided = true;
       else throw e;
@@ -303,6 +364,7 @@ export default function App(): JSX.Element {
       setToken(tok);
       setItems(opened.items);
       setSendContacts(opened.contacts);
+      setMailboxProof(null);
       setPhase("vault");
       if (opened.bootstrapped) toast("Vault integrity protection initialized");
     } catch (error) {
@@ -313,7 +375,7 @@ export default function App(): JSX.Element {
       setPhase("unlock");
       throw error;
     }
-  }, [account, email, toast]);
+  }, [account, email, mailboxProof, toast]);
 
   // ── unlock an existing vault from the server ──
   const onUnlock = useCallback(async (em: string, pw: string, secretKey: string) => {
@@ -609,7 +671,26 @@ export default function App(): JSX.Element {
 
   return (
     <>
-      {phase === "welcome" && <Welcome onCreate={onCreate} onHaveVault={() => setPhase("unlock")} />}
+      {phase === "welcome" && (
+        <Welcome
+          onCreate={onCreate}
+          onHaveVault={() => setPhase("unlock")}
+          verificationRequired={emailVerificationRequired}
+          verifiedEmail={mailboxProof ? email : null}
+          onRequestVerification={requestMailboxVerification}
+        />
+      )}
+      {phase === "verify" && (
+        <EmailVerification
+          email={email}
+          error={verificationError}
+          onResend={requestMailboxVerification}
+          onBack={() => {
+            setVerificationError(null);
+            setPhase("welcome");
+          }}
+        />
+      )}
       {phase === "reveal" && account && (
         <RevealSecret account={account} toast={toast} onDone={finishCreate} />
       )}

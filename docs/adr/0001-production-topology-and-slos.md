@@ -87,6 +87,13 @@ scrubs terminal rows. Delivery is explicitly at least once; the deployment
 must not claim exactly-once SMTP semantics. Mailbox verification and provider
 acceptance remain separate production gates.
 
+Production registration now creates a short-lived pre-registration challenge,
+not an account, before mailbox proof. The verified 256-bit proof is bound to
+the mailbox and consumed atomically with account creation. Email remains
+explicitly excluded from vault recovery or identity claims. Provider/domain
+acceptance and a real mailbox drill are still required on the selected
+deployment.
+
 ### Availability and durability objectives
 
 The initial objectives are:

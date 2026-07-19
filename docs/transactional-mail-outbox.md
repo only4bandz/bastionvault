@@ -13,8 +13,9 @@ The mail operator can observe recipients, timing, subjects, and message bodies.
 
 ## State machine
 
-Schema version 3 adds `mail_outbox`. Every row is tied to an account with a
-cascading foreign key and follows one state machine:
+Schema version 3 adds `mail_outbox`; schema version 4 allows an outbox row to be
+owned by either an account or a pre-registration challenge, never both. Both
+owners use cascading foreign keys and the same state machine:
 
 ```text
 pending --lease--> in_flight --relay accepted--> delivered
@@ -96,5 +97,6 @@ Every producer added after this foundation must:
 5. never store a reusable vault or authentication secret in mail;
 6. treat delivery as notification only, never as account recovery authority.
 
-Mailbox verification is the first planned producer. Until that producer and
-its abuse controls are merged, SMTP configuration alone sends no mail.
+Mailbox verification is the first producer. It inserts the challenge and mail
+atomically, enforces durable resend timing plus bounded active queue capacity,
+and consumes both before account creation completes.
