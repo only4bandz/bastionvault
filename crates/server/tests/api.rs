@@ -1045,6 +1045,178 @@ async fn health_ok() {
 }
 
 #[tokio::test]
+async fn versioned_api_is_canonical_and_legacy_routes_are_marked_deprecated() {
+    let app = server::app_in_memory();
+    let versioned = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(versioned.status(), StatusCode::OK);
+    assert!(versioned.headers().get("deprecation").is_none());
+
+    let legacy = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), StatusCode::OK);
+    assert_eq!(legacy.headers()["deprecation"], "true");
+    assert_eq!(
+        legacy.headers()[header::LINK],
+        "</v1>; rel=\"successor-version\""
+    );
+}
+
+#[tokio::test]
+async fn account_deletion_requires_fresh_proof_and_removes_owned_state() {
+    let path = test_db_path("account-deletion");
+    let app = server::app_with_db(&path);
+    let email = "delete-me@example.com";
+    let (vault, registration, _secret_key) =
+        Vault::register_with(b"delete-password", fast_kdf()).unwrap();
+    let auth_secret = registration.auth_secret.expose_b64().to_string();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(json!({
+            "email": email,
+            "registration": serde_json::to_value(&registration).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, login) = send(
+        &app,
+        "POST",
+        "/v1/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": auth_secret })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = login["token"].as_str().unwrap().to_string();
+    let (_, second_login) = send(
+        &app,
+        "POST",
+        "/v1/sessions",
+        None,
+        Some(json!({ "email": email, "auth_secret": auth_secret })),
+    )
+    .await;
+    let second_token = second_login["token"].as_str().unwrap().to_string();
+
+    let item = vault.encrypt_item(b"owned", "owned-item").unwrap();
+    let mut manifest = Manifest::new();
+    manifest.set("owned-item", &item).unwrap();
+    let sealed_manifest = vault.seal_manifest(&manifest).unwrap();
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/v1/vault/transaction",
+        Some(&token),
+        Some(json!({
+            "expected_revision": 0,
+            "operations": [{ "op": "put", "id": "owned-item", "blob": item }],
+            "manifest": sealed_manifest
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let identity = IdentityKeys::generate(1);
+    let (status, published) = send(
+        &app,
+        "PUT",
+        "/v1/send/identity",
+        Some(&token),
+        Some(serde_json::to_value(identity.public()).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let bastion_id = published["bastion_id"].as_str().unwrap().to_string();
+    let sender = signup_login(&app, "deletion-sender@example.com").await;
+    let envelope = send_seal(b"pending", &bastion_id, &identity.public(), None, None).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/send",
+        Some(&sender),
+        Some(json!({
+            "recipient_id": bastion_id,
+            "message_id": envelope.message_id,
+            "blob": envelope,
+            "expires_at": null
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        "/v1/accounts",
+        Some(&token),
+        Some(json!({ "auth_secret": B64.encode([0u8; 32]) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&app, "GET", "/v1/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        "/v1/accounts",
+        Some(&token),
+        Some(json!({ "auth_secret": auth_secret })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "GET", "/v1/vault", Some(&second_token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(
+        &app,
+        "GET",
+        &format!("/v1/send/directory/{bastion_id}"),
+        Some(&sender),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    drop(app);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for (table, column, value) in [
+        ("accounts", "email", email),
+        ("items", "email", email),
+        ("manifests", "email", email),
+        ("send_directory", "email", email),
+        ("send_inbox", "recipient_id", bastion_id.as_str()),
+    ] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {column}=?1"),
+                [value],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "owned rows remained in {table}");
+    }
+}
+
+#[tokio::test]
 async fn health_reports_unavailable_when_the_schema_is_gone() {
     let path = test_db_path("health");
     let app = server::app_with_db(&path.to_string());

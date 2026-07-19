@@ -66,6 +66,7 @@ export function Welcome({
               onChange={(e) => setEmail(e.target.value)}
               placeholder="you@example.com"
             />
+            <small>Used as an unverified login identifier, not for recovery.</small>
           </div>
           <div className="field">
             <label>Master password</label>

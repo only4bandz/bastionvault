@@ -37,6 +37,7 @@ export function statusMessage(status) {
 }
 
 export const REQUEST_TIMEOUT_MS = 15_000;
+export const API_PREFIX = "/v1";
 
 /** Reads at most MAX_ERROR_BODY_CHARS of an error body — a hostile server
  * must not be able to balloon the worker's memory with a huge error page. */
@@ -102,12 +103,15 @@ async function req(base, method, path, token, body, timeoutMs) {
 
 /** Build an API bound to a given server base URL (e.g. http://127.0.0.1:7777). */
 export function makeApi(base, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
-  const call = (method, path, token, body) => req(base, method, path, token, body, timeoutMs);
+  const call = (method, path, token, body) =>
+    req(base, method, API_PREFIX + path, token, body, timeoutMs);
   return {
     prelogin: (email) => call("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
     login: (email, auth_secret) =>
       call("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),
     logout: (token) => call("DELETE", "/sessions", token),
+    deleteAccount: (token, authSecret) =>
+      call("DELETE", "/accounts", token, { auth_secret: authSecret }),
     getVault: (token) => call("GET", "/vault", token),
     mutateVault: (token, expectedRevision, operations, manifest) =>
       call("PUT", "/vault/transaction", token, {
