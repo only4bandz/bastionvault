@@ -102,6 +102,9 @@ const DB_QUEUE_CAPACITY: usize = 256;
 /// Upper bound for an accepted storage command to produce a response. SQLite's
 /// own busy timeout is shorter, leaving headroom for queueing and validation.
 const DB_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Latest schema understood by this binary. Startup refuses newer databases
+/// instead of silently running code against an incompatible layout.
+const CURRENT_SCHEMA_VERSION: i64 = 2;
 
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -678,6 +681,315 @@ fn acquire_instance_lock(path: &FsPath) -> io::Result<File> {
     Ok(lock)
 }
 
+struct PartialBackup {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Drop for PartialBackup {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let _ = fs::remove_file(&self.path);
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let _ = fs::remove_file(sqlite_artifact_path(&self.path, suffix));
+        }
+    }
+}
+
+/// Creates a coherent, no-clobber SQLite snapshot suitable for later restore.
+///
+/// The source may be live: SQLite's online backup API includes committed WAL
+/// state without copying database files behind SQLite's back. The destination
+/// must not exist, remains owner-only, and is published only after integrity,
+/// foreign-key, schema-version, and filesystem durability checks pass.
+///
+/// The snapshot still contains sensitive account metadata and verifier
+/// material. Operators must encrypt it before transferring it off-host.
+pub fn backup_database(
+    source: &FsPath,
+    destination: &FsPath,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    secure_database_parent(source)?;
+    secure_database_artifacts(source)?;
+    secure_database_parent(destination)?;
+    match fs::symlink_metadata(destination) {
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "backup destination already exists",
+            )
+            .into());
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let destination_parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| FsPath::new("."));
+    let destination_name = destination.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "backup destination must name a file",
+        )
+    })?;
+    let mut random = [0u8; 16];
+    OsRng.fill_bytes(&mut random);
+    let partial_name = format!(
+        ".{}.partial-{}",
+        destination_name.to_string_lossy(),
+        data_encoding::HEXLOWER.encode(&random)
+    );
+    let partial_path = destination_parent.join(partial_name);
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(&partial_path)?;
+    let mut partial = PartialBackup {
+        path: partial_path.clone(),
+        keep: false,
+    };
+
+    let source_conn = Connection::open_with_flags(
+        source,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    source_conn.busy_timeout(Duration::from_secs(5))?;
+    let source_version: i64 = source_conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if source_version != CURRENT_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "source schema version {source_version} does not match supported version {CURRENT_SCHEMA_VERSION}"
+            ),
+        )
+        .into());
+    }
+
+    let mut destination_conn = Connection::open_with_flags(
+        &partial_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    {
+        let backup = rusqlite::backup::Backup::new(&source_conn, &mut destination_conn)?;
+        backup.run_to_completion(128, Duration::from_millis(10), None)?;
+    }
+    let integrity: String =
+        destination_conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+    if integrity != "ok" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "backup failed SQLite integrity_check",
+        )
+        .into());
+    }
+    destination_conn.pragma_update(None, "foreign_keys", "ON")?;
+    let has_violation = {
+        let mut stmt = destination_conn.prepare("PRAGMA foreign_key_check")?;
+        let violation = stmt.query([])?.next()?.is_some();
+        violation
+    };
+    if has_violation {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "backup failed SQLite foreign_key_check",
+        )
+        .into());
+    }
+    let backup_version: i64 =
+        destination_conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if backup_version != CURRENT_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "backup schema version changed during snapshot",
+        )
+        .into());
+    }
+    destination_conn.execute_batch(
+        "PRAGMA wal_checkpoint(TRUNCATE);
+         PRAGMA journal_mode=DELETE;",
+    )?;
+    drop(destination_conn);
+    drop(source_conn);
+
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = sqlite_artifact_path(&partial_path, suffix);
+        match fs::remove_file(sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    secure_database_artifact(&partial_path, true)?;
+    File::open(&partial_path)?.sync_all()?;
+    // hard_link is an atomic no-clobber publication on the same filesystem.
+    // Removing the private partial name leaves exactly one link, satisfying
+    // the server's hard-link defense without ever replacing an existing backup.
+    fs::hard_link(&partial_path, destination)?;
+    fs::remove_file(&partial_path)?;
+    partial.keep = true;
+    secure_database_artifact(destination, true)?;
+    File::open(destination)?.sync_all()?;
+    #[cfg(unix)]
+    File::open(destination_parent)?.sync_all()?;
+    Ok(())
+}
+
+fn migrate_v0_to_v1(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS accounts(
+           email TEXT PRIMARY KEY, salt TEXT NOT NULL, kdf TEXT NOT NULL,
+           wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL,
+           vault_revision INTEGER NOT NULL DEFAULT 0);
+         CREATE TABLE IF NOT EXISTS items(
+           email TEXT NOT NULL, id TEXT NOT NULL, blob TEXT NOT NULL,
+           PRIMARY KEY(email, id));
+         CREATE TABLE IF NOT EXISTS manifests(
+           email TEXT PRIMARY KEY, blob TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS send_directory(
+           email TEXT PRIMARY KEY, bastion_id TEXT UNIQUE NOT NULL,
+           public TEXT NOT NULL, created_at INTEGER NOT NULL);
+         CREATE TABLE IF NOT EXISTS send_inbox(
+           recipient_id TEXT NOT NULL, message_id TEXT NOT NULL,
+           blob TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER,
+           PRIMARY KEY(recipient_id, message_id));
+         CREATE INDEX IF NOT EXISTS idx_inbox_recipient ON send_inbox(recipient_id);",
+    )?;
+    let has_vault_revision = {
+        let mut stmt = tx.prepare("PRAGMA table_info(accounts)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .any(|column| column == "vault_revision");
+        columns
+    };
+    if !has_vault_revision {
+        tx.execute(
+            "ALTER TABLE accounts ADD COLUMN vault_revision INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    tx.execute_batch("PRAGMA user_version=1")?;
+    tx.commit()
+}
+
+fn migrate_v1_to_v2(conn: &mut Connection) -> rusqlite::Result<()> {
+    // SQLite cannot change foreign-key declarations in place. Disable
+    // enforcement outside the migration transaction, rebuild every related
+    // table, validate relationships before commit, then enable it permanently.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let migration = (|| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let has_orphans: bool = tx.query_row(
+            "SELECT
+               EXISTS(SELECT 1 FROM items i LEFT JOIN accounts a ON a.email=i.email
+                      WHERE a.email IS NULL)
+               OR EXISTS(SELECT 1 FROM manifests m LEFT JOIN accounts a ON a.email=m.email
+                         WHERE a.email IS NULL)
+               OR EXISTS(SELECT 1 FROM send_directory d LEFT JOIN accounts a ON a.email=d.email
+                         WHERE a.email IS NULL)
+               OR EXISTS(SELECT 1 FROM send_inbox i LEFT JOIN send_directory d
+                         ON d.bastion_id=i.recipient_id WHERE d.bastion_id IS NULL)",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_orphans {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.execute_batch(
+            "CREATE TABLE accounts_v2(
+               email TEXT PRIMARY KEY, salt TEXT NOT NULL, kdf TEXT NOT NULL,
+               wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL,
+               vault_revision INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO accounts_v2 SELECT
+               email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision FROM accounts;
+
+             CREATE TABLE items_v2(
+               email TEXT NOT NULL, id TEXT NOT NULL, blob TEXT NOT NULL,
+               PRIMARY KEY(email, id),
+               FOREIGN KEY(email) REFERENCES accounts_v2(email) ON DELETE CASCADE);
+             INSERT INTO items_v2 SELECT email,id,blob FROM items;
+
+             CREATE TABLE manifests_v2(
+               email TEXT PRIMARY KEY, blob TEXT NOT NULL,
+               FOREIGN KEY(email) REFERENCES accounts_v2(email) ON DELETE CASCADE);
+             INSERT INTO manifests_v2 SELECT email,blob FROM manifests;
+
+             CREATE TABLE send_directory_v2(
+               email TEXT PRIMARY KEY, bastion_id TEXT UNIQUE NOT NULL,
+               public TEXT NOT NULL, created_at INTEGER NOT NULL,
+               FOREIGN KEY(email) REFERENCES accounts_v2(email) ON DELETE CASCADE);
+             INSERT INTO send_directory_v2 SELECT
+               email,bastion_id,public,created_at FROM send_directory;
+
+             CREATE TABLE send_inbox_v2(
+               recipient_id TEXT NOT NULL, message_id TEXT NOT NULL,
+               blob TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER,
+               PRIMARY KEY(recipient_id, message_id),
+               FOREIGN KEY(recipient_id) REFERENCES send_directory_v2(bastion_id)
+                 ON DELETE CASCADE);
+             INSERT INTO send_inbox_v2 SELECT
+               recipient_id,message_id,blob,created_at,expires_at FROM send_inbox;
+
+             DROP TABLE send_inbox;
+             DROP TABLE send_directory;
+             DROP TABLE items;
+             DROP TABLE manifests;
+             DROP TABLE accounts;
+
+             ALTER TABLE accounts_v2 RENAME TO accounts;
+             ALTER TABLE items_v2 RENAME TO items;
+             ALTER TABLE manifests_v2 RENAME TO manifests;
+             ALTER TABLE send_directory_v2 RENAME TO send_directory;
+             ALTER TABLE send_inbox_v2 RENAME TO send_inbox;
+             CREATE INDEX idx_inbox_recipient ON send_inbox(recipient_id);
+             PRAGMA user_version=2;",
+        )?;
+        tx.commit()
+    })();
+    let foreign_keys = conn.pragma_update(None, "foreign_keys", "ON");
+    migration?;
+    foreign_keys
+}
+
+fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
+    let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    assert!(
+        version <= CURRENT_SCHEMA_VERSION,
+        "database schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
+    );
+    while version < CURRENT_SCHEMA_VERSION {
+        match version {
+            0 => migrate_v0_to_v1(conn)?,
+            1 => migrate_v1_to_v2(conn)?,
+            _ => unreachable!("all schema migrations are explicit"),
+        }
+        version = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    }
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    let foreign_keys: i64 = conn.query_row("PRAGMA foreign_keys", [], |row| row.get(0))?;
+    assert_eq!(foreign_keys, 1, "SQLite foreign keys must remain enabled");
+    let has_violation = {
+        let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+        let violation = stmt.query([])?.next()?.is_some();
+        violation
+    };
+    if has_violation {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(())
+}
+
 impl Db {
     fn open(path: &str) -> (Self, HashMap<String, AccountRecord>) {
         Self::open_with_limits(path, DB_QUEUE_CAPACITY, DB_RESPONSE_TIMEOUT)
@@ -741,7 +1053,7 @@ impl Db {
         let instance_lock = file_path.map(|file_path| {
             acquire_instance_lock(file_path).expect("acquire exclusive server ownership")
         });
-        let conn = if path == ":memory:" {
+        let mut conn = if path == ":memory:" {
             Connection::open_in_memory()
         } else {
             Connection::open_with_flags(
@@ -762,26 +1074,10 @@ impl Db {
             // loss, which is unacceptable for vault mutations.
             "PRAGMA journal_mode=WAL;
              PRAGMA busy_timeout=5000;
-             PRAGMA synchronous=FULL;
-             CREATE TABLE IF NOT EXISTS accounts(
-               email TEXT PRIMARY KEY, salt TEXT NOT NULL, kdf TEXT NOT NULL,
-               wrapped_vault_key TEXT NOT NULL, auth_hash TEXT NOT NULL,
-               vault_revision INTEGER NOT NULL DEFAULT 0);
-             CREATE TABLE IF NOT EXISTS items(
-               email TEXT NOT NULL, id TEXT NOT NULL, blob TEXT NOT NULL,
-               PRIMARY KEY(email, id));
-             CREATE TABLE IF NOT EXISTS manifests(
-               email TEXT PRIMARY KEY, blob TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS send_directory(
-               email TEXT PRIMARY KEY, bastion_id TEXT UNIQUE NOT NULL,
-               public TEXT NOT NULL, created_at INTEGER NOT NULL);
-             CREATE TABLE IF NOT EXISTS send_inbox(
-               recipient_id TEXT NOT NULL, message_id TEXT NOT NULL,
-               blob TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER,
-               PRIMARY KEY(recipient_id, message_id));
-             CREATE INDEX IF NOT EXISTS idx_inbox_recipient ON send_inbox(recipient_id);",
+             PRAGMA synchronous=FULL;",
         )
-        .expect("init schema");
+        .expect("configure SQLite");
+        migrate_schema(&mut conn).expect("migrate schema");
         let synchronous: i64 = conn
             .query_row("PRAGMA synchronous", [], |row| row.get(0))
             .expect("read SQLite synchronous mode");
@@ -798,24 +1094,6 @@ impl Db {
                 "wal",
                 "SQLite must apply journal_mode=WAL before the server starts"
             );
-        }
-        let has_vault_revision = {
-            let mut stmt = conn
-                .prepare("PRAGMA table_info(accounts)")
-                .expect("read schema");
-            stmt.query_map([], |row| row.get::<_, String>(1))
-                .expect("read account columns")
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .expect("read account columns")
-                .iter()
-                .any(|column| column == "vault_revision")
-        };
-        if !has_vault_revision {
-            conn.execute(
-                "ALTER TABLE accounts ADD COLUMN vault_revision INTEGER NOT NULL DEFAULT 0",
-                [],
-            )
-            .expect("migrate vault revision");
         }
         if let Some(file_path) = file_path {
             secure_database_artifacts(file_path).expect("secure database artifacts");
@@ -2732,11 +3010,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn connection_pragmas_are_hardened() {
         let (db, _) = Db::open(":memory:");
-        let (busy_timeout, synchronous) = db
+        let (busy_timeout, synchronous, foreign_keys, user_version) = db
             .call(|conn| {
                 Ok((
                     conn.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, i64>(0))?,
                     conn.query_row("PRAGMA synchronous", [], |r| r.get::<_, i64>(0))?,
+                    conn.query_row("PRAGMA foreign_keys", [], |r| r.get::<_, i64>(0))?,
+                    conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))?,
                 ))
             })
             .await
@@ -2744,6 +3024,8 @@ mod tests {
         assert_eq!(busy_timeout, 5000);
         // 2 = FULL. In WAL mode this syncs every commit before acknowledgement.
         assert_eq!(synchronous, 2);
+        assert_eq!(foreign_keys, 1);
+        assert_eq!(user_version, CURRENT_SCHEMA_VERSION);
     }
 
     #[tokio::test(flavor = "current_thread")]

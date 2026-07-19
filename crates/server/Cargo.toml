@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 description = "Zero-knowledge sync server: stores opaque encrypted blobs, never plaintext."
+default-run = "server"
 
 [lints]
 workspace = true
@@ -22,7 +23,7 @@ argon2 = "0.5"
 # Hex encoding of session tokens.
 data-encoding = "2"
 # Durable storage of opaque encrypted blobs (bundled = no system SQLite needed).
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 # Structured, level-filtered logs. Deliberately used ONLY for non-secret
 # operational data (method, status, terse error) — never emails/tokens/blobs.
 tracing = "0.1"
