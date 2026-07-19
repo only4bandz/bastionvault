@@ -38,6 +38,7 @@ import {
   prepareVaultMutation,
   reconcileVaultMutation,
   verifyVaultSnapshot,
+  vaultRefreshRequired,
   VaultIntegrityError,
 } from "./lib/vault-load.js";
 import {
@@ -281,6 +282,8 @@ async function refreshSessionVault(s) {
     try {
       if (session !== s || !s.integrity) throw new VaultIntegrityError();
       const api = makeApi(s.server);
+      const head = await api.getVaultRevision(s.token);
+      if (!vaultRefreshRequired(s.integrity.revision, head?.revision)) return;
       const vault = await api.getVault(s.token);
       const checkpoint = {
         revision: s.integrity.revision,
@@ -295,6 +298,7 @@ async function refreshSessionVault(s) {
         s.server,
         checkpoint
       );
+      if (loaded.integrity.revision < head.revision) throw new VaultIntegrityError();
       if (session !== s) throw new VaultIntegrityError();
       s.items = loaded.items;
       s.contacts = loaded.contacts;

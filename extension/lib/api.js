@@ -113,6 +113,7 @@ export function makeApi(base, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
     deleteAccount: (token, authSecret) =>
       call("DELETE", "/accounts", token, { auth_secret: authSecret }),
     getVault: (token) => call("GET", "/vault", token),
+    getVaultRevision: (token) => call("GET", "/vault/revision", token),
     mutateVault: (token, expectedRevision, operations, manifest) =>
       call("PUT", "/vault/transaction", token, {
         expected_revision: expectedRevision,

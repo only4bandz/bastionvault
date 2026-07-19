@@ -88,6 +88,7 @@ const MAX_LOOKUPS_PER_MIN: u32 = 120;
 // to MAX_VAULT_BYTES per call, and an inbox read runs a purge + list — both
 // are cheap amplification levers for a hostile-but-authenticated client.
 const MAX_VAULT_READS_PER_MIN: u32 = 60;
+const MAX_VAULT_REVISION_READS_PER_MIN: u32 = 300;
 const MAX_INBOX_READS_PER_MIN: u32 = 60;
 const MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN: u32 = 5;
 const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
@@ -253,6 +254,7 @@ fn build_with_rate_limits(
         .route("/accounts/:email/prelogin", get(prelogin))
         .route("/sessions", post(create_session).delete(delete_session))
         .route("/vault", get(get_vault))
+        .route("/vault/revision", get(get_vault_revision))
         .route("/vault/items/:id", put(put_item).delete(delete_item))
         .route("/vault/manifest", put(put_manifest))
         .route("/vault/transaction", transaction_route)
@@ -976,6 +978,11 @@ struct VaultResponse {
     revision: u64,
 }
 
+#[derive(Serialize)]
+struct VaultRevisionResponse {
+    revision: u64,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BlobBody {
@@ -1295,6 +1302,29 @@ async fn get_vault(
         manifest: acc.manifest.clone(),
         revision: acc.vault_revision,
     }))
+}
+
+/// Cheap authenticated freshness probe. Clients may retain only a snapshot
+/// they already verified; any revision change still requires a complete vault
+/// fetch and manifest verification before new plaintext is released.
+async fn get_vault_revision(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<VaultRevisionResponse>, ApiError> {
+    let email = require_auth(&st, &headers)?;
+    rate_limit(
+        &st,
+        &email,
+        "vault-revision-read",
+        MAX_VAULT_REVISION_READS_PER_MIN,
+    )?;
+    let inner = st.read();
+    let revision = inner
+        .accounts
+        .get(&email)
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?
+        .vault_revision;
+    Ok(Json(VaultRevisionResponse { revision }))
 }
 
 async fn apply_vault_transaction(
