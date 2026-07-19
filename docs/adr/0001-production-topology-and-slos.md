@@ -80,6 +80,13 @@ state. Production still requires an encrypted off-host scheduler, retention
 policy, monitoring of backup age, and a restore drill on the selected
 deployment environment that demonstrates the RPO and RTO below.
 
+Transactional email uses a SQLite outbox owned by the same isolated storage
+thread. A leased worker performs authenticated mandatory-STARTTLS SMTP outside
+SQLite transactions, retries transient failures with bounded backoff, and
+scrubs terminal rows. Delivery is explicitly at least once; the deployment
+must not claim exactly-once SMTP semantics. Mailbox verification and provider
+acceptance remain separate production gates.
+
 ### Availability and durability objectives
 
 The initial objectives are:

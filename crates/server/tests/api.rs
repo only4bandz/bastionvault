@@ -1624,7 +1624,7 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 2);
+    assert_eq!(user_version, 3);
     assert!(conn
         .execute(
             "INSERT INTO items(email,id,blob) VALUES('missing@example.com','orphan','{}')",
@@ -1655,9 +1655,19 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
         [],
     )
     .unwrap();
+    conn.execute(
+        "INSERT INTO mail_outbox(
+           id,account_email,recipient,subject,text_body,state,attempts,available_at,created_at
+         ) VALUES(
+           '00112233445566778899aabbccddeeff','cascade@example.com',
+           'cascade@example.com','Subject','Body','pending',0,1,1
+         )",
+        [],
+    )
+    .unwrap();
     conn.execute("DELETE FROM accounts WHERE email='cascade@example.com'", [])
         .unwrap();
-    for table in ["items", "send_directory", "send_inbox"] {
+    for table in ["items", "send_directory", "send_inbox", "mail_outbox"] {
         let count: i64 = conn
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
                 row.get(0)
