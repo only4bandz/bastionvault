@@ -116,6 +116,18 @@ acknowledged writes across process/OS crashes and power loss to the extent that
 the host filesystem and storage honor SQLite's sync requests. This is a local
 durability guarantee, not a substitute for tested backups or replication.
 
+The current server is intentionally **single-instance per database**. It holds
+an advisory `<database>-server.lock` for its full lifetime and refuses to start
+a second Bastion server against the same SQLite file. This is required because
+the account read cache, sessions, and rate-limit counters are process-local.
+The server also serializes synchronous `rusqlite` operations through one
+connection; storage latency can therefore block request executor threads. Do
+not deploy multiple replicas or treat this backend as production-scale. The
+database must live on a local filesystem with reliable advisory locks and sync
+semantics; network and distributed filesystems are unsupported. Stop the server
+for filesystem-level copies, or use a SQLite-aware backup tool that respects
+the live database and WAL.
+
 | Method | Route | Role |
 |---|---|---|
 | `POST` | `/accounts` | Creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
@@ -168,6 +180,8 @@ cd extension && ./build.sh                   # build the WASM module
 # then load `extension/` unpacked at chrome://extensions
 ```
 
-> ⚠️ The server is **not production-ready** (no TLS/CORS, and its bounded rate
-> limits are process-local rather than coordinated across instances). It's a
-> zero-knowledge reference backend for development.
+> ⚠️ The server is **not production-ready**: it has no TLS/CORS, its stateful
+> controls are process-local, and synchronous SQLite calls can block request
+> executor threads. The exclusive instance lock rejects horizontal replicas;
+> it does not make this a production deployment. This is a zero-knowledge
+> reference backend for development.

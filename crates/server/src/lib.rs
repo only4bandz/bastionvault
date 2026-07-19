@@ -11,7 +11,7 @@
 //! the reads and is loaded from SQLite at startup; mutations are write-through.
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -425,6 +425,9 @@ impl AppState {
 #[derive(Clone)]
 struct Db {
     conn: Arc<Mutex<Connection>>,
+    // The open file owns the advisory lock for the lifetime of every Db clone.
+    // It is deliberately unused otherwise.
+    _instance_lock: Option<Arc<File>>,
 }
 
 enum PreparedVaultOperation {
@@ -539,10 +542,51 @@ fn prepare_database_path(path: &FsPath) -> io::Result<()> {
 
 fn secure_database_artifacts(path: &FsPath) -> io::Result<()> {
     secure_database_artifact(path, true)?;
-    for suffix in ["-wal", "-shm", "-journal"] {
+    for suffix in ["-wal", "-shm", "-journal", "-server.lock"] {
         secure_database_artifact(&sqlite_artifact_path(path, suffix), false)?;
     }
     Ok(())
+}
+
+fn acquire_instance_lock(path: &FsPath) -> io::Result<File> {
+    let lock_path = sqlite_artifact_path(path, "-server.lock");
+    match fs::symlink_metadata(&lock_path) {
+        Ok(_) => secure_database_artifact(&lock_path, true)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).create_new(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            options.open(&lock_path)?;
+            secure_database_artifact(&lock_path, true)?;
+        }
+        Err(error) => return Err(error),
+    }
+
+    let lock = OpenOptions::new().read(true).write(true).open(&lock_path)?;
+    let opened = lock.metadata()?;
+    let linked = fs::symlink_metadata(&lock_path)?;
+    if !opened.is_file() || linked.file_type().is_symlink() || !linked.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "server lock must remain a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    if opened.dev() != linked.dev() || opened.ino() != linked.ino() || opened.nlink() != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "server lock changed while it was being opened",
+        ));
+    }
+    lock.try_lock().map_err(|error| match error {
+        fs::TryLockError::WouldBlock => io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "another Bastion server already owns this database",
+        ),
+        fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(lock)
 }
 
 impl Db {
@@ -551,6 +595,9 @@ impl Db {
         if let Some(file_path) = file_path {
             prepare_database_path(file_path).expect("secure database path");
         }
+        let instance_lock = file_path.map(|file_path| {
+            Arc::new(acquire_instance_lock(file_path).expect("acquire exclusive server ownership"))
+        });
         let conn = if path == ":memory:" {
             Connection::open_in_memory()
         } else {
@@ -633,6 +680,7 @@ impl Db {
         }
         Self {
             conn: Arc::new(Mutex::new(conn)),
+            _instance_lock: instance_lock,
         }
     }
 

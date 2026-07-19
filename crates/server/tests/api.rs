@@ -50,7 +50,7 @@ impl fmt::Display for TestDbPath {
 impl Drop for TestDbPath {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
-        for suffix in ["-wal", "-shm", "-journal"] {
+        for suffix in ["-wal", "-shm", "-journal", "-server.lock"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", self.path));
         }
         let _ = std::fs::remove_dir(&self.directory);
@@ -1064,7 +1064,7 @@ async fn health_reports_unavailable_when_the_schema_is_gone() {
 
 #[cfg(unix)]
 #[test]
-fn creates_sqlite_database_and_sidecars_with_owner_only_permissions() {
+fn creates_sqlite_artifacts_and_instance_lock_with_owner_only_permissions() {
     use std::os::unix::fs::PermissionsExt;
 
     let path = test_db_path("owner-only");
@@ -1073,6 +1073,7 @@ fn creates_sqlite_database_and_sidecars_with_owner_only_permissions() {
         path.to_string(),
         format!("{path}-wal"),
         format!("{path}-shm"),
+        format!("{path}-server.lock"),
     ] {
         let metadata = std::fs::symlink_metadata(&artifact).unwrap();
         assert!(metadata.is_file());
@@ -1116,17 +1117,34 @@ fn rejects_symbolic_link_database_and_sidecar_paths() {
     symlink(&sidecar_target, format!("{linked_sidecar}-wal")).unwrap();
     assert!(std::panic::catch_unwind(|| server::app_with_db(&linked_sidecar)).is_err());
     std::fs::remove_file(&sidecar_target).unwrap();
+
+    let linked_lock = test_db_path("linked-lock");
+    std::fs::write(&*linked_lock, []).unwrap();
+    let lock_target = linked_lock.directory.join("target.lock");
+    std::fs::write(&lock_target, []).unwrap();
+    symlink(&lock_target, format!("{linked_lock}-server.lock")).unwrap();
+    assert!(std::panic::catch_unwind(|| server::app_with_db(&linked_lock)).is_err());
+    std::fs::remove_file(&lock_target).unwrap();
 }
 
 #[cfg(unix)]
 #[test]
-fn rejects_hard_linked_database_paths() {
+fn rejects_hard_linked_database_and_lock_paths() {
     let path = test_db_path("hard-linked-database");
     std::fs::write(&*path, []).unwrap();
     let alias = path.directory.join("database-alias.db");
     std::fs::hard_link(&*path, &alias).unwrap();
     assert!(std::panic::catch_unwind(|| server::app_with_db(&path)).is_err());
     std::fs::remove_file(alias).unwrap();
+
+    let locked_path = test_db_path("hard-linked-lock");
+    std::fs::write(&*locked_path, []).unwrap();
+    let lock_path = format!("{locked_path}-server.lock");
+    std::fs::write(&lock_path, []).unwrap();
+    let lock_alias = locked_path.directory.join("server-lock-alias");
+    std::fs::hard_link(&lock_path, &lock_alias).unwrap();
+    assert!(std::panic::catch_unwind(|| server::app_with_db(&locked_path)).is_err());
+    std::fs::remove_file(lock_alias).unwrap();
 }
 
 #[cfg(unix)]
@@ -1137,6 +1155,20 @@ fn rejects_database_parent_writable_by_group_or_others() {
     let path = test_db_path("unsafe-parent");
     std::fs::set_permissions(&path.directory, std::fs::Permissions::from_mode(0o770)).unwrap();
     assert!(std::panic::catch_unwind(|| server::app_with_db(&path)).is_err());
+}
+
+#[test]
+fn refuses_a_second_server_for_the_same_database() {
+    let path = test_db_path("single-server");
+    let first = server::app_with_db(&path);
+    let second = std::panic::catch_unwind(|| server::app_with_db(&path));
+    assert!(
+        second.is_err(),
+        "a second process-local cache must not share one SQLite database"
+    );
+
+    drop(first);
+    drop(server::app_with_db(&path));
 }
 
 #[tokio::test]
