@@ -1,9 +1,10 @@
 # Bastion — web app
 
 The Bastion vault UI: a React + Vite + TypeScript front end on top of the
-zero-knowledge `crypto-core` (compiled to WebAssembly). All cryptography runs in
-the browser; secrets live in WASM memory only and never touch browser storage
-(enforced by `scripts/check-no-browser-secret-storage.sh`).
+zero-knowledge `crypto-core` (compiled to WebAssembly). Cryptographic key
+operations run in WASM, but decrypted items necessarily enter JavaScript and
+React memory while the vault is unlocked. Secrets are never persisted to
+browser storage (enforced by `scripts/check-no-browser-secret-storage.sh`).
 
 Vault items are exposed only after the encrypted integrity manifest matches the
 complete server response. Existing vaults receive a one-time trust-on-first-use

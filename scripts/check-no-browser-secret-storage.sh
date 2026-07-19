@@ -5,10 +5,10 @@
 # Why: localStorage / sessionStorage / IndexedDB / cookies are readable by ANY
 # same-origin script. An infostealer (or an XSS payload) reads them directly
 # from disk or the DOM — no need to win the race against an in-memory key.
-# Our model keeps unlocked secrets in WASM memory only, for as short a time as
-# possible (see crypto-wasm Account::lock / reveal_secret). Persisting anything
-# secret to these APIs would defeat that. This guard fails the build if such an
-# API appears in the web app code.
+# Our model keeps unlocked secrets in volatile browser memory only, for as
+# short a time as possible (see crypto-wasm Account::lock / reveal_secret).
+# Decrypted values necessarily cross into JavaScript for rendering and fill;
+# persisting them to these APIs would materially widen the exposure window.
 #
 # Scope: web/ (static demo), app/src/ (the Bastion React app) and extension/
 # (the Chrome extension — which keeps the unlocked session in chrome.storage.

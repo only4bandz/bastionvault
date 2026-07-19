@@ -3,6 +3,8 @@
 // encrypted blobs + a hash of the auth secret — never plaintext.
 const BASE = "/api";
 const REQUEST_TIMEOUT_MS = 15_000;
+export const MAX_ERROR_BODY_CHARS = 4096;
+export const MAX_SERVER_DETAIL_CHARS = 200;
 
 export interface Blob {
   v: number;
@@ -46,9 +48,46 @@ export interface InboxItem {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Bounded remote text for diagnostics only. Never render this in the UI. */
+  serverDetail: string;
+  constructor(status: number, message: string, serverDetail = "") {
     super(message);
+    this.name = "ApiError";
     this.status = status;
+    this.serverDetail = serverDetail;
+  }
+}
+
+/**
+ * Fixed local copy for failures. The sync server is outside the browser trust
+ * boundary, so its response body must never become user-facing text.
+ */
+export function statusMessage(status: number): string {
+  if (status === 401) return "The server rejected the session or credentials.";
+  if (status === 404) return "Not found on the server.";
+  if (status === 409) return "The server reported a conflict with another change.";
+  if (status === 413) return "The request is too large for the server.";
+  if (status === 429) return "The server is rate-limiting requests. Try again shortly.";
+  if (status >= 500) return "The server hit an internal error.";
+  return `The server rejected the request (HTTP ${status}).`;
+}
+
+/** Bound hostile error bodies before retaining a short diagnostic excerpt. */
+async function readErrorBody(response: Response): Promise<string> {
+  try {
+    const reader = response.body?.getReader();
+    if (!reader) return ((await response.text()) || "").slice(0, MAX_ERROR_BODY_CHARS);
+    const decoder = new TextDecoder();
+    let output = "";
+    while (output.length < MAX_ERROR_BODY_CHARS) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      output += decoder.decode(value, { stream: true });
+    }
+    await reader.cancel().catch(() => undefined);
+    return output.slice(0, MAX_ERROR_BODY_CHARS);
+  } catch {
+    return "";
   }
 }
 
@@ -77,8 +116,12 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
       if (res.status === 401 && token) {
         window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
       }
-      const text = await res.text().catch(() => "");
-      throw new ApiError(res.status, text || res.statusText);
+      const detail = await readErrorBody(res);
+      throw new ApiError(
+        res.status,
+        statusMessage(res.status),
+        detail.slice(0, MAX_SERVER_DETAIL_CHARS)
+      );
     }
     const ct = res.headers.get("content-type") || "";
     if (!ct.includes("application/json")) return undefined as T;

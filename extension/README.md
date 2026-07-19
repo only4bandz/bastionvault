@@ -1,7 +1,7 @@
 # Bastion — Chrome extension (Manifest V3)
 
 A browser extension front-end for the **Bastion** zero-knowledge password
-manager. It reuses the exact same audited Rust crypto core as the web app
+manager. It reuses the exact same test-covered Rust crypto core as the web app
 (`crates/crypto-core` → WebAssembly), so encryption/decryption behaves
 identically everywhere. The sync server only ever sees opaque encrypted blobs.
 
@@ -21,9 +21,11 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
 
 ## Security model
 
-- The vault is **decrypted only inside the service worker**, in WASM memory.
-  Nothing secret is ever written to `chrome.storage`, `localStorage`,
-  IndexedDB or cookies (the same anti-stealer rule the web app enforces in CI).
+- The service worker is the only extension context that decrypts the vault.
+  The vault key stays in WASM except for the explicitly bounded rehydration
+  blob described below; decrypted item objects live in service-worker
+  JavaScript memory while unlocked. Nothing secret is written to disk-backed
+  browser storage, `localStorage`, IndexedDB, or cookies.
 - When Chrome evicts the service worker, the unlocked session can be rehydrated
   from extension-private, RAM-backed `chrome.storage.session` until its bounded
   expiry. It is never written to disk and is removed on lock.
