@@ -608,12 +608,14 @@ fn redacted_path(path: &str) -> String {
 async fn request_log(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = redacted_path(request.uri().path());
+    let started = Instant::now();
     let response = next.run(request).await;
     let status = response.status().as_u16();
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if response.status().is_server_error() {
-        tracing::error!(%method, path, status, "request");
+        tracing::error!(%method, path, status, latency_ms, "request");
     } else {
-        tracing::info!(%method, path, status, "request");
+        tracing::info!(%method, path, status, latency_ms, "request");
     }
     response
 }
@@ -1181,6 +1183,117 @@ pub fn backup_database(
     #[cfg(unix)]
     File::open(destination_parent)?.sync_all()?;
     Ok(())
+}
+
+/// Aggregate, non-secret operational state from a live or restored database.
+///
+/// This opens SQLite read-only and does not acquire the server ownership lock,
+/// so an operator can poll a live WAL database without creating a second
+/// writer. The result deliberately excludes account identifiers, routing ids,
+/// token material, message bodies, and ciphertext metadata.
+#[derive(Debug, Serialize)]
+pub struct OperationalSnapshot {
+    pub observed_at: i64,
+    pub schema_version: i64,
+    pub database_bytes: u64,
+    pub accounts: i64,
+    pub registration_challenges_active: i64,
+    pub registration_challenges_verified: i64,
+    pub registration_challenges_expired: i64,
+    pub mail_pending: i64,
+    pub mail_in_flight: i64,
+    pub mail_dead: i64,
+    pub oldest_active_mail_age_seconds: Option<i64>,
+}
+
+pub fn operational_snapshot(
+    database: &FsPath,
+) -> Result<OperationalSnapshot, Box<dyn std::error::Error + Send + Sync>> {
+    secure_database_parent(database)?;
+    secure_database_artifacts(database)?;
+    let conn = Connection::open_with_flags(
+        database,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if schema_version != CURRENT_SCHEMA_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "database schema version {schema_version} does not match supported version {CURRENT_SCHEMA_VERSION}"
+            ),
+        )
+        .into());
+    }
+    let observed_at = now_secs();
+    let (
+        accounts,
+        registration_challenges_active,
+        registration_challenges_verified,
+        registration_challenges_expired,
+        mail_pending,
+        mail_in_flight,
+        mail_dead,
+        oldest_active_created_at,
+    ): (i64, i64, i64, i64, i64, i64, i64, Option<i64>) = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM accounts),
+           (SELECT COUNT(*) FROM registration_challenges WHERE expires_at>=?1),
+           (SELECT COUNT(*) FROM registration_challenges
+             WHERE expires_at>=?1 AND verified_at IS NOT NULL),
+           (SELECT COUNT(*) FROM registration_challenges WHERE expires_at<?1),
+           (SELECT COUNT(*) FROM mail_outbox WHERE state='pending'),
+           (SELECT COUNT(*) FROM mail_outbox WHERE state='in_flight'),
+           (SELECT COUNT(*) FROM mail_outbox WHERE state='dead'),
+           (SELECT MIN(created_at) FROM mail_outbox
+             WHERE state IN ('pending','in_flight'))",
+        [observed_at],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        },
+    )?;
+    let mut database_bytes = 0_u64;
+    for path in std::iter::once(database.to_path_buf()).chain(
+        ["-wal", "-shm", "-journal"]
+            .into_iter()
+            .map(|suffix| sqlite_artifact_path(database, suffix)),
+    ) {
+        match fs::metadata(path) {
+            Ok(metadata) => {
+                database_bytes = database_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "database size overflow")
+                })?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(OperationalSnapshot {
+        observed_at,
+        schema_version,
+        database_bytes,
+        accounts,
+        registration_challenges_active,
+        registration_challenges_verified,
+        registration_challenges_expired,
+        mail_pending,
+        mail_in_flight,
+        mail_dead,
+        oldest_active_mail_age_seconds: oldest_active_created_at
+            .map(|created_at| observed_at.saturating_sub(created_at).max(0)),
+    })
 }
 
 fn migrate_v0_to_v1(conn: &mut Connection) -> rusqlite::Result<()> {

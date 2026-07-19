@@ -253,6 +253,7 @@ pub(super) fn spawn(db: Db, config: SmtpConfig) {
                 return;
             }
         };
+        tracing::info!("mail worker started");
         loop {
             match deliver_one_at(&db, &sender, now_secs()).await {
                 Ok(true) => {}
@@ -271,7 +272,33 @@ async fn deliver_one_at(db: &Db, sender: &impl MailSender, now: i64) -> Result<b
         return Ok(false);
     };
     let result = sender.send(&job).await;
+    let outcome = match &result {
+        Ok(()) => ("accepted", None),
+        Err(DeliveryFailure::Permanent(code)) => ("permanent_failure", Some(*code)),
+        Err(DeliveryFailure::Retryable(code)) if job.attempt >= MAX_ATTEMPTS => {
+            ("attempts_exhausted", Some(*code))
+        }
+        Err(DeliveryFailure::Retryable(code)) => ("retry_scheduled", Some(*code)),
+    };
     finish_attempt(db, &job, result, now).await?;
+    match outcome {
+        ("accepted", _) => {
+            tracing::info!(attempt = job.attempt, outcome = outcome.0, "mail delivery")
+        }
+        ("retry_scheduled", Some(code)) => tracing::warn!(
+            attempt = job.attempt,
+            outcome = outcome.0,
+            error_code = code,
+            "mail delivery"
+        ),
+        (_, Some(code)) => tracing::error!(
+            attempt = job.attempt,
+            outcome = outcome.0,
+            error_code = code,
+            "mail delivery"
+        ),
+        _ => unreachable!("delivery outcomes are exhaustive"),
+    }
     Ok(true)
 }
 
