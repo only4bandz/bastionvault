@@ -28,6 +28,7 @@ find extension \
   -path extension/pkg -prune -o \
   -name '*.js' -print0 | xargs -0 -n1 node --check
 run bash extension/build.sh
+run python3 scripts/check-release.py
 run bash web/build.sh
 
 run bash scripts/check-no-browser-secret-storage.sh
