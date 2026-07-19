@@ -123,7 +123,7 @@ the host filesystem and storage honor SQLite's sync requests. This is a local
 durability guarantee, not a substitute for tested backups or replication.
 
 The schema is migrated transactionally through SQLite `user_version`; this
-binary supports schema version 2 and refuses newer databases. Foreign keys are
+binary supports schema version 3 and refuses newer databases. Foreign keys are
 enabled and checked at startup. Create a coherent snapshot of a live database
 without replacing any existing file with:
 
@@ -162,6 +162,14 @@ restore drills. Horizontal replicas require a new shared-storage design; a
 shared SQLite volume or removal of the exclusive lock is explicitly rejected.
 See [ADR 0001](docs/adr/0001-production-topology-and-slos.md) for the topology,
 service objectives, decision gates, and remaining production blockers.
+
+Schema version 3 also contains a durable transactional-mail outbox. Its worker
+leases mail outside the request path, releases SQLite before network I/O, uses
+authenticated mandatory-STARTTLS SMTP, retries transient failures with bounded
+backoff, and scrubs message data after delivery or terminal failure. Delivery
+is at least once: a crash after relay acceptance can cause a duplicate with the
+same `Message-ID`. SMTP settings and the provider acceptance gate are documented
+in [`docs/transactional-mail-outbox.md`](docs/transactional-mail-outbox.md).
 
 Production mode fails closed unless Axum is loopback-only, SQLite uses an
 absolute path, and one canonical HTTPS public origin is declared. Proxied API

@@ -10,6 +10,8 @@
 //! opaque blobs and the auth-secret hash are stored). An in-memory cache backs
 //! the reads and is loaded from SQLite at startup; mutations are write-through.
 
+mod mail_outbox;
+
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -107,18 +109,19 @@ const DB_QUEUE_CAPACITY: usize = 256;
 const DB_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Latest schema understood by this binary. Startup refuses newer databases
 /// instead of silently running code against an incompatible layout.
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:7777";
 const DEFAULT_DB_PATH: &str = "bastion.db";
 const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
 
 /// Validated process configuration. Production is deliberately narrower than
 /// development: a same-host TLS ingress is public and Axum stays on loopback.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ServerConfig {
     bind_addr: SocketAddr,
     db_path: String,
     transport: Option<TransportPolicy>,
+    smtp: Option<mail_outbox::SmtpConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +138,7 @@ impl ServerConfig {
 
     fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Result<Self, String> {
         let mode = lookup("BASTION_ENV").unwrap_or_else(|| "development".to_string());
+        let smtp = mail_outbox::SmtpConfig::from_lookup(&mut lookup)?;
         match mode.as_str() {
             "development" => Ok(Self {
                 bind_addr: parse_bind_addr(
@@ -142,6 +146,7 @@ impl ServerConfig {
                 )?,
                 db_path: lookup("BASTION_DB").unwrap_or_else(|| DEFAULT_DB_PATH.to_string()),
                 transport: None,
+                smtp,
             }),
             "production" => {
                 let bind_addr = parse_bind_addr(&required_setting(&mut lookup, "BIND_ADDR")?)?;
@@ -163,6 +168,7 @@ impl ServerConfig {
                     bind_addr,
                     db_path,
                     transport: Some(TransportPolicy::parse(&public_origin)?),
+                    smtp,
                 })
             }
             _ => Err("BASTION_ENV must be either development or production".to_string()),
@@ -307,6 +313,7 @@ pub fn app_with_config(config: &ServerConfig) -> Router {
         config.db_path(),
         MAX_CONCURRENT_AUTH,
         config.transport.clone(),
+        config.smtp.clone(),
     )
 }
 
@@ -337,10 +344,11 @@ pub fn app_in_memory_with_rate_limits(max_entries: usize, window: Duration) -> R
         DEFAULT_TOKEN_TTL,
         ":memory:",
         MAX_CONCURRENT_AUTH,
-        max_entries,
-        window,
-        AuthRateLimits::default(),
-        None,
+        RuntimeOptions {
+            max_rate_entries: max_entries,
+            rate_window: window,
+            ..RuntimeOptions::default()
+        },
     )
 }
 
@@ -379,15 +387,35 @@ pub fn app_in_memory_with_auth_rate_limits(limits: AuthRateLimits) -> Router {
         DEFAULT_TOKEN_TTL,
         ":memory:",
         MAX_CONCURRENT_AUTH,
-        MAX_RATE_ENTRIES,
-        RATE_WINDOW,
-        limits,
-        None,
+        RuntimeOptions {
+            auth_rate_limits: limits,
+            ..RuntimeOptions::default()
+        },
     )
 }
 
+struct RuntimeOptions {
+    max_rate_entries: usize,
+    rate_window: Duration,
+    auth_rate_limits: AuthRateLimits,
+    transport: Option<TransportPolicy>,
+    smtp: Option<mail_outbox::SmtpConfig>,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self {
+            max_rate_entries: MAX_RATE_ENTRIES,
+            rate_window: RATE_WINDOW,
+            auth_rate_limits: AuthRateLimits::default(),
+            transport: None,
+            smtp: None,
+        }
+    }
+}
+
 fn build(token_ttl: Duration, db_path: &str, auth_limit: usize) -> Router {
-    build_with_transport(token_ttl, db_path, auth_limit, None)
+    build_with_transport(token_ttl, db_path, auth_limit, None, None)
 }
 
 fn build_with_transport(
@@ -395,15 +423,17 @@ fn build_with_transport(
     db_path: &str,
     auth_limit: usize,
     transport: Option<TransportPolicy>,
+    smtp: Option<mail_outbox::SmtpConfig>,
 ) -> Router {
     build_with_rate_limits(
         token_ttl,
         db_path,
         auth_limit,
-        MAX_RATE_ENTRIES,
-        RATE_WINDOW,
-        AuthRateLimits::default(),
-        transport,
+        RuntimeOptions {
+            transport,
+            smtp,
+            ..RuntimeOptions::default()
+        },
     )
 }
 
@@ -411,20 +441,9 @@ fn build_with_rate_limits(
     token_ttl: Duration,
     db_path: &str,
     auth_limit: usize,
-    max_rate_entries: usize,
-    rate_window: Duration,
-    auth_rate_limits: AuthRateLimits,
-    transport: Option<TransportPolicy>,
+    options: RuntimeOptions,
 ) -> Router {
-    let state = AppState::new(
-        token_ttl,
-        db_path,
-        auth_limit,
-        max_rate_entries,
-        rate_window,
-        auth_rate_limits,
-        transport,
-    );
+    let state = AppState::new(token_ttl, db_path, auth_limit, options);
     let transaction_route = put(apply_vault_transaction)
         .layer(DefaultBodyLimit::max(MAX_VAULT_TRANSACTION_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(
@@ -673,17 +692,16 @@ struct AccountRecord {
 }
 
 impl AppState {
-    fn new(
-        token_ttl: Duration,
-        db_path: &str,
-        auth_limit: usize,
-        max_rate_entries: usize,
-        rate_window: Duration,
-        auth_rate_limits: AuthRateLimits,
-        transport: Option<TransportPolicy>,
-    ) -> Self {
+    fn new(token_ttl: Duration, db_path: &str, auth_limit: usize, options: RuntimeOptions) -> Self {
+        let RuntimeOptions {
+            max_rate_entries,
+            rate_window,
+            auth_rate_limits,
+            transport,
+            smtp,
+        } = options;
         let (db, accounts) = Db::open(db_path);
-        Self {
+        let state = Self {
             inner: Arc::new(RwLock::new(Inner {
                 accounts,
                 sessions: HashMap::new(),
@@ -697,7 +715,11 @@ impl AppState {
             rate_window,
             auth_rate_limits,
             transport,
+        };
+        if let Some(config) = smtp {
+            mail_outbox::spawn(state.db.clone(), config);
         }
+        state
     }
 
     /// Tokio-aware state locks preserve cache/database ordering without
@@ -1196,6 +1218,46 @@ fn migrate_v1_to_v2(conn: &mut Connection) -> rusqlite::Result<()> {
     foreign_keys
 }
 
+fn migrate_v2_to_v3(conn: &mut Connection) -> rusqlite::Result<()> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(
+        "CREATE TABLE mail_outbox(
+           id TEXT PRIMARY KEY,
+           account_email TEXT NOT NULL,
+           recipient TEXT NOT NULL,
+           subject TEXT NOT NULL,
+           text_body TEXT NOT NULL,
+           state TEXT NOT NULL,
+           attempts INTEGER NOT NULL DEFAULT 0,
+           available_at INTEGER NOT NULL,
+           lease_until INTEGER,
+           created_at INTEGER NOT NULL,
+           delivered_at INTEGER,
+           last_error_code TEXT,
+           FOREIGN KEY(account_email) REFERENCES accounts(email) ON DELETE CASCADE,
+           CHECK(length(id)=32 AND id=lower(id)),
+           CHECK(state IN ('pending','in_flight','delivered','dead')),
+           CHECK(attempts BETWEEN 0 AND 8),
+           CHECK(available_at>=0 AND created_at>=0),
+           CHECK((state='in_flight')=(lease_until IS NOT NULL)),
+           CHECK((state='delivered')=(delivered_at IS NOT NULL)),
+           CHECK(last_error_code IS NULL OR length(last_error_code)<=64),
+           CHECK(
+             (state IN ('pending','in_flight')
+               AND length(recipient) BETWEEN 1 AND 254
+               AND length(subject) BETWEEN 1 AND 160
+               AND length(text_body) BETWEEN 1 AND 16384)
+             OR
+             (state IN ('delivered','dead')
+               AND recipient='' AND subject='' AND text_body='')
+           ));
+         CREATE INDEX idx_mail_outbox_due
+           ON mail_outbox(state,available_at,lease_until,created_at);
+         PRAGMA user_version=3;",
+    )?;
+    tx.commit()
+}
+
 fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     assert!(
@@ -1206,6 +1268,7 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
         match version {
             0 => migrate_v0_to_v1(conn)?,
             1 => migrate_v1_to_v2(conn)?,
+            2 => migrate_v2_to_v3(conn)?,
             _ => unreachable!("all schema migrations are explicit"),
         }
         version = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -3326,6 +3389,39 @@ mod tests {
         assert_eq!(config.public_origin(), None);
     }
 
+    #[test]
+    fn smtp_configuration_is_complete_and_starttls_only() {
+        let configured = config_from(&[
+            ("BASTION_SMTP_HOST", "smtp.example.com"),
+            ("BASTION_SMTP_PORT", "587"),
+            ("BASTION_SMTP_USERNAME", "bastion"),
+            ("BASTION_SMTP_PASSWORD", "not-logged"),
+            ("BASTION_MAIL_FROM", "Bastion <no-reply@example.com>"),
+        ])
+        .unwrap();
+        assert!(configured.smtp.is_some());
+
+        for partial in [
+            vec![("BASTION_SMTP_HOST", "smtp.example.com")],
+            vec![
+                ("BASTION_SMTP_HOST", "smtp.example.com"),
+                ("BASTION_SMTP_PORT", "0"),
+                ("BASTION_SMTP_USERNAME", "bastion"),
+                ("BASTION_SMTP_PASSWORD", "secret"),
+                ("BASTION_MAIL_FROM", "no-reply@example.com"),
+            ],
+            vec![
+                ("BASTION_SMTP_HOST", "smtp example.com"),
+                ("BASTION_SMTP_PORT", "587"),
+                ("BASTION_SMTP_USERNAME", "bastion"),
+                ("BASTION_SMTP_PASSWORD", "secret"),
+                ("BASTION_MAIL_FROM", "no-reply@example.com"),
+            ],
+        ] {
+            assert!(config_from(&partial).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn production_boundary_requires_exact_ingress_contract() {
         let app = build_with_transport(
@@ -3333,6 +3429,7 @@ mod tests {
             ":memory:",
             MAX_CONCURRENT_AUTH,
             Some(TransportPolicy::parse("https://vault.example.com").unwrap()),
+            None,
         );
 
         for (name, host, proto, expected) in [

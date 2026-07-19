@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 crypto-core = { path = "../crypto-core" }
 axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "signal", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
@@ -28,6 +28,8 @@ rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 # operational data (method, status, terse error) — never emails/tokens/blobs.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Transactional mail leaves SQLite through authenticated STARTTLS SMTP only.
+lettre = { version = "0.11.22", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
