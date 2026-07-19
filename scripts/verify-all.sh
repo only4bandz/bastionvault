@@ -13,7 +13,9 @@ run cargo fmt --all -- --check
 run cargo test --workspace --all-features --locked
 run cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 run bash scripts/test-backup-restore.sh
+run bash scripts/test-operational-failures.sh
 run bash -n scripts/verify-production-edge.sh
+run bash -n scripts/verify-production-operations.sh
 run wasm-pack test --node crates/crypto-wasm
 
 run bash app/build-wasm.sh

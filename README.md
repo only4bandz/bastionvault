@@ -163,6 +163,15 @@ shared SQLite volume or removal of the exclusive lock is explicitly rejected.
 See [ADR 0001](docs/adr/0001-production-topology-and-slos.md) for the topology,
 service objectives, decision gates, and remaining production blockers.
 
+The production operations gate is defined in
+[`docs/production-operations.md`](docs/production-operations.md). The
+`bastion-ops-status` binary emits a read-only, aggregate JSON snapshot without
+account identifiers, tokens, bodies, routing ids, or ciphertext fields. Release
+fault tests run with `bash scripts/test-operational-failures.sh`; deployed edge,
+capacity, live backup, and readiness evidence is collected with
+`scripts/verify-production-operations.sh`. Destructive host/disk/provider drills
+remain restricted to isolated staging or restored copies.
+
 Schema version 3 also contains a durable transactional-mail outbox. Its worker
 leases mail outside the request path, releases SQLite before network I/O, uses
 authenticated mandatory-STARTTLS SMTP, retries transient failures with bounded
@@ -254,9 +263,9 @@ cd extension && ./build.sh                   # build the WASM module
 # then load `extension/` unpacked at chrome://extensions
 ```
 
-> ⚠️ The server is **not production-ready** until the documented TLS ingress
-> passes the edge and real-provider mailbox drills, and off-host backup
-> scheduling plus deployment-specific RPO/RTO drills are configured. The
+> ⚠️ The server is **not production-ready** until the documented TLS ingress,
+> real-provider mailbox, off-host backup, alert-delivery, capacity, and
+> deployment-specific RPO/RTO/failure drills have recorded evidence. The
 > stateful controls remain process-local; the exclusive
 > instance lock and isolated SQLite owner reject horizontal replicas rather
 > than making them safe.

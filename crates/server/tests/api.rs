@@ -259,6 +259,36 @@ async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
         .unwrap()
         .to_string();
     drop(conn);
+    let snapshot = server::operational_snapshot(path.as_ref()).unwrap();
+    assert_eq!(snapshot.schema_version, 4);
+    assert_eq!(snapshot.accounts, 0);
+    assert_eq!(snapshot.registration_challenges_active, 1);
+    assert_eq!(snapshot.registration_challenges_verified, 0);
+    assert_eq!(snapshot.registration_challenges_expired, 0);
+    assert_eq!(snapshot.mail_pending, 1);
+    assert_eq!(snapshot.mail_in_flight, 0);
+    assert_eq!(snapshot.mail_dead, 0);
+    assert!(snapshot.database_bytes > 0);
+    assert!(snapshot.oldest_active_mail_age_seconds.is_some());
+    let snapshot_json = serde_json::to_value(&snapshot).unwrap();
+    let snapshot_fields = snapshot_json.as_object().unwrap();
+    assert_eq!(snapshot_fields.len(), 11);
+    for field in [
+        "observed_at",
+        "schema_version",
+        "database_bytes",
+        "accounts",
+        "registration_challenges_active",
+        "registration_challenges_verified",
+        "registration_challenges_expired",
+        "mail_pending",
+        "mail_in_flight",
+        "mail_dead",
+        "oldest_active_mail_age_seconds",
+    ] {
+        assert!(snapshot_fields.contains_key(field), "missing {field}");
+    }
+    assert!(!snapshot_json.to_string().contains(email));
 
     let (status, _) = send(
         &app,
@@ -314,6 +344,12 @@ async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
             .unwrap();
         assert_eq!(count, 0, "{table} survived proof consumption");
     }
+    drop(conn);
+    let snapshot = server::operational_snapshot(path.as_ref()).unwrap();
+    assert_eq!(snapshot.accounts, 1);
+    assert_eq!(snapshot.registration_challenges_active, 0);
+    assert_eq!(snapshot.mail_pending, 0);
+    assert_eq!(snapshot.oldest_active_mail_age_seconds, None);
 }
 
 #[tokio::test]

@@ -184,7 +184,8 @@ following are complete:
 4. Mailbox verification uses durable delivery, bounded abuse controls, and
    never acts as vault recovery.
 5. Operational metrics, alerts, rollback procedures, and failure drills are
-   exercised on the selected deployment environment.
+   implemented by the production operations runbook and exercised on the
+   selected deployment environment with retained evidence.
 6. An independent security audit of the frozen release has no unresolved
    Critical or High findings.
 
