@@ -35,4 +35,9 @@ the browser extension, and Bastion Send.
 
 The repository contains deterministic vectors, integration tests, WebAssembly
 tests, and internal security-review artifacts. It has not yet undergone an
-independent third-party security audit.
+independent third-party security audit. The frozen scope, deterministic source
+bundle, signed attestation format, and fail-closed release procedure are defined
+in [`docs/security-audit-scope.md`](docs/security-audit-scope.md) and
+[`docs/independent-audit-release-gate.md`](docs/independent-audit-release-gate.md).
+These controls prepare and verify third-party evidence; their presence is not
+an audit claim.

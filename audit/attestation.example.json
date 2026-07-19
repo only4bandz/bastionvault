@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "project": "Bastion",
+  "audited_commit": "REPLACE_WITH_40_CHARACTER_COMMIT_SHA",
+  "audited_tree": "REPLACE_WITH_40_CHARACTER_TREE_SHA",
+  "scope_sha256": "REPLACE_WITH_64_CHARACTER_SCOPE_SHA256",
+  "report_sha256": "REPLACE_WITH_64_CHARACTER_REPORT_SHA256",
+  "validation_log_sha256": "REPLACE_WITH_64_CHARACTER_VALIDATION_LOG_SHA256",
+  "issued_at": "REPLACE_WITH_RFC3339_UTC_TIMESTAMP",
+  "auditor": {
+    "organization": "REPLACE_WITH_INDEPENDENT_AUDITOR_ORGANIZATION",
+    "lead": "REPLACE_WITH_AUDIT_LEAD",
+    "signing_principal": "REPLACE_WITH_ALLOWED_SIGNER_PRINCIPAL",
+    "independent": false,
+    "conflicts_disclosed": "REPLACE_WITH_CONFLICT_DISCLOSURE"
+  },
+  "coverage": [
+    "bastion-send-and-trust-model",
+    "browser-extension-and-autofill",
+    "cryptography-and-secret-lifecycle",
+    "operations-recovery-and-privacy-logging",
+    "server-authentication-and-sessions",
+    "sqlite-migrations-durability-and-backup",
+    "supply-chain-build-and-release",
+    "tls-origin-and-deployment-boundary",
+    "transactional-mail-and-mailbox-proof",
+    "vault-integrity-rollback-and-cas",
+    "wasm-javascript-boundary",
+    "web-application-and-browser-storage"
+  ],
+  "findings": [],
+  "release_recommended": false
+}
