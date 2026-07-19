@@ -1,9 +1,10 @@
 [package]
 name = "crypto-core"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "Zero-knowledge cryptographic core for the password manager (native + WASM)."
 
 [lints]

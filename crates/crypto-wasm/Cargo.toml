@@ -1,9 +1,10 @@
 [package]
 name = "crypto-wasm"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 description = "WebAssembly bindings around crypto-core for the web app and Chrome extension."
 
 # NB: no `[lints] workspace = true` here — the workspace forbids `unsafe`,

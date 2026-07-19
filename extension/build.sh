@@ -15,7 +15,7 @@ wasm-pack build ../crates/crypto-wasm --target web --out-dir ../../extension/pkg
 
 echo "▸ Rendering icons → extension/icons"
 for s in 16 32 48 128; do
-  convert -background none icons/icon.svg -resize "${s}x${s}" "icons/icon${s}.png"
+  convert -background none icons/icon.svg -resize "${s}x${s}" -strip "icons/icon${s}.png"
 done
 
 echo "✅ Done. Load it in Chrome:"

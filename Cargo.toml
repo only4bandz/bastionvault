@@ -7,9 +7,11 @@ members = [
 ]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.91"
+repository = "https://github.com/only4bandz/bastionvault"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
