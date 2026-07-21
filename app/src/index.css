@@ -101,7 +101,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 
 /* ── pagination ── */
 .pager { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 2px 4px; flex-wrap: wrap; }
-.pager-info { color: var(--text-faint); font-size: 12.5px; }
+.pager-info { color: var(--text-faint); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .pager-btns { display: flex; align-items: center; gap: 4px; margin-left: auto; }
 .pg {
   min-width: 32px; height: 32px; padding: 0 8px; border-radius: var(--radius-sm);
@@ -152,7 +152,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .nav-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-item.active .ico { color: var(--accent-2); }
 .nav-status { margin-left: auto; padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
-.nav-count { margin-left: auto; min-width: 20px; text-align: center; color: var(--text-faint); font-size: 11px; }
+.nav-count { margin-left: auto; min-width: 20px; text-align: center; color: var(--text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
 .nav-sep { height: 1px; background: var(--line); margin: 10px 8px; }
 .nav-label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-faint); padding: 10px 11px 4px; }
 .sidebar-foot { margin-top: auto; }
@@ -179,7 +179,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .page-head .right { margin-left: auto; }
 
 .tabs { display: flex; gap: 4px; margin-bottom: 18px; flex-wrap: wrap; }
-.tab { display: inline-flex; align-items: center; gap: 7px; padding: 8px 13px; border-radius: 20px; font-size: 13px; font-weight: 600; color: var(--text-dim); background: none; border: 1px solid transparent; }
+.tab { display: inline-flex; align-items: center; gap: 7px; padding: 8px 13px; border-radius: 20px; font-size: 13px; font-weight: 600; color: var(--text-dim); background: none; border: 1px solid transparent; font-variant-numeric: tabular-nums; }
 .tab:hover { background: var(--surface); color: var(--text); }
 .tab.active { background: var(--surface-2); color: var(--text); border-color: var(--line-2); }
 .vault-list-controls { display: flex; justify-content: flex-end; margin: -10px 0 14px; }
@@ -207,7 +207,7 @@ select.input option { background: var(--surface-2); color: var(--text); }
 .row .title .sub { display: block; font-size: 12px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fav-ico { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; font-weight: 800; font-size: 15px; flex-shrink: 0; color: #fff; }
 .fav-img { object-fit: cover; padding: 0; background: transparent; }
-.row .when { font-size: 13px; color: var(--text-dim); }
+.row .when { font-size: 13px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .row .actions { display: flex; gap: 4px; justify-content: flex-end; }
 .row .actions > * { opacity: 0; transition: opacity .12s; }
 .row:hover .actions > *, .row:focus-within .actions > *, .row .actions > .fav-on { opacity: 1; }
