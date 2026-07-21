@@ -405,6 +405,14 @@ select.input option { background: var(--surface-2); color: var(--text); }
   .switch.on::after { transform: translateX(20px); }
 }
 
+@media print {
+  #root { display: none; }
+  body::after {
+    content: "Bastion does not print vault contents. Use Export from the vault toolbar if you need a file copy.";
+    display: block; padding: 40px; font-size: 14px; color: #000;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     transition-duration: 0.01ms !important;
