@@ -44,7 +44,8 @@ body {
   color: var(--text);
   -webkit-font-smoothing: antialiased;
 }
-button { font-family: inherit; cursor: pointer; }
+button { font-family: inherit; cursor: pointer; touch-action: manipulation; }
+button, a, [role="tab"] { -webkit-tap-highlight-color: transparent; }
 input, textarea { font-family: inherit; }
 a { color: var(--accent-2); }
 ::selection { background: var(--accent); color: #0a0c12; }
