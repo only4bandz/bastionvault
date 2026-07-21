@@ -206,9 +206,14 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .empty .big { width: 54px; height: 54px; margin: 0 auto 14px; color: var(--line-2); }
 
 /* ─── modal / drawer ──────────────────────────────────────────────────── */
-.overlay { position: fixed; inset: 0; background: rgba(5, 7, 12, .6); backdrop-filter: blur(3px); display: grid; place-items: center; padding: 24px; z-index: 50; }
+.overlay { position: fixed; inset: 0; background: rgba(5, 7, 12, .6); backdrop-filter: blur(3px); display: grid; place-items: center; padding: 24px; z-index: 50; animation: overlay-in .15s ease-out; }
 .overlay.inactive { pointer-events: none; }
-.modal { width: 100%; max-width: 480px; background: linear-gradient(180deg, var(--surface), var(--bg-2)); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); max-height: 88vh; overflow: auto; }
+.modal { width: 100%; max-width: 480px; background: linear-gradient(180deg, var(--surface), var(--bg-2)); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); max-height: 88vh; overflow: auto; animation: modal-in .18s ease-out; }
+@keyframes overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes modal-in {
+  from { opacity: 0; transform: scale(.97) translateY(6px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
 .modal-head { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 .modal-head h3 { margin: 0; font-size: 17px; }
 .modal-head .x { margin-left: auto; }
