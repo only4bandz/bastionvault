@@ -203,8 +203,15 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .icon-btn:hover { background: var(--surface-3); color: var(--text); }
 .icon-btn:disabled { opacity: .45; cursor: not-allowed; }
 
-.empty { text-align: center; padding: 70px 20px; color: var(--text-faint); }
-.empty .big { width: 54px; height: 54px; margin: 0 auto 14px; color: var(--line-2); }
+.empty {
+  text-align: center; padding: 70px 20px; color: var(--text-faint);
+  border: 1px dashed var(--line-2); border-radius: var(--radius); background: var(--bg-2);
+}
+.empty .big {
+  width: 76px; height: 76px; margin: 0 auto 16px; color: var(--text-faint);
+  display: grid; place-items: center; border-radius: 50%;
+  background: var(--surface-2); border: 1px solid var(--line);
+}
 
 /* ─── modal / drawer ──────────────────────────────────────────────────── */
 .overlay { position: fixed; inset: 0; background: rgba(5, 7, 12, .6); backdrop-filter: blur(3px); display: grid; place-items: center; padding: 24px; z-index: 50; animation: overlay-in .15s ease-out; }
