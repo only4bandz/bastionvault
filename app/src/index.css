@@ -363,6 +363,16 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .row-copy .k { width: 82px; }
 }
 
+@media (pointer: coarse) {
+  .icon-btn { width: 40px; height: 40px; }
+  .pg { min-width: 40px; height: 40px; }
+  .search-clear { width: 32px; height: 32px; }
+  .secret-input .input { padding-right: 52px; }
+  .switch { width: 46px; height: 26px; }
+  .switch::after { width: 22px; height: 22px; }
+  .switch.on::after { transform: translateX(20px); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     transition-duration: 0.01ms !important;
