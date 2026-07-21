@@ -211,6 +211,7 @@ select.input option { background: var(--surface-2); color: var(--text); }
 .row:hover .actions > *, .row:focus-within .actions > *, .row .actions > .fav-on { opacity: 1; }
 .icon-btn { width: 30px; height: 30px; border-radius: 7px; border: none; background: none; color: var(--text-dim); display: grid; place-items: center; }
 .icon-btn:hover { background: var(--surface-3); color: var(--text); }
+.icon-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-2); }
 .icon-btn:disabled { opacity: .45; cursor: not-allowed; }
 
 .empty {
