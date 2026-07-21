@@ -197,8 +197,9 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .fav-ico { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; font-weight: 800; font-size: 15px; flex-shrink: 0; color: #fff; }
 .fav-img { object-fit: cover; padding: 0; background: transparent; }
 .row .when { font-size: 13px; color: var(--text-dim); }
-.row .actions { display: flex; gap: 4px; justify-content: flex-end; opacity: 0; transition: opacity .12s; }
-.row:hover .actions, .row:focus-within .actions { opacity: 1; }
+.row .actions { display: flex; gap: 4px; justify-content: flex-end; }
+.row .actions > * { opacity: 0; transition: opacity .12s; }
+.row:hover .actions > *, .row:focus-within .actions > *, .row .actions > .fav-on { opacity: 1; }
 .icon-btn { width: 30px; height: 30px; border-radius: 7px; border: none; background: none; color: var(--text-dim); display: grid; place-items: center; }
 .icon-btn:hover { background: var(--surface-3); color: var(--text); }
 .icon-btn:disabled { opacity: .45; cursor: not-allowed; }
@@ -353,7 +354,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .list-head span:not(:first-child), .row .when { display: none; }
   .row { grid-template-columns: minmax(0, 1fr) 70px; gap: 6px; padding: 0 10px; }
   .row-open { grid-template-columns: minmax(0, 1fr); }
-  .row .actions { opacity: 1; }
+  .row .actions > * { opacity: 1; }
   .card-section { width: 100%; max-width: none; padding: 16px; }
   .send-actions { flex-wrap: wrap; }
   .pager { align-items: flex-start; }

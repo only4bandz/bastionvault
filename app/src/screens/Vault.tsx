@@ -544,7 +544,7 @@ export function Vault({
                       </button>
                       <div className="actions">
                         <button
-                          className="icon-btn"
+                          className={`icon-btn${i.favorite ? " fav-on" : ""}`}
                           aria-label={`${i.favorite ? "Remove" : "Add"} ${i.title} ${i.favorite ? "from" : "to"} favorites`}
                           aria-pressed={Boolean(i.favorite)}
                           style={i.favorite ? { color: "var(--warn)" } : undefined}
