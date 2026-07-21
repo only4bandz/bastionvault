@@ -311,7 +311,7 @@ export function Vault({
             aria-current={nav === "vault" && selectedFolder === folder ? "page" : undefined}
             onClick={() => goFolder(folder)}
           >
-            <span className="ico"><IcFolder /></span> {folder}
+            <span className="ico"><IcFolder /></span> <span className="nav-text" title={folder}>{folder}</span>
           </button>
         ))}
 

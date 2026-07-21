@@ -148,7 +148,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .nav-item:disabled { cursor: not-allowed; opacity: .55; }
 .nav-item:disabled:hover { background: none; color: var(--text-dim); }
 .nav-item.active { background: var(--accent-soft); color: var(--text); }
-.nav-item .ico { color: var(--text-faint); display: inline-flex; }
+.nav-item .ico { color: var(--text-faint); display: inline-flex; flex: none; }
+.nav-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav-item.active .ico { color: var(--accent-2); }
 .nav-status { margin-left: auto; padding: 2px 7px; border: 1px solid var(--line); border-radius: 999px; color: var(--text-faint); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
 .nav-count { margin-left: auto; min-width: 20px; text-align: center; color: var(--text-faint); font-size: 11px; }
