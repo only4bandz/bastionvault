@@ -54,6 +54,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 }
 
 /* scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 20px; border: 2px solid transparent; background-clip: content-box; }
 
