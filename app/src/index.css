@@ -363,6 +363,15 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   .row-copy .k { width: 82px; }
 }
 
+@media (forced-colors: active) {
+  .switch { border: 1px solid ButtonText; }
+  .switch::after { background: ButtonText; }
+  .switch.on { background: Highlight; }
+  .switch.on::after { background: Canvas; }
+  .sync-dot, .strength, .strength > i, .fav-ico, .avatar { forced-color-adjust: none; }
+  .nav-item.active, .tab.active, .pg.active, .type-pick button.active { outline: 2px solid Highlight; outline-offset: -2px; }
+}
+
 @media (pointer: coarse) {
   .icon-btn { width: 40px; height: 40px; }
   .pg { min-width: 40px; height: 40px; }
