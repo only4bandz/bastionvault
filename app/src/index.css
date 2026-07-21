@@ -134,7 +134,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .brand .name b { background: linear-gradient(90deg, #fff, var(--accent-2)); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 
 /* secret-key reveal */
-.secret-box { background: var(--bg-2); border: 1px dashed var(--accent); border-radius: var(--radius-sm); padding: 14px; font-size: 16px; letter-spacing: .02em; text-align: center; color: var(--accent-2); }
+.secret-box { background: var(--bg-2); border: 1px dashed var(--accent); border-radius: var(--radius-sm); padding: 14px; font-size: 16px; letter-spacing: .02em; text-align: center; color: var(--accent-2); user-select: all; }
 .kit-pre { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; font-size: 11px; white-space: pre-wrap; color: var(--text-dim); max-height: 220px; overflow: auto; }
 .callout { display: flex; gap: 10px; background: rgba(255, 180, 84, .08); border: 1px solid rgba(255, 180, 84, .25); border-radius: var(--radius-sm); padding: 12px; font-size: 13px; color: #ffd9a3; margin: 16px 0; }
 
@@ -255,7 +255,7 @@ select.input option { background: var(--surface-2); color: var(--text); }
 /* generator */
 .gen { display: grid; gap: 18px; }
 .gen-out { display: flex; align-items: center; gap: 10px; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 14px 16px; font-size: 18px; word-break: break-all; min-height: 56px; }
-.gen-out .val { flex: 1; }
+.gen-out .val { flex: 1; user-select: all; line-height: 1.45; }
 .slider-row { display: flex; align-items: center; gap: 12px; }
 .slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
 .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
@@ -300,7 +300,7 @@ select.input option { background: var(--surface-2); color: var(--text); }
 .send-hero p { margin: 0 auto; max-width: 380px; line-height: 1.55; }
 .field-label { font-size: 12px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
 .id-card { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px 14px; }
-.id-card code { flex: 1; min-width: 0; font-size: 15px; letter-spacing: .5px; word-break: break-all; color: var(--text); }
+.id-card code { flex: 1; min-width: 0; font-size: 15px; letter-spacing: .5px; word-break: break-all; color: var(--text); user-select: all; }
 .link-back { background: none; border: none; color: var(--accent); cursor: pointer; font-size: inherit; padding: 0; }
 .link-back:hover { text-decoration: underline; }
 .contact-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
