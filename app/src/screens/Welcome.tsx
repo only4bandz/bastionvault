@@ -106,7 +106,16 @@ export function Welcome({
                   placeholder="A long, memorable passphrase"
                 />
                 {pw && (
-                  <div className="strength" title={s.label}>
+                  <div
+                    className="strength strength-steps"
+                    title={s.label}
+                    role="meter"
+                    aria-label="Master password strength"
+                    aria-valuemin={0}
+                    aria-valuemax={4}
+                    aria-valuenow={s.score}
+                    aria-valuetext={s.label}
+                  >
                     <i style={{ width: `${(s.score / 4) * 100}%`, background: s.color }} />
                   </div>
                 )}

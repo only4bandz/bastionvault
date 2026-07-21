@@ -120,7 +120,15 @@ export function Generator({
           <IcCopy size={17} />
         </button>
       </div>
-      <div className="strength">
+      <div
+        className="strength strength-steps"
+        role="meter"
+        aria-label={`${label} strength`}
+        aria-valuemin={0}
+        aria-valuemax={4}
+        aria-valuenow={s.score}
+        aria-valuetext={s.label}
+      >
         <i style={{ width: `${(s.score / 4) * 100}%`, background: s.color }} />
       </div>
       <div className="faint" style={{ fontSize: 12, marginTop: -8 }}>{s.label}</div>
