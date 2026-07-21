@@ -47,7 +47,7 @@ body {
 button { font-family: inherit; cursor: pointer; }
 input, textarea { font-family: inherit; }
 a { color: var(--accent-2); }
-::selection { background: var(--accent-soft); }
+::selection { background: var(--accent); color: #0a0c12; }
 button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--accent-2);
   outline-offset: 2px;
