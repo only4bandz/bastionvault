@@ -691,7 +691,7 @@ async fn rejects_authentication_work_when_capacity_is_exhausted() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::OK); // unknown account answers with a decoy
 }
 
 #[tokio::test]
@@ -759,7 +759,7 @@ async fn rate_limits_account_creation_globally_and_per_account_before_hashing() 
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::OK); // unknown account answers with a decoy
 }
 
 #[tokio::test]
@@ -1106,9 +1106,9 @@ async fn expired_token_is_rejected() {
 }
 
 #[tokio::test]
-async fn prelogin_unknown_account_is_404() {
+async fn prelogin_unknown_account_returns_stable_decoy() {
     let app = server::app_in_memory();
-    let (s, _) = send(
+    let (s1, first) = send(
         &app,
         "GET",
         "/accounts/ghost@example.com/prelogin",
@@ -1116,7 +1116,39 @@ async fn prelogin_unknown_account_is_404() {
         None,
     )
     .await;
-    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert_eq!(s1, StatusCode::OK);
+    let (s2, second) = send(
+        &app,
+        "GET",
+        "/accounts/ghost@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s2, StatusCode::OK);
+    // Deterministic: probing twice yields byte-identical decoys.
+    assert_eq!(first, second);
+    // Distinct emails yield distinct decoys (no shared tell-tale value).
+    let (s3, other) = send(
+        &app,
+        "GET",
+        "/accounts/ghost2@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(s3, StatusCode::OK);
+    assert_ne!(first, other);
+    assert_ne!(first["salt"], other["salt"]);
+    // Shaped like a real registration: registration-default KDF params and a
+    // v1 wrapped key with 24-byte nonce / 48-byte ciphertext.
+    assert_eq!(first["kdf"]["mem_kib"], 64 * 1024);
+    assert_eq!(first["kdf"]["iterations"], 3);
+    assert_eq!(first["wrapped_vault_key"]["v"], 1);
+    let b64_len = |value: &serde_json::Value| value.as_str().unwrap().len();
+    assert_eq!(b64_len(&first["salt"]), 24); // 16 bytes
+    assert_eq!(b64_len(&first["wrapped_vault_key"]["nonce"]), 32); // 24 bytes
+    assert_eq!(b64_len(&first["wrapped_vault_key"]["ct"]), 64); // 48 bytes
 }
 
 #[tokio::test]
@@ -2526,7 +2558,7 @@ async fn rate_limits_prelogin_globally_and_per_account() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(status, StatusCode::OK); // decoy — still consumes the global allowance
     let (status, _) = send(
         &app,
         "GET",

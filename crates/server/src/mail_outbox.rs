@@ -520,7 +520,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_mail_is_scrubbed_after_delivery() {
-        let (db, _) = Db::open(":memory:");
+        let (db, _, _) = Db::open(":memory:");
         let id = "00112233445566778899aabbccddeeff";
         insert_mail(&db, id, 100).await;
         let sender = FakeSender::new([Ok(())]);
@@ -542,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn transient_failure_retries_with_the_same_stable_id() {
-        let (db, _) = Db::open(":memory:");
+        let (db, _, _) = Db::open(":memory:");
         let id = "11112222333344445555666677778888";
         insert_mail(&db, id, 200).await;
         let sender = FakeSender::new([Err(DeliveryFailure::Retryable("temporary")), Ok(())]);
@@ -560,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_lease_is_recovered_and_permanent_failure_is_scrubbed() {
-        let (db, _) = Db::open(":memory:");
+        let (db, _, _) = Db::open(":memory:");
         let id = "aaaabbbbccccddddeeeeffff00001111";
         insert_mail(&db, id, 300).await;
 
@@ -588,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_final_attempt_is_not_delivered_a_ninth_time() {
-        let (db, _) = Db::open(":memory:");
+        let (db, _, _) = Db::open(":memory:");
         let id = "9999aaaabbbbccccddddeeeeffff0000";
         insert_mail(&db, id, 400).await;
         let id_for_update = id.to_string();
