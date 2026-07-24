@@ -261,8 +261,10 @@ select.input option { background: var(--surface-2); color: var(--text); }
 .import-outcome.partial { border-color: rgba(255, 180, 84, .35); background: rgba(255, 180, 84, .08); }
 
 .type-pick { display: flex; gap: 8px; margin-bottom: 18px; }
-.type-pick button { flex: 1; padding: 12px 8px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--bg-2); color: var(--text-dim); font-size: 12px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.type-pick button { flex: 1; padding: 12px 8px; border-radius: var(--radius-sm); border: 1px solid var(--line); background: var(--bg-2); color: var(--text-dim); font-size: 12px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 6px; transition: border-color .12s, background .12s, color .12s; }
+.type-pick button:hover { border-color: var(--line-2); background: var(--surface-2); color: var(--text); }
 .type-pick button.active { border-color: var(--accent); color: var(--text); background: var(--accent-soft); }
+.type-pick button.active:hover { border-color: var(--accent); background: var(--accent-soft); }
 
 /* generator */
 .gen { display: grid; gap: 18px; }
