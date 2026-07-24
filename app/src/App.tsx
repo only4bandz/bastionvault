@@ -26,6 +26,7 @@ import {
   verifyVaultSnapshot,
   type VaultIntegrityState,
 } from "./lib/vault-integrity";
+import { assertUnlockKdfPolicy } from "./lib/kdf-policy";
 import {
   VaultRollbackError,
   assertVaultRollbackProgress,
@@ -384,6 +385,9 @@ export default function App(): JSX.Element {
       if (e instanceof ApiError && e.status === 404) throw new Error("No vault found for this email.");
       throw e;
     });
+    // Refuse server-supplied KDF params below the client policy floor before
+    // deriving anything (KDF-downgrade / credential-harvesting protection).
+    assertUnlockKdfPolicy(pre.kdf);
     // unlock() only needs salt/kdf/wrapped key; auth_secret is re-derived inside.
     const regJson = JSON.stringify({
       version: 1,
