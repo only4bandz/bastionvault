@@ -27,6 +27,7 @@ import {
   type VaultIntegrityState,
 } from "./lib/vault-integrity";
 import { assertUnlockKdfPolicy } from "./lib/kdf-policy";
+import { clearPendingSecretCopy } from "./lib/clipboard";
 import {
   VaultRollbackError,
   assertVaultRollbackProgress,
@@ -253,6 +254,9 @@ export default function App(): JSX.Element {
 
   const lock = useCallback(() => {
     sessionEpoch.current += 1;
+    // A copied secret must not outlive the session: wipe any pending
+    // clipboard secret immediately instead of waiting out its 30s timer.
+    void clearPendingSecretCopy();
     if (token) api.logout(token).catch(() => {});
     account?.lock(); // drops + zeroizes the vault key in WASM
     setAccount(null);
