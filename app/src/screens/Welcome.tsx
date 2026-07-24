@@ -2,6 +2,7 @@ import { useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
 import { SecretInput } from "../components/SecretInput";
 import { assessPassword } from "../lib/password-health";
+import { checkPwnedPassword } from "../lib/pwned-passwords";
 
 export function Welcome({
   onCreate,
@@ -21,6 +22,7 @@ export function Welcome({
   const [pw2, setPw2] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [breachCheck, setBreachCheck] = useState(false);
   const s = assessPassword(pw);
 
   async function create() {
@@ -47,6 +49,25 @@ export function Welcome({
       return setErr(`This master password is too weak (${s.reasons[0].toLowerCase()}). Try a longer passphrase.`);
     }
     if (pw !== pw2) return setErr("Passwords do not match.");
+    if (breachCheck) {
+      setBusy(true);
+      let occurrences: number;
+      try {
+        occurrences = await checkPwnedPassword(pw);
+      } catch {
+        setBusy(false);
+        return setErr(
+          "The breach check could not reach haveibeenpwned.com. Retry, or untick the check to continue without it."
+        );
+      }
+      if (occurrences > 0) {
+        setBusy(false);
+        return setErr(
+          `This password appears in ${occurrences.toLocaleString()} known breaches. It will be attacked first — choose a different one.`
+        );
+      }
+      setBusy(false);
+    }
     setBusy(true);
     await new Promise((r) => setTimeout(r, 30)); // let "Creating…" paint before Argon2id blocks
     try {
@@ -130,6 +151,17 @@ export function Welcome({
                   placeholder="Repeat it"
                 />
               </div>
+              <label className="send-check" style={{ marginTop: 0, marginBottom: 14 }}>
+                <input
+                  type="checkbox"
+                  checked={breachCheck}
+                  onChange={(event) => setBreachCheck(event.target.checked)}
+                />
+                <span>
+                  Check this password against known breaches. Only a 5-character
+                  hash prefix is sent to haveibeenpwned.com — never the password.
+                </span>
+              </label>
             </>
           )}
 

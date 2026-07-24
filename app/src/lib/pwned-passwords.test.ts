@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { VaultItem } from "./types";
-import { scanPwnedPasswords } from "./pwned-passwords";
+import { checkPwnedPassword, scanPwnedPasswords } from "./pwned-passwords";
 
 const ITEM: VaultItem = {
   id: "login-1",
@@ -27,6 +27,49 @@ describe("Pwned Passwords scanner", () => {
       );
       expect(fetchMock.mock.calls[0][1]).not.toHaveProperty("body");
       expect(findings).toEqual([{ item: ITEM, occurrences: 42 }]);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("checkPwnedPassword sends only the prefix and returns the count", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("1E4C9B93F3F0682250B6CF8331B7EE68FD8:1337\r\nBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB:2")
+    );
+    try {
+      // sha1("password") = 5BAA6 1E4C9B93F3F0682250B6CF8331B7EE68FD8
+      await expect(checkPwnedPassword("password")).resolves.toBe(1337);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://api.pwnedpasswords.com/range/5BAA6",
+        expect.objectContaining({
+          credentials: "omit",
+          headers: { "Add-Padding": "true" },
+          referrerPolicy: "no-referrer",
+        })
+      );
+      expect(fetchMock.mock.calls[0][1]).not.toHaveProperty("body");
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("checkPwnedPassword returns 0 for an unlisted password", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA:7"));
+    try {
+      await expect(checkPwnedPassword("password")).resolves.toBe(0);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("checkPwnedPassword surfaces service failures", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("", { status: 503 }));
+    try {
+      await expect(checkPwnedPassword("password")).rejects.toThrow(/HTTP 503/);
     } finally {
       fetchMock.mockRestore();
     }
