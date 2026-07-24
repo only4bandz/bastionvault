@@ -729,6 +729,8 @@ struct AppState {
     auth_rate_limits: AuthRateLimits,
     transport: Option<TransportPolicy>,
     verification_origin: Option<String>,
+    /// Per-deployment secret keying deterministic prelogin decoys.
+    prelogin_decoy_seed: [u8; 32],
 }
 
 struct Inner {
@@ -777,7 +779,7 @@ impl AppState {
             smtp,
             verification_origin,
         } = options;
-        let (db, accounts) = Db::open(db_path);
+        let (db, accounts, prelogin_decoy_seed) = Db::open(db_path);
         let state = Self {
             inner: Arc::new(RwLock::new(Inner {
                 accounts,
@@ -793,6 +795,7 @@ impl AppState {
             auth_rate_limits,
             transport,
             verification_origin,
+            prelogin_decoy_seed,
         };
         if let Some(config) = smtp {
             mail_outbox::spawn(state.db.clone(), config);
@@ -1585,7 +1588,7 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
 }
 
 impl Db {
-    fn open(path: &str) -> (Self, HashMap<String, AccountRecord>) {
+    fn open(path: &str) -> (Self, HashMap<String, AccountRecord>, [u8; 32]) {
         Self::open_with_limits(path, DB_QUEUE_CAPACITY, DB_RESPONSE_TIMEOUT)
     }
 
@@ -1593,7 +1596,7 @@ impl Db {
         path: &str,
         queue_capacity: usize,
         response_timeout: Duration,
-    ) -> (Self, HashMap<String, AccountRecord>) {
+    ) -> (Self, HashMap<String, AccountRecord>, [u8; 32]) {
         let (sender, mut receiver) = mpsc::channel::<DbJob>(queue_capacity);
         let (init_sender, init_receiver) = std::sync::mpsc::sync_channel(1);
         let path = path.to_owned();
@@ -1604,7 +1607,9 @@ impl Db {
             .spawn(move || {
                 let (mut conn, _instance_lock) = Self::open_connection(&path);
                 let accounts = Self::load_accounts_from(&conn).expect("load persisted vault state");
-                if init_sender.send(accounts).is_err() {
+                let decoy_seed =
+                    Self::load_or_create_decoy_seed(&conn).expect("load prelogin decoy seed");
+                if init_sender.send((accounts, decoy_seed)).is_err() {
                     return;
                 }
                 while let Some(job) = receiver.blocking_recv() {
@@ -1619,8 +1624,8 @@ impl Db {
                 }
             })
             .expect("spawn SQLite owner");
-        let accounts = match init_receiver.recv() {
-            Ok(accounts) => accounts,
+        let (accounts, decoy_seed) = match init_receiver.recv() {
+            Ok(init) => init,
             Err(_) => {
                 let _ = worker.join();
                 panic!("SQLite owner failed to initialize");
@@ -1636,7 +1641,32 @@ impl Db {
                 response_timeout,
             },
             accounts,
+            decoy_seed,
         )
+    }
+
+    /// Loads (or creates on first start) the random per-deployment secret that
+    /// keys deterministic prelogin decoys for unknown accounts. Persisted so
+    /// decoys stay stable across restarts — an attacker comparing responses
+    /// over time learns nothing from a reboot.
+    fn load_or_create_decoy_seed(conn: &Connection) -> rusqlite::Result<[u8; 32]> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS server_meta(key TEXT PRIMARY KEY, value BLOB NOT NULL)",
+        )?;
+        let mut fresh = [0u8; 32];
+        OsRng.fill_bytes(&mut fresh);
+        conn.execute(
+            "INSERT OR IGNORE INTO server_meta(key,value) VALUES('prelogin_decoy_seed',?1)",
+            [fresh.as_slice()],
+        )?;
+        let stored: Vec<u8> = conn.query_row(
+            "SELECT value FROM server_meta WHERE key='prelogin_decoy_seed'",
+            [],
+            |row| row.get(0),
+        )?;
+        stored
+            .try_into()
+            .map_err(|_| rusqlite::Error::InvalidQuery)
     }
 
     fn open_connection(path: &str) -> (Connection, Option<File>) {
@@ -2617,15 +2647,56 @@ async fn prelogin(
     )
     .await?;
     let inner = st.read().await;
-    let acc = inner
-        .accounts
-        .get(&email)
-        .ok_or(ApiError(StatusCode::NOT_FOUND, "no such account"))?;
-    Ok(Json(Prelogin {
-        salt: acc.salt.clone(),
-        kdf: acc.kdf,
-        wrapped_vault_key: acc.wrapped_vault_key.clone(),
-    }))
+    // Enumeration resistance: unknown accounts answer with a deterministic
+    // decoy shaped exactly like a real registration (same salt length, the
+    // registration-default KDF params, a plausible wrapped key). The decoy is
+    // keyed by a persisted per-deployment secret, so it is stable across
+    // requests and restarts and unpredictable to outsiders. The client's
+    // unlock then fails as "invalid master password or Secret Key" — the same
+    // failure an existing account gives for wrong credentials.
+    match inner.accounts.get(&email) {
+        Some(acc) => Ok(Json(Prelogin {
+            salt: acc.salt.clone(),
+            kdf: acc.kdf,
+            wrapped_vault_key: acc.wrapped_vault_key.clone(),
+        })),
+        None => Ok(Json(prelogin_decoy(&st.prelogin_decoy_seed, &email))),
+    }
+}
+
+/// Deterministic, secret-keyed decoy prelogin response for unknown accounts.
+fn prelogin_decoy(seed: &[u8; 32], email: &str) -> Prelogin {
+    // Domain-separated PRF stream: SHA-256(seed || label || 0x00 || email).
+    // The secret-prefix construction is safe here (fixed-shape input, no
+    // attacker-controlled extension surface across labels).
+    let prf = |label: &str, n: usize| -> Vec<u8> {
+        let mut out = Vec::with_capacity(n);
+        let mut counter: u8 = 0;
+        while out.len() < n {
+            let mut hasher = Sha256::new();
+            hasher.update(seed);
+            hasher.update(label.as_bytes());
+            hasher.update([0u8, counter]);
+            hasher.update(email.as_bytes());
+            out.extend_from_slice(&hasher.finalize());
+            counter = counter.wrapping_add(1);
+        }
+        out.truncate(n);
+        out
+    };
+    use base64::{engine::general_purpose::STANDARD as B64_STD, Engine as _};
+    Prelogin {
+        // Same shape as a real registration: 16-byte salt, the registration
+        // KDF defaults, and a v1 blob with a 24-byte nonce over a 48-byte
+        // ciphertext (32-byte key + 16-byte AEAD tag).
+        salt: B64_STD.encode(prf("prelogin-decoy:salt", 16)),
+        kdf: KdfParams::default(),
+        wrapped_vault_key: EncryptedBlob {
+            v: 1,
+            nonce: B64_STD.encode(prf("prelogin-decoy:nonce", 24)),
+            ct: B64_STD.encode(prf("prelogin-decoy:ct", 48)),
+        },
+    }
 }
 
 async fn create_session(
@@ -4096,7 +4167,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_proof_is_rotated_then_consumed_with_account_creation() {
-        let (db, _) = Db::open(":memory:");
+        let (db, _, _) = Db::open(":memory:");
         let email = "proof@example.com";
         let first = [1u8; 32];
         let second = [2u8; 32];
@@ -4243,7 +4314,8 @@ mod tests {
                 "valid ingress",
                 Some("VAULT.EXAMPLE.COM"),
                 Some("https"),
-                StatusCode::NOT_FOUND,
+                // Unknown accounts now answer 200 with an enumeration decoy.
+                StatusCode::OK,
             ),
         ] {
             let mut request = Request::builder().uri("/v1/accounts/nobody@example.com/prelogin");
@@ -4308,7 +4380,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn connection_pragmas_are_hardened() {
-        let (db, _) = Db::open(":memory:");
+        let (db, _, _) = Db::open(":memory:");
         let (busy_timeout, synchronous, foreign_keys, user_version) = db
             .call(|conn| {
                 Ok((
@@ -4329,7 +4401,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_sqlite_does_not_block_tokio_and_queue_saturation_fails_fast() {
-        let (db, _) = Db::open_with_limits(":memory:", 1, Duration::from_secs(1));
+        let (db, _, _) = Db::open_with_limits(":memory:", 1, Duration::from_secs(1));
         let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
         let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
 
@@ -4378,7 +4450,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn delayed_accepted_mutation_finishes_then_quarantines_the_instance() {
-        let (db, _) = Db::open_with_limits(":memory:", 1, Duration::from_millis(10));
+        let (db, _, _) = Db::open_with_limits(":memory:", 1, Duration::from_millis(10));
         let completed = Arc::new(AtomicBool::new(false));
         let worker_completed = completed.clone();
 
