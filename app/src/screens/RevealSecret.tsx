@@ -60,7 +60,7 @@ export function RevealSecret({
           Store it somewhere safe. We can never recover it for you.
         </p>
 
-        {err && <div className="callout">Could not display the Secret Key: {err}</div>}
+        {err && <div className="callout callout-danger" role="alert">Could not display the Secret Key: {err}</div>}
 
         {data && (
           <>
@@ -88,7 +88,7 @@ export function RevealSecret({
               I have saved my Secret Key somewhere safe.
             </label>
 
-            {submitErr && <div className="callout">{submitErr}</div>}
+            {submitErr && <div className="callout callout-danger" role="alert">{submitErr}</div>}
 
             <button
               className="btn btn-primary btn-block"

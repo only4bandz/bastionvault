@@ -67,7 +67,7 @@ export function Unlock({
             />
           </div>
 
-          {err && <div className="callout">{err}</div>}
+          {err && <div className="callout callout-danger" role="alert">{err}</div>}
 
           <button className="btn btn-primary btn-block" type="submit" disabled={busy}>
             {busy ? "Unlocking…" : "Unlock"}
