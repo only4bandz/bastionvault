@@ -45,7 +45,7 @@ export function ConfirmDialog({
             Cancel
           </button>
           <button className="btn btn-danger confirm-danger" disabled={busy} onClick={() => void confirm()}>
-            {busy ? pendingLabel : confirmLabel}
+            {busy ? <><span className="spinner" aria-hidden="true" /> {pendingLabel}</> : confirmLabel}
           </button>
         </>
       }

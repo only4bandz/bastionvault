@@ -108,7 +108,7 @@ export function ItemEditor({
               onClick={() => void save()}
               disabled={!item.title.trim() || saving}
             >
-              {saving ? "Saving…" : "Save"}
+              {saving ? <><span className="spinner" aria-hidden="true" /> Saving…</> : "Save"}
             </button>
           </>
         }
