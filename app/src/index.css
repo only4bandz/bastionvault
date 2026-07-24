@@ -83,6 +83,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 
 .field { display: block; margin-bottom: 14px; }
 .field > label { display: block; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 6px; }
+.field small { display: block; margin-top: 6px; font-size: 12px; line-height: 1.45; color: var(--text-faint); }
 .input, .textarea {
   width: 100%; background: var(--bg-2); border: 1px solid var(--line); color: var(--text);
   padding: 11px 13px; border-radius: var(--radius-sm); font-size: 14px; outline: none; transition: border-color .15s, box-shadow .15s;
