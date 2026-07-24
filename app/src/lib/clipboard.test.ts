@@ -50,7 +50,7 @@ describe("copyWithFeedback", () => {
 });
 
 import { afterEach, beforeEach } from "vitest";
-import { copySecretWithFeedback, SECRET_CLEAR_MS } from "./clipboard";
+import { clearPendingSecretCopy, copySecretWithFeedback, SECRET_CLEAR_MS } from "./clipboard";
 
 describe("copySecretWithFeedback", () => {
   beforeEach(() => {
@@ -113,6 +113,33 @@ describe("copySecretWithFeedback", () => {
 
     await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS * 2);
     expect(writes).toEqual(["hunter2", "alice@example.com"]);
+  });
+
+  it("clearPendingSecretCopy wipes immediately and cancels the timer", async () => {
+    const { clipboard, writes } = writer();
+    const toast = vi.fn();
+
+    await copySecretWithFeedback("hunter2", "Password", toast, clipboard);
+    await clearPendingSecretCopy(clipboard);
+    expect(writes).toEqual(["hunter2", ""]);
+
+    // The original 30s deadline passes: no double wipe.
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS * 2);
+    expect(writes).toEqual(["hunter2", ""]);
+  });
+
+  it("clearPendingSecretCopy is a no-op without a pending secret", async () => {
+    const { clipboard, writes } = writer();
+    const toast = vi.fn();
+
+    // Nothing copied at all.
+    await clearPendingSecretCopy(clipboard);
+    expect(writes).toEqual([]);
+
+    // A non-secret copy owns the clipboard: locking must not destroy it.
+    await copyWithFeedback("alice@example.com", "Username", toast, clipboard);
+    await clearPendingSecretCopy(clipboard);
+    expect(writes).toEqual(["alice@example.com"]);
   });
 
   it("does not schedule a wipe when the write fails", async () => {

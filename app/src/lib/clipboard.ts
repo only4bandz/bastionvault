@@ -18,6 +18,22 @@ function noteCopy(): number {
 }
 
 /**
+ * Wipe the clipboard NOW if a secret copied through these helpers still has a
+ * pending scheduled clear. Called when the vault locks: a secret must not
+ * outlive the session that produced it. No-op when nothing secret is pending
+ * (never destroys an unrelated copy).
+ */
+export async function clearPendingSecretCopy(
+  clipboard: ClipboardWriter | null = navigator.clipboard ?? null
+): Promise<void> {
+  if (clearTimer === undefined) return;
+  noteCopy(); // cancel the scheduled clear; we are doing it synchronously
+  await clipboard?.writeText("").catch(() => {
+    // Best-effort: the document may have lost focus.
+  });
+}
+
+/**
  * Copy a secret (password, CVV, card number…) and schedule a clipboard wipe.
  *
  * The wipe writes an empty string after `clearAfterMs` unless something newer
