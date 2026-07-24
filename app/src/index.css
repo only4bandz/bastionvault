@@ -47,6 +47,7 @@ body {
 button { font-family: inherit; cursor: pointer; touch-action: manipulation; }
 button, a, [role="tab"] { -webkit-tap-highlight-color: transparent; }
 input, textarea { font-family: inherit; }
+input[type="checkbox"] { width: 16px; height: 16px; flex: none; accent-color: var(--accent); cursor: pointer; }
 a { color: var(--accent-2); }
 ::selection { background: var(--accent); color: #0a0c12; }
 button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
