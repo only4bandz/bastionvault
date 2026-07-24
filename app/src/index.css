@@ -246,8 +246,9 @@ select.input option { background: var(--surface-2); color: var(--text); }
   to { opacity: 1; transform: scale(1) translateY(0); }
 }
 .modal-head { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
-.modal-head h3 { margin: 0; font-size: 17px; }
-.modal-head .x { margin-left: auto; }
+.modal-head h3 { margin: 0; font-size: 17px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modal-head .x { margin-left: auto; flex: none; }
+.modal-head .pill { flex: none; white-space: nowrap; }
 .modal-body { padding: 20px; }
 .modal-foot { display: flex; gap: 10px; padding: 16px 20px; border-top: 1px solid var(--line); }
 .modal-foot .spacer { flex: 1; }
