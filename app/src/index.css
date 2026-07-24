@@ -76,6 +76,8 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
   box-shadow: 0 8px 24px -10px var(--accent);
 }
 .btn-primary:hover { filter: brightness(1.06); background: linear-gradient(180deg, var(--accent-2), var(--accent)); }
+.btn-primary:disabled { box-shadow: none; filter: saturate(.55); }
+.btn-primary:disabled:hover { filter: saturate(.55); }
 .btn-ghost { background: transparent; border-color: transparent; color: var(--text-dim); }
 .btn-ghost:hover { background: var(--surface-2); color: var(--text); }
 .btn-danger { color: var(--danger); border-color: transparent; background: transparent; }
