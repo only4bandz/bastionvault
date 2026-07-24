@@ -81,6 +81,10 @@ export function ImportModal({
       });
       setOutcome(completed);
       setProgress(completed);
+      // The import is over: drop the parsed plaintext (every password in the
+      // CSV) from component state instead of holding it while the outcome
+      // screen sits open. Retrying a partial import re-reads the file.
+      setResult(null);
     } catch {
       setErr("The import did not complete. Unconfirmed items were not added.");
     } finally {
