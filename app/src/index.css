@@ -369,15 +369,23 @@ select.input option { background: var(--surface-2); color: var(--text); }
     position: fixed; inset: 0 auto 0 0; z-index: 70; width: min(84vw, 280px);
     overflow-y: auto; visibility: hidden; transform: translateX(-100%);
     transition: transform .2s ease, visibility 0s linear .2s; box-shadow: var(--shadow);
+    padding-top: max(16px, env(safe-area-inset-top));
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
   }
   .sidebar.open { visibility: visible; transform: translateX(0); transition-delay: 0s; }
-  .topbar { gap: 10px; padding: 12px 14px; }
+  .topbar { gap: 10px; padding: 12px 14px; padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); }
   .search { min-width: 0; padding: 8px 12px; }
   /* 16px floor: iOS Safari auto-zooms the page when focusing any input below 16px */
   .input, .textarea, .search input { font-size: 16px; }
   .search .kbd { display: none; }
   .topbar-right > .pill, .topbar-right > .faint { display: none; }
-  .content { padding: 20px 14px; }
+  .content {
+    padding: 20px 14px;
+    padding-left: max(14px, env(safe-area-inset-left));
+    padding-right: max(14px, env(safe-area-inset-right));
+    padding-bottom: max(20px, env(safe-area-inset-bottom));
+  }
   .page-head { align-items: flex-start; gap: 12px; flex-wrap: wrap; }
   .page-head h2 { font-size: 21px; }
   .page-head .right { display: flex; width: 100%; margin-left: 0; }
@@ -395,7 +403,7 @@ select.input option { background: var(--surface-2); color: var(--text); }
   .overlay { padding: 12px; }
   .modal { max-height: 94vh; }
   .modal-head, .modal-body, .modal-foot { padding-right: 16px; padding-left: 16px; }
-  .toast { bottom: 14px; max-width: calc(100vw - 28px); text-align: center; }
+  .toast { bottom: max(14px, env(safe-area-inset-bottom)); max-width: calc(100vw - 28px); text-align: center; }
 }
 
 @media (max-width: 480px) {
