@@ -115,6 +115,14 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
+      // A bearer token must never chase a redirect (a misconfigured or
+      // compromised ingress could bounce it toward another origin), the API
+      // uses no cookie/ambient credentials, and neither requests nor responses
+      // belong in any HTTP cache.
+      redirect: "error",
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
     });
     if (!res.ok) {
       if (res.status === 401 && token) {
