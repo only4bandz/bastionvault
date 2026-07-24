@@ -63,6 +63,9 @@ export function Unlock({
               value={sk}
               placeholder="A1-XXXXX-XXXXX-…"
               autoComplete="off"
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="none"
               onChange={(e) => setSk(e.target.value)}
             />
           </div>

@@ -14,6 +14,13 @@ export function SecretInput({
     <div className="secret-input">
       <input
         {...inputProps}
+        // Secrets must never reach cloud spell-checkers, autocorrect
+        // dictionaries, or IME suggestion logs — especially while revealed as
+        // type="text" ("spell-jacking"). Placed after the spread so callers
+        // cannot weaken them.
+        spellCheck={false}
+        autoCorrect="off"
+        autoCapitalize="none"
         className={`input${className ? ` ${className}` : ""}`}
         type={revealed ? "text" : "password"}
       />
