@@ -375,6 +375,10 @@ export function Vault({
               ref={searchInputRef}
               aria-label="Search vault items"
               placeholder="Search names, usernames, and websites"
+              autoComplete="off"
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="none"
               value={query}
               onFocus={() => go("vault")}
               onChange={(event) => setQuery(event.target.value)}
