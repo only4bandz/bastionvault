@@ -2571,6 +2571,31 @@ async fn rate_limits_prelogin_globally_and_per_account() {
 }
 
 #[tokio::test]
+async fn rate_limited_responses_advertise_retry_after() {
+    let app = server::app_in_memory_with_auth_rate_limits(server::AuthRateLimits {
+        prelogins_global: 100,
+        prelogins_per_account: 1,
+        ..Default::default()
+    });
+    let uri = "/accounts/retry-after@example.com/prelogin";
+    let (status, _) = send(&app, "GET", uri, None, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "60");
+}
+
+#[tokio::test]
 async fn security_headers_are_stamped_on_success_and_error_responses() {
     let app = server::app_in_memory();
     for (method, uri, auth) in [
