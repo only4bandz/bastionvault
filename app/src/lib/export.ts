@@ -5,6 +5,7 @@
 // ⚠️ The produced file is UNENCRYPTED plaintext. The UI must warn before
 // handing it to the user, and never write it anywhere itself.
 import type { VaultItem } from "./types";
+import { escapeFormulaPrefix } from "./csv-guard";
 
 export const EXPORT_HEADER = [
   "name",
@@ -56,7 +57,7 @@ export function itemsToCsv(items: VaultItem[]): string {
         item.cardType ?? "",
         item.folder ?? "",
       ]
-        .map(csvField)
+        .map((value) => csvField(escapeFormulaPrefix(value)))
         .join(",")
     );
   }
