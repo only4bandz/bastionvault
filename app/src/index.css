@@ -138,6 +138,7 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .secret-box { background: var(--bg-2); border: 1px dashed var(--accent); border-radius: var(--radius-sm); padding: 14px; font-size: 16px; letter-spacing: .02em; text-align: center; color: var(--accent-2); user-select: all; }
 .kit-pre { background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; font-size: 11px; white-space: pre-wrap; color: var(--text-dim); max-height: 220px; overflow: auto; }
 .callout { display: flex; gap: 10px; background: rgba(255, 180, 84, .08); border: 1px solid rgba(255, 180, 84, .25); border-radius: var(--radius-sm); padding: 12px; font-size: 13px; color: #ffd9a3; margin: 16px 0; }
+.callout-danger { background: rgba(255, 93, 108, .08); border-color: rgba(255, 93, 108, .3); color: #ffb3ba; }
 
 /* ─── app shell ───────────────────────────────────────────────────────── */
 .shell { display: grid; grid-template-columns: 248px 1fr; height: 100%; }

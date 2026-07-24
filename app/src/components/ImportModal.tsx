@@ -156,7 +156,7 @@ export function ImportModal({
             <IcUpload size={16} /> {reading ? "Reading CSV…" : fileName || "Choose a CSV file"}
           </button>
 
-          {err && <div className="callout" role="alert" style={{ marginTop: 14 }}>{err}</div>}
+          {err && <div className="callout callout-danger" role="alert" style={{ marginTop: 14 }}>{err}</div>}
 
           {progress && !outcome && (
             <div className="import-progress" role="status" aria-live="polite">

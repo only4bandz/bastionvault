@@ -132,7 +132,7 @@ export function Send({
           <button className="btn btn-primary" disabled={busy} onClick={enable}>
             {busy ? "Working…" : enabled ? "Publish my address" : "Enable Send"}
           </button>
-          {error && <div className="callout" role="alert" style={{ marginTop: 12 }}>{error}</div>}
+          {error && <div className="callout callout-danger" role="alert" style={{ marginTop: 12 }}>{error}</div>}
         </div>
       </>
     );
@@ -425,7 +425,7 @@ function Compose({
           <option value="604800">7 days</option>
         </select>
 
-        {error && <div className="callout" role="alert" style={{ marginTop: 14 }}>{error}</div>}
+        {error && <div className="callout callout-danger" role="alert" style={{ marginTop: 14 }}>{error}</div>}
         <button className="btn btn-primary" style={{ marginTop: 16 }} disabled={busy} onClick={submit}>
           {busy ? "Sending…" : "Send encrypted note"}
         </button>
@@ -459,7 +459,7 @@ function AddContact({
           autoFocus
           onKeyDown={(e) => e.key === "Enter" && onFind(addr)}
         />
-        {error && <div className="callout" role="alert" style={{ marginTop: 12 }}>{error}</div>}
+        {error && <div className="callout callout-danger" role="alert" style={{ marginTop: 12 }}>{error}</div>}
         <button className="btn btn-primary" style={{ marginTop: 14 }} disabled={busy} onClick={() => onFind(addr)}>
           {busy ? "Finding…" : "Find"}
         </button>
@@ -590,7 +590,7 @@ function Inbox({
         {loading ? (
           <div className="faint">Loading…</div>
         ) : error ? (
-          <div className="callout" role="alert">{error}</div>
+          <div className="callout callout-danger" role="alert">{error}</div>
         ) : rows.length === 0 ? (
           <div className="faint">No messages.</div>
         ) : (
@@ -663,7 +663,7 @@ function Message({
                 else { setData(o); setError(null); }
               }}
             />
-            {error && <div className="callout" role="alert" style={{ marginTop: 12 }}>{error}</div>}
+            {error && <div className="callout callout-danger" role="alert" style={{ marginTop: 12 }}>{error}</div>}
             <button
               className="btn btn-primary"
               style={{ marginTop: 14 }}

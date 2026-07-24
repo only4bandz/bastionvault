@@ -44,7 +44,7 @@ export function EmailVerification({
           vault.
         </p>
 
-        {error && <div className="callout">{error}</div>}
+        {error && <div className="callout callout-danger" role="alert">{error}</div>}
 
         <div className="field">
           <label>Email</label>
