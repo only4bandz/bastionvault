@@ -1,0 +1,46 @@
+# Supply-chain security gate: known-vulnerability scans for every dependency
+# tree in the repo, on each push/PR touching a manifest and on a weekly
+# schedule (advisories are published continuously — a green merge can go
+# red without any commit).
+name: security-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # weekly, Monday 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-audit:
+    name: RustSec advisories (cargo audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/advisory-db
+          key: cargo-audit-${{ runner.os }}
+      - name: Install cargo-audit
+        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+      - name: Audit Cargo.lock against the RustSec database
+        run: cargo audit --deny warnings
+
+  npm-audit:
+    name: npm advisories (app)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Audit app dependency tree
+        working-directory: app
+        run: npm audit --audit-level=high
