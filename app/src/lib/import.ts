@@ -4,6 +4,7 @@
 // newlines and escaped quotes (""), so real passwords with special characters
 // survive intact.
 import type { ItemType, VaultItem } from "./types";
+import { stripFormulaPrefix } from "./csv-guard";
 
 export const MAX_CSV_BYTES = 5 * 1024 * 1024;
 export const MAX_IMPORT_ITEMS = 10_000;
@@ -183,9 +184,11 @@ export function csvToItems(text: string): ImportResult {
   }
   if (rows.length < 2) return { items: [], skipped: 0 };
 
-  // Trim everything except the password, which is preserved verbatim.
-  const cell = (r: string[], i: number) => (i >= 0 && i < r.length ? r[i].trim() : "");
-  const raw = (r: string[], i: number) => (i >= 0 && i < r.length ? r[i] : "");
+  // Trim everything except the password, which is preserved verbatim (modulo
+  // the formula-guard apostrophe our own export prepends — see csv-guard.ts).
+  const cell = (r: string[], i: number) =>
+    i >= 0 && i < r.length ? stripFormulaPrefix(r[i].trim()) : "";
+  const raw = (r: string[], i: number) => (i >= 0 && i < r.length ? stripFormulaPrefix(r[i]) : "");
 
   const items: VaultItem[] = [];
   let skipped = 0;
