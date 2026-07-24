@@ -365,6 +365,8 @@ select.input option { background: var(--surface-2); color: var(--text); }
   .sidebar.open { visibility: visible; transform: translateX(0); transition-delay: 0s; }
   .topbar { gap: 10px; padding: 12px 14px; }
   .search { min-width: 0; padding: 8px 12px; }
+  /* 16px floor: iOS Safari auto-zooms the page when focusing any input below 16px */
+  .input, .textarea, .search input { font-size: 16px; }
   .search .kbd { display: none; }
   .topbar-right > .pill, .topbar-right > .faint { display: none; }
   .content { padding: 20px 14px; }
