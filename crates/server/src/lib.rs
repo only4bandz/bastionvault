@@ -1673,9 +1673,7 @@ impl Db {
             [],
             |row| row.get(0),
         )?;
-        stored
-            .try_into()
-            .map_err(|_| rusqlite::Error::InvalidQuery)
+        stored.try_into().map_err(|_| rusqlite::Error::InvalidQuery)
     }
 
     fn open_connection(path: &str) -> (Connection, Option<File>) {

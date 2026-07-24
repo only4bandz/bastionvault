@@ -2635,9 +2635,21 @@ async fn security_headers_are_stamped_on_success_and_error_responses() {
             "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
             "{method} {uri}"
         );
-        assert_eq!(get("cross-origin-opener-policy"), "same-origin", "{method} {uri}");
-        assert_eq!(get("cross-origin-resource-policy"), "same-origin", "{method} {uri}");
-        assert_eq!(get("x-permitted-cross-domain-policies"), "none", "{method} {uri}");
+        assert_eq!(
+            get("cross-origin-opener-policy"),
+            "same-origin",
+            "{method} {uri}"
+        );
+        assert_eq!(
+            get("cross-origin-resource-policy"),
+            "same-origin",
+            "{method} {uri}"
+        );
+        assert_eq!(
+            get("x-permitted-cross-domain-policies"),
+            "none",
+            "{method} {uri}"
+        );
     }
 }
 
