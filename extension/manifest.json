@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "minimum_chrome_version": "106",
-  "name": "Bastion — Password Manager",
+  "name": "Bastion \u2014 Password Manager",
   "version": "0.1.0",
   "description": "Zero-knowledge password manager. Your vault is decrypted only on your device; the server ever sees opaque encrypted blobs.",
   "icons": {
@@ -27,16 +27,34 @@
   "options_page": "options.html",
   "content_scripts": [
     {
-      "matches": ["http://*/*", "https://*/*"],
-      "js": ["content.js"],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     }
   ],
-  "permissions": ["storage", "activeTab", "scripting", "alarms", "favicon", "idle", "offscreen"],
-  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
-  "optional_host_permissions": ["https://*/*"],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "alarms",
+    "favicon",
+    "idle",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
   }
 }
