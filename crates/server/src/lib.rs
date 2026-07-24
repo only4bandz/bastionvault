@@ -670,6 +670,15 @@ async fn production_transport_boundary(
 
 async fn security_headers(State(st): State<AppState>, request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
+    // Fixed-window limiters: retrying after a full window is always safe.
+    // Advertise that upper bound so well-behaved clients back off instead of
+    // hammering, per RFC 9110 §10.2.3.
+    if response.status() == StatusCode::TOO_MANY_REQUESTS {
+        let window = st.rate_window.max(st.auth_rate_limits.window);
+        if let Ok(value) = HeaderValue::from_str(&window.as_secs().max(1).to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
