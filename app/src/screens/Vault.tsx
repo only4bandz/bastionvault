@@ -511,7 +511,7 @@ export function Vault({
                 </div>
               ) : (
                 <div className="list">
-                  <div className="list-head"><span>Title</span><span>Last updated</span><span style={{ textAlign: "right" }}>Type</span></div>
+                  <div className="list-head"><span>Title</span><span>Last updated</span><span style={{ textAlign: "right" }}>Actions</span></div>
                   {paged.map((i) => (
                     <div className="row" key={i.id}>
                       <button
