@@ -83,6 +83,12 @@ button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
 .btn-danger { color: var(--danger); border-color: transparent; background: transparent; }
 .btn-danger:hover { background: rgba(255, 93, 108, 0.1); }
 .btn-block { width: 100%; }
+.spinner {
+  width: 14px; height: 14px; flex: none; border-radius: 50%;
+  border: 2px solid currentColor; border-top-color: transparent;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .field { display: block; margin-bottom: 14px; }
 .field > label { display: block; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 6px; }

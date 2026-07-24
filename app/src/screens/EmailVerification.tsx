@@ -59,7 +59,7 @@ export function EmailVerification({
         </div>
         {message && <div className="callout">{message}</div>}
         <button className="btn btn-primary btn-block" onClick={() => void resend()} disabled={busy}>
-          {busy ? "Queueing…" : "Send a new link"}
+          {busy ? <><span className="spinner" aria-hidden="true" /> Queueing…</> : "Send a new link"}
         </button>
         <div className="auth-foot">
           <button className="link-btn" onClick={onBack}>Back</button>

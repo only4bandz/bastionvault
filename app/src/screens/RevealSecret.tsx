@@ -95,7 +95,7 @@ export function RevealSecret({
               disabled={!saved || submitting}
               onClick={() => void finish()}
             >
-              {submitting ? "Creating your vault…" : "Create and enter my vault"}
+              {submitting ? <><span className="spinner" aria-hidden="true" /> Creating your vault…</> : "Create and enter my vault"}
             </button>
           </>
         )}
