@@ -301,6 +301,19 @@ export default function App(): JSX.Element {
     };
   }, [phase, lock]);
 
+  // While a vault mutation is awaiting server confirmation, closing the tab
+  // could silently drop the write (or leave an ambiguous half-committed CAS
+  // transaction). Ask the browser for the standard leave-confirmation until
+  // the queue drains.
+  useEffect(() => {
+    if (phase !== "vault" || syncStatus !== "saving") return;
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [phase, syncStatus]);
+
   // Back/forward-cache guard: navigating away can snapshot this page — with
   // the decrypted vault in memory — into the bfcache, and the Back button
   // restores it without any unlock. Entering the bfcache (pagehide with
