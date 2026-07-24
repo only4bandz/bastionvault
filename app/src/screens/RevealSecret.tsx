@@ -34,6 +34,18 @@ export function RevealSecret({
     }
   }, [account]);
 
+  // The printable Emergency Kit (master-password hints aside, it contains the
+  // full Secret Key) auto-collapses when the tab is hidden, mirroring the item
+  // detail view's conceal-on-hide: a backgrounded tab must not keep the kit
+  // on screen for whoever looks next. The user reopens it with one click.
+  useEffect(() => {
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === "hidden") setShowKit(false);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
   function copy() {
     if (data) void copyWithFeedback(data.secret_key, "Secret Key", toast);
   }
