@@ -301,6 +301,27 @@ export default function App(): JSX.Element {
     };
   }, [phase, lock]);
 
+  // Back/forward-cache guard: navigating away can snapshot this page — with
+  // the decrypted vault in memory — into the bfcache, and the Back button
+  // restores it without any unlock. Entering the bfcache (pagehide with
+  // persisted=true) and being restored from it (pageshow with persisted=true)
+  // both lock, so a cached snapshot never contains or reveals an open vault.
+  useEffect(() => {
+    if (phase !== "vault") return;
+    const onPageHide = (event: PageTransitionEvent) => {
+      if (event.persisted) lock();
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) lock();
+    };
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [phase, lock]);
+
   // Server-side session expiry: any authenticated request rejected with 401
   // (inbox poll, directory lookup, item sync…) locks the vault immediately,
   // instead of stranding the user on a screen whose every action fails.
