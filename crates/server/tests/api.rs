@@ -2568,6 +2568,19 @@ async fn security_headers_are_stamped_on_success_and_error_responses() {
         assert_eq!(get("x-content-type-options"), "nosniff", "{method} {uri}");
         assert_eq!(get("referrer-policy"), "no-referrer", "{method} {uri}");
         assert_eq!(get("x-frame-options"), "DENY", "{method} {uri}");
+        assert_eq!(
+            get("content-security-policy"),
+            "default-src 'none'; frame-ancestors 'none'",
+            "{method} {uri}"
+        );
+        assert_eq!(
+            get("permissions-policy"),
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+            "{method} {uri}"
+        );
+        assert_eq!(get("cross-origin-opener-policy"), "same-origin", "{method} {uri}");
+        assert_eq!(get("cross-origin-resource-policy"), "same-origin", "{method} {uri}");
+        assert_eq!(get("x-permitted-cross-domain-policies"), "none", "{method} {uri}");
     }
 }
 

@@ -682,6 +682,31 @@ async fn security_headers(State(st): State<AppState>, request: Request, next: Ne
         HeaderValue::from_static("no-referrer"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    // The API serves JSON only. A no-op CSP for JSON, but if any response is
+    // ever coerced into a document context (sniffing bug, error-page quirk),
+    // nothing loads, nothing runs, and no page may frame it.
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+    );
+    // Deny every powerful browser feature to documents born from API bytes.
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
+    );
+    // Isolate any such document from cross-origin windows and embedders.
+    headers.insert(
+        "cross-origin-opener-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        "x-permitted-cross-domain-policies",
+        HeaderValue::from_static("none"),
+    );
     if st.transport.is_some() {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
