@@ -27,6 +27,28 @@ function parseRange(body: string): Map<string, number> {
 }
 
 /**
+ * Check one candidate password (e.g. a master password before vault creation)
+ * through the same k-anonymous range API. Only the five-character SHA-1 prefix
+ * leaves the browser. Returns the breach occurrence count (0 = not found).
+ */
+export async function checkPwnedPassword(
+  password: string,
+  signal?: AbortSignal
+): Promise<number> {
+  const hash = await sha1Hex(password);
+  const prefix = hash.slice(0, 5);
+  const response = await fetch(`${RANGE_ENDPOINT}${prefix}`, {
+    headers: { "Add-Padding": "true" },
+    credentials: "omit",
+    referrerPolicy: "no-referrer",
+    signal,
+  });
+  if (!response.ok) throw new Error(`Breach service returned HTTP ${response.status}.`);
+  const suffixes = parseRange(await response.text());
+  return suffixes.get(hash.slice(5)) ?? 0;
+}
+
+/**
  * Manually check distinct vault passwords through HIBP's k-anonymous range API.
  * Only a five-character SHA-1 prefix leaves the browser. Results remain in RAM.
  */
