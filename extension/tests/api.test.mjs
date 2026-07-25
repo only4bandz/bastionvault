@@ -7,6 +7,7 @@ import {
   makeApi,
   MAX_ERROR_BODY_BYTES,
   readErrorBody,
+  requireInboxResponse,
   requirePreloginResponse,
   requirePublishedIdentityResponse,
   requireRevisionResponse,
@@ -15,6 +16,47 @@ import {
   requireVaultResponse,
   requireWhoamiResponse,
 } from "../lib/api.js";
+
+test("validates complete Send inbox envelopes before crypto processing", () => {
+  const messageId = "AAECAwQFBgcICQoLDA0ODw==";
+  const recipientId = "A".repeat(26);
+  const nonce = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX";
+  const key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+  const wrapped = {
+    v: 1,
+    nonce,
+    ct: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
+  };
+  const body = { v: 1, nonce, ct: "AAECAwQFBgcICQoLDA0ODw==" };
+  const blob = {
+    v: 1,
+    type: "send",
+    message_id: messageId,
+    recipient_id: recipientId,
+    recipient_enc_pub: key,
+    recipient_key_version: 1,
+    eph_pub: key,
+    wrapped_cek: wrapped,
+    cek_commit: key,
+    body,
+  };
+  const inbox = [
+    { message_id: messageId, blob, created_at: 100, expires_at: null },
+  ];
+  assert.deepEqual(requireInboxResponse(inbox), inbox);
+  for (const value of [
+    [{ ...inbox[0], created_at: -1 }],
+    [{ ...inbox[0], expires_at: 100 }],
+    [{ ...inbox[0], blob: { ...blob, type: "legacy" } }],
+    [{ ...inbox[0], blob: { ...blob, wrapped_cek: body } }],
+    [{ ...inbox[0], extra: true }],
+  ]) {
+    assert.throws(
+      () => requireInboxResponse(value),
+      /invalid Send inbox response/
+    );
+  }
+});
 
 test("validates every Send identity response envelope", () => {
   const bastionId = "A".repeat(26);
