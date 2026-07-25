@@ -16,6 +16,7 @@ import {
 } from "./lib/api";
 import { SEND_CONTACTS_ID, SEND_IDENTITY_ID, loadContacts, type Contact } from "./lib/send";
 import type { VaultItem } from "./lib/types";
+import { isVaultItemPayload } from "./lib/vault-item-state";
 import type { ImportOutcome, ImportProgress, ImportResult } from "./lib/import";
 import {
   completeBootstrap,
@@ -55,11 +56,6 @@ const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
 /** Vault items under this prefix hold Bastion Send state (identity, contacts),
  * not user entries — never surface them in the vault list. */
 const SEND_LOCKED_PREFIX = "bastion:send-locked:";
-const OPTIONAL_ITEM_STRINGS: (keyof VaultItem)[] = [
-  "username", "password", "url", "cardNumber", "cardholderName", "cardExp", "cardCvv",
-  "cardBrand", "cardBank", "cardBankDomain", "cardType", "notes", "folder",
-];
-
 function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
   const out: VaultItem[] = [];
   for (const [id, blob] of Object.entries(items)) {
@@ -73,28 +69,10 @@ function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
         continue;
       }
       if (id.startsWith("bastion:send-")) throw new Error("unsupported reserved item");
-      if (
-        !item ||
-        typeof item !== "object" ||
-        (item as VaultItem).id !== id ||
-        !["login", "note", "card"].includes((item as VaultItem).type) ||
-        typeof (item as VaultItem).title !== "string" ||
-        !Number.isFinite((item as VaultItem).updatedAt) ||
-        OPTIONAL_ITEM_STRINGS.some(
-          (field) => (item as VaultItem)[field] !== undefined && typeof (item as VaultItem)[field] !== "string"
-        ) ||
-        ((item as VaultItem).favorite !== undefined && typeof (item as VaultItem).favorite !== "boolean") ||
-        ((item as VaultItem).folder !== undefined && (item as VaultItem).folder!.length > 80) ||
-        ((item as VaultItem).passwordChangedAt !== undefined &&
-          !Number.isFinite((item as VaultItem).passwordChangedAt)) ||
-        ((item as VaultItem).deletedAt !== undefined &&
-          (!Number.isSafeInteger((item as VaultItem).deletedAt) ||
-            (item as VaultItem).deletedAt! < 0 ||
-            (item as VaultItem).deletedAt! > 8_640_000_000_000_000))
-      ) {
+      if (!isVaultItemPayload(item, id)) {
         throw new Error("invalid item payload");
       }
-      out.push(item as VaultItem);
+      out.push(item);
     } catch {
       throw new Error("Encrypted vault integrity check failed. No items were loaded.");
     }
