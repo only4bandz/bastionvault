@@ -1,3 +1,5 @@
+import { requireContactsPayload } from "./send-contact-state.js";
+
 const SEND_IDENTITY_ID = "bastion:send-identity";
 const SEND_CONTACTS_ID = "bastion:send-contacts";
 const SEND_LOCKED_PREFIX = "bastion:send-locked:";
@@ -33,19 +35,6 @@ function isVaultItem(value, storageId) {
       (Number.isSafeInteger(value.deletedAt) &&
         value.deletedAt >= 0 &&
         value.deletedAt <= 8_640_000_000_000_000))
-  );
-}
-
-function isContact(value) {
-  return (
-    isRecord(value) &&
-    typeof value.bastion_id === "string" &&
-    isRecord(value.public) &&
-    typeof value.pinFp === "string" &&
-    typeof value.display === "string" &&
-    typeof value.verified === "boolean" &&
-    (value.verified_at === null || typeof value.verified_at === "number") &&
-    (value.safety_number === null || typeof value.safety_number === "string")
   );
 }
 
@@ -95,8 +84,7 @@ function decryptVaultItems(account, rawItems) {
     const plaintext = account.decrypt_item(JSON.stringify(blob), id);
     const parsed = JSON.parse(plaintext);
     if (id === SEND_CONTACTS_ID) {
-      if (!Array.isArray(parsed) || !parsed.every(isContact)) throw new VaultIntegrityError();
-      contacts = parsed;
+      contacts = requireContactsPayload(parsed);
     } else if (id.startsWith(SEND_LOCKED_PREFIX)) {
       if (!isRecord(parsed)) throw new VaultIntegrityError();
       lockedRecords.push(parsed);
