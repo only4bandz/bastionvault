@@ -1154,8 +1154,31 @@ async fn prelogin_unknown_account_returns_stable_decoy() {
 #[tokio::test]
 async fn bad_token_is_rejected() {
     let app = server::app_in_memory();
-    let (s, _) = send(&app, "GET", "/vault", Some("deadbeef"), None).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let token = registered_session(&app, "token-shape@example.com").await;
+    for malformed in [
+        "deadbeef".to_string(),
+        "g".repeat(64),
+        "a".repeat(63),
+        "a".repeat(65),
+        "A".repeat(64),
+        format!("{token} "),
+    ] {
+        let (status, _) = send(&app, "GET", "/vault", Some(&malformed), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{malformed:?}");
+    }
+
+    let duplicate = Request::builder()
+        .method("GET")
+        .uri("/vault")
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(duplicate).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
