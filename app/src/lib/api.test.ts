@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   api,
   ApiError,
+  isJsonMediaType,
   MAX_SERVER_DETAIL_CHARS,
   readJsonBody,
   SESSION_EXPIRED_EVENT,
@@ -51,9 +52,15 @@ describe("versioned account lifecycle client", () => {
   });
 
   it("sends mailbox challenges and proof only to canonical endpoints", async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      new Response(null, { status: 204 })
-    );
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      if (String(input).endsWith("/verify")) {
+        return new Response('{"email":"alice@example.com"}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(null, { status: 204 });
+    });
     globalThis.fetch = fetchMock;
 
     await api.requestRegistrationChallenge("alice@example.com");
@@ -156,6 +163,32 @@ describe("hostile server error handling", () => {
 });
 
 describe("hostile successful response handling", () => {
+  it("accepts only the exact JSON media type with optional parameters", () => {
+    expect(isJsonMediaType("application/json")).toBe(true);
+    expect(isJsonMediaType("Application/JSON; charset=utf-8")).toBe(true);
+    expect(isJsonMediaType("text/application/json")).toBe(false);
+    expect(isJsonMediaType("application/json-malicious")).toBe(false);
+    expect(isJsonMediaType(null)).toBe(false);
+  });
+
+  it("fails closed when a JSON endpoint returns another media type", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () =>
+      new Response('{"salt":"attacker-controlled"}', {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      })
+    );
+    try {
+      await expect(api.prelogin("a@b.c")).rejects.toMatchObject({
+        status: 200,
+        message: "Server returned a non-JSON response.",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("rejects a streamed response above the configured byte ceiling", async () => {
     const response = new Response(JSON.stringify({ vault: "x".repeat(128) }), {
       status: 200,

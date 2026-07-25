@@ -142,7 +142,17 @@ export async function readJsonBody<T>(
  */
 export const SESSION_EXPIRED_EVENT = "bastion:session-expired";
 
-async function req<T>(method: string, path: string, token?: string, body?: unknown): Promise<T> {
+export function isJsonMediaType(value: string | null): boolean {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
+}
+
+async function req<T>(
+  method: string,
+  path: string,
+  token?: string,
+  body?: unknown,
+  responseKind: "json" | "empty" = "json"
+): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -174,8 +184,10 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
         detail.slice(0, MAX_SERVER_DETAIL_CHARS)
       );
     }
-    const ct = res.headers.get("content-type") || "";
-    if (!ct.includes("application/json")) return undefined as T;
+    if (responseKind === "empty") return undefined as T;
+    if (!isJsonMediaType(res.headers.get("content-type"))) {
+      throw new ApiError(res.status, "Server returned a non-JSON response.");
+    }
     return await readJsonBody<T>(res);
   } catch (error) {
     if (controller.signal.aborted) {
@@ -191,21 +203,27 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
 export const api = {
   config: () => req<PublicConfig>("GET", "/config"),
   requestRegistrationChallenge: (email: string) =>
-    req<void>("POST", "/registration-challenges", undefined, { email }),
+    req<void>("POST", "/registration-challenges", undefined, { email }, "empty"),
   verifyRegistrationChallenge: (token: string) =>
     req<{ email: string }>("POST", "/registration-challenges/verify", undefined, { token }),
   createAccount: (email: string, registration: Registration, mailboxProof?: string) =>
-    req<void>("POST", "/accounts", undefined, {
-      email,
-      registration,
-      ...(mailboxProof ? { mailbox_proof: mailboxProof } : {}),
-    }),
+    req<void>(
+      "POST",
+      "/accounts",
+      undefined,
+      {
+        email,
+        registration,
+        ...(mailboxProof ? { mailbox_proof: mailboxProof } : {}),
+      },
+      "empty"
+    ),
   prelogin: (email: string) => req<Prelogin>("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
   login: (email: string, auth_secret: string) =>
     req<{ token: string }>("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),
-  logout: (token: string) => req<void>("DELETE", "/sessions", token),
+  logout: (token: string) => req<void>("DELETE", "/sessions", token, undefined, "empty"),
   deleteAccount: (token: string, auth_secret: string) =>
-    req<void>("DELETE", "/accounts", token, { auth_secret }),
+    req<void>("DELETE", "/accounts", token, { auth_secret }, "empty"),
   getVault: (token: string) => req<VaultData>("GET", "/vault", token),
   mutateVault: (
     token: string,
@@ -226,8 +244,8 @@ export const api = {
   directory: (token: string, bastionId: string) =>
     req<SendPublic>("GET", `/send/directory/${encodeURIComponent(bastionId)}`, token),
   sendBlob: (token: string, body: { recipient_id: string; message_id: string; blob: unknown; expires_at?: number | null }) =>
-    req<void>("POST", "/send", token, body),
+    req<void>("POST", "/send", token, body, "empty"),
   inbox: (token: string) => req<InboxItem[]>("GET", "/send/inbox", token),
   inboxDelete: (token: string, messageId: string) =>
-    req<void>("DELETE", `/send/inbox/${encodeURIComponent(messageId)}`, token),
+    req<void>("DELETE", `/send/inbox/${encodeURIComponent(messageId)}`, token, undefined, "empty"),
 };
