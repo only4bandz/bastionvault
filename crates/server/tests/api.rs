@@ -2653,9 +2653,31 @@ async fn security_headers_are_stamped_on_success_and_error_responses() {
             "default-src 'none'; frame-ancestors 'none'",
             "{method} {uri}"
         );
+        let permissions = get("permissions-policy");
+        for feature in [
+            "camera",
+            "microphone",
+            "geolocation",
+            "payment",
+            "usb",
+            "clipboard-read",
+            "clipboard-write",
+            "display-capture",
+            "screen-wake-lock",
+            "idle-detection",
+        ] {
+            assert!(
+                permissions.contains(&format!("{feature}=()")),
+                "{feature} not denied for {method} {uri}: {permissions}"
+            );
+        }
+        assert!(
+            !permissions.contains("*"),
+            "permissions-policy allow-list widened for {method} {uri}"
+        );
         assert_eq!(
-            get("permissions-policy"),
-            "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+            get("cross-origin-embedder-policy"),
+            "require-corp",
             "{method} {uri}"
         );
         assert_eq!(
