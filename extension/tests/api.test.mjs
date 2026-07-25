@@ -7,6 +7,7 @@ import {
   makeApi,
   MAX_ERROR_BODY_BYTES,
   readErrorBody,
+  requireRevisionResponse,
   requireSessionTokenResponse,
 } from "../lib/api.js";
 
@@ -51,6 +52,20 @@ test("reads the canonical authenticated vault revision probe", async () => {
     assert.equal(request.options.headers.Authorization, "Bearer token");
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+test("accepts only exact non-negative safe revision envelopes", () => {
+  assert.deepEqual(requireRevisionResponse({ revision: 9 }), { revision: 9 });
+  for (const value of [
+    { revision: -1 },
+    { revision: 1.5 },
+    { revision: Number.MAX_SAFE_INTEGER + 1 },
+    { revision: 9, extra: true },
+    { revision: "9" },
+    null,
+  ]) {
+    assert.throws(() => requireRevisionResponse(value), /invalid revision response/);
   }
 });
 

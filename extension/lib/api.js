@@ -61,6 +61,21 @@ export function requireSessionTokenResponse(value) {
   return value.token;
 }
 
+export function requireRevisionResponse(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 1 ||
+    !Object.prototype.hasOwnProperty.call(value, "revision") ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0
+  ) {
+    throw new ApiError(200, "Server returned an invalid revision response.");
+  }
+  return { revision: value.revision };
+}
+
 /** Reads at most MAX_ERROR_BODY_BYTES of an error body — a hostile server
  * must not be able to balloon the worker's memory with a huge error page. */
 export async function readErrorBody(res) {
@@ -203,13 +218,14 @@ export function makeApi(
     deleteAccount: (token, authSecret) =>
       call("DELETE", "/accounts", token, { auth_secret: authSecret }, "empty"),
     getVault: (token) => call("GET", "/vault", token),
-    getVaultRevision: (token) => call("GET", "/vault/revision", token),
+    getVaultRevision: (token) =>
+      call("GET", "/vault/revision", token).then(requireRevisionResponse),
     mutateVault: (token, expectedRevision, operations, manifest) =>
       call("PUT", "/vault/transaction", token, {
         expected_revision: expectedRevision,
         operations,
         manifest,
-      }),
+      }).then(requireRevisionResponse),
 
     // ── Bastion Send ──
     publishIdentity: (token, publicIdentity) =>
