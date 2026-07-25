@@ -233,3 +233,31 @@ describe("expanded common-password detection", () => {
     ]);
   });
 });
+
+describe("keyboard-walk detection", () => {
+  it.each([
+    "1qaz2wsx",
+    "1QAZ2wsx!",
+    "zaq1xsw2",
+    "qazwsxedc",
+    "Tr0ubadour1qaz2wsx",
+    "xsw2zaq1",
+  ])("caps keyboard walk %s as weak", (password) => {
+    const assessment = assessPassword(password);
+    expect(assessment.score).toBeLessThanOrEqual(1);
+    expect(assessment.reasons).toContain("Keyboard pattern");
+  });
+
+  it.each(["V7!kQ2#pL9@xR4$m", "N8@vT3!sW6#qY2%h", "correct-horse-battery"])(
+    "leaves %s unflagged",
+    (password) => {
+      expect(assessPassword(password).reasons).not.toContain("Keyboard pattern");
+    }
+  );
+
+  it("reports a straight row run as a sequence, not a duplicate keyboard finding", () => {
+    const assessment = assessPassword("qwertyui");
+    expect(assessment.reasons).toContain("Predictable sequence");
+    expect(assessment.reasons).not.toContain("Keyboard pattern");
+  });
+});
