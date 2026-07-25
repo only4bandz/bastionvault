@@ -56,6 +56,8 @@ const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 254;
 const AUTH_SECRET_BYTES: usize = 32;
+const SESSION_TOKEN_BYTES: usize = 32;
+const SESSION_TOKEN_HEX_CHARS: usize = SESSION_TOKEN_BYTES * 2;
 const AUTH_HASH_SALT_BYTES: usize = 16;
 const AUTH_HASH_OUTPUT_BYTES: usize = 32;
 const REGISTRATION_SALT_BYTES: usize = 16;
@@ -3344,10 +3346,15 @@ async fn delete_session(
 
 /// Extracts the "Authorization: Bearer …" token.
 fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
-    headers
-        .get(header::AUTHORIZATION)
+    single_header(headers, header::AUTHORIZATION.as_str())
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
+        .filter(|token| {
+            token.len() == SESSION_TOKEN_HEX_CHARS
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "missing bearer token"))
 }
 
@@ -3417,7 +3424,7 @@ fn verify_secret(secret: &str, phc: &str) -> bool {
 
 /// Random 256-bit session token, hex-encoded.
 fn new_token() -> String {
-    let mut bytes = [0u8; 32];
+    let mut bytes = [0u8; SESSION_TOKEN_BYTES];
     OsRng.fill_bytes(&mut bytes);
     data_encoding::HEXLOWER.encode(&bytes)
 }
