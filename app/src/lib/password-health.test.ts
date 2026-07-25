@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { VaultItem } from "./types";
-import { analyzePasswordHealth, assessPassword, identityDerivedToken } from "./password-health";
+import {
+  analyzePasswordHealth,
+  assessPassword,
+  identityDerivedToken,
+  passwordStem,
+} from "./password-health";
 
 const login = (id: string, title: string, password?: string): VaultItem => ({
   id,
@@ -68,7 +73,56 @@ describe("identityDerivedToken", () => {
   });
 });
 
+describe("passwordStem", () => {
+  it.each([
+    ["Hunter2", "hunter"],
+    ["  hunter3!  ", "hunter"],
+    ["HUNTER_2024", "hunter"],
+    ["Xq7!vP2zRt", "xq7!vp2zrt"],
+  ])("reduces %s to its stem", (password, stem) => {
+    expect(passwordStem(password)).toBe(stem);
+  });
+
+  it.each(["1234", "ab1!", "!!!!!!"])("returns null for %s, which has no usable stem", (password) => {
+    expect(passwordStem(password)).toBeNull();
+  });
+});
+
 describe("analyzePasswordHealth", () => {
+  it("groups near-identical passwords that exact-match reuse cannot see", () => {
+    const analysis = analyzePasswordHealth([
+      login("a", "Alpha", "Xq7vPzRtKm1"),
+      login("b", "Beta", "xq7vpzrtkm2!"),
+      login("c", "Charlie", "N8@vT3!sW6#qY2%h"),
+    ]);
+
+    expect(analysis.reusedGroups).toEqual([]); // no two passwords are equal
+    expect(analysis.variantGroups).toHaveLength(1);
+    expect(analysis.variantGroups[0].items.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(analysis.variantItems.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(analysis.atRiskItems.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(analysis.score).toBe(33);
+  });
+
+  it("does not double-report exact reuse as a variant group", () => {
+    const shared = "Xq7vPzRtKm1";
+    const analysis = analyzePasswordHealth([login("a", "Alpha", shared), login("b", "Beta", shared)]);
+
+    expect(analysis.reusedGroups).toHaveLength(1);
+    expect(analysis.variantGroups).toEqual([]);
+    expect(analysis.variantItems).toEqual([]);
+  });
+
+  it("keeps unrelated strong passwords out of variant groups", () => {
+    const analysis = analyzePasswordHealth([
+      login("a", "Alpha", "V7!kQ2#pL9@xR4$m"),
+      login("b", "Beta", "N8@vT3!sW6#qY2%h"),
+    ]);
+
+    expect(analysis.variantGroups).toEqual([]);
+    expect(analysis.score).toBe(100);
+  });
+
   it("counts a self-derived password as at risk even when it is strong and unique", () => {
     const item: VaultItem = {
       id: "gh",
