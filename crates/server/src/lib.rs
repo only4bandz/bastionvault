@@ -581,11 +581,12 @@ async fn legacy_api_headers(request: Request, next: Next) -> Response {
 ///
 /// The API serves bearer tokens, wrapped vault keys and encrypted blobs; none
 /// of it may ever land in a shared cache or be sniffed/framed by a browser.
-/// Redacts the dynamic segment of routes whose path carries user data, so the
-/// request log never records an email address (`/accounts/:email/prelogin`) or
-/// an opaque routing id. Everything else is a fixed route shape.
+/// Redacts dynamic route segments and collapses every unmatched path, so the
+/// request log never records an email, opaque id, accidental token, or
+/// attacker-controlled high-cardinality 404 path.
 fn redacted_path(path: &str) -> String {
-    if let Some(versioned) = path.strip_prefix("/v1") {
+    if path.starts_with("/v1/") {
+        let versioned = path.strip_prefix("/v1").expect("checked prefix");
         return format!("/v1{}", redacted_path(versioned));
     }
     if path.starts_with("/accounts/") && path.ends_with("/prelogin") {
@@ -606,7 +607,28 @@ fn redacted_path(path: &str) -> String {
             return "/vault/items/{id}".to_string();
         }
     }
-    path.to_string()
+    if matches!(
+        path,
+        "/config"
+            | "/health"
+            | "/livez"
+            | "/readyz"
+            | "/accounts"
+            | "/registration-challenges"
+            | "/registration-challenges/verify"
+            | "/sessions"
+            | "/vault"
+            | "/vault/revision"
+            | "/vault/manifest"
+            | "/vault/transaction"
+            | "/send/identity"
+            | "/send/whoami"
+            | "/send"
+            | "/send/inbox"
+    ) {
+        return path.to_string();
+    }
+    "/{unmatched}".to_string()
 }
 
 /// One structured line per request: method, redacted route, status. 5xx are
@@ -4521,5 +4543,16 @@ mod tests {
         assert_eq!(redacted_path("/livez"), "/livez");
         assert_eq!(redacted_path("/readyz"), "/readyz");
         assert_eq!(redacted_path("/send/inbox"), "/send/inbox");
+        // Unknown paths are attacker-controlled and may contain accidental
+        // secrets; retain neither their contents nor their cardinality.
+        assert_eq!(
+            redacted_path("/reset/verification-token-123"),
+            "/{unmatched}"
+        );
+        assert_eq!(
+            redacted_path("/v1/reset/verification-token-123"),
+            "/v1/{unmatched}"
+        );
+        assert_eq!(redacted_path("/v1evil/token"), "/{unmatched}");
     }
 }
