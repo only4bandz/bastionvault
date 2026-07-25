@@ -64,6 +64,17 @@ test("cancel prevents a pending wipe", () => {
   assert.equal(cleared, 0);
 });
 
+test("clearNow wipes immediately and cancels the delayed wipe", () => {
+  const timers = fakeTimers();
+  let cleared = 0;
+  const s = makeClipboardClearScheduler({ ...timers, clearClipboard: () => (cleared += 1) });
+  s.schedule();
+  s.clearNow();
+  assert.equal(cleared, 1);
+  timers.advance(CLIPBOARD_CLEAR_MS * 2);
+  assert.equal(cleared, 1);
+});
+
 test("shouldClear only fires for the newest token", () => {
   assert.equal(shouldClear(3, 3), true);
   assert.equal(shouldClear(2, 3), false);
