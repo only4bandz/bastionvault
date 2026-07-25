@@ -105,6 +105,7 @@ const MAX_LOOKUPS_PER_MIN: u32 = 120;
 // are cheap amplification levers for a hostile-but-authenticated client.
 const MAX_VAULT_READS_PER_MIN: u32 = 60;
 const MAX_VAULT_REVISION_READS_PER_MIN: u32 = 300;
+const MAX_VAULT_MUTATIONS_PER_MIN: u32 = 120;
 const MAX_INBOX_READS_PER_MIN: u32 = 60;
 const MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN: u32 = 5;
 const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
@@ -2832,6 +2833,7 @@ async fn authenticate_vault_transaction(
     next: Next,
 ) -> Result<Response, ApiError> {
     let email = require_auth(&st, request.headers()).await?;
+    rate_limit(&st, &email, "vault-write", MAX_VAULT_MUTATIONS_PER_MIN).await?;
     request.extensions_mut().insert(AuthenticatedAccount(email));
     Ok(next.run(request).await)
 }
