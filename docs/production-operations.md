@@ -32,6 +32,27 @@ Every request log contains only method, redacted route shape, status, and
 outcome, and a fixed error code. Logs must never add headers, query strings,
 account identifiers, routing ids, tokens, bodies, or ciphertext fields.
 
+Security-relevant outcomes are logged at `warn` with the message `security`, an
+`event` label, and that label's running process-lifetime `total`. The labels are
+`auth_rejected` (401), `forbidden` (403), `rate_limited` (429),
+`wrong_public_host` (421), `unmatched_path` (a 404 on no known route), and
+`honeypot`. They carry no more data than an ordinary request line — the counters
+are one per class, never per account, token, or address, so a caller cannot grow
+this state by sending more requests.
+
+`honeypot` fires only on a closed set of paths no Bastion client ever requests
+(`/.env`, `/admin`, `/wp-login.php`, …). A hit is therefore an unambiguous
+scanner rather than a mistyped URL, which is what makes it worth alerting on;
+the lure answers a constant 404 that reflects no request data and changes no
+authentication, authorization, quota, or rate-limit decision. Decoys of this
+kind — including the prelogin decoy for unknown accounts — are additions on top
+of the real controls and must never be introduced as a substitute for one.
+
+Readiness is answered from a 500 ms cache so an unauthenticated probe flood
+cannot enqueue one storage command each. Detection of a storage fault is
+therefore delayed by up to that window, never suppressed: the fault is observed
+on the next uncached probe, and the instance then stays failed closed.
+
 `bastion-ops-status` opens the live WAL database read-only and emits one JSON
 object containing only:
 
@@ -79,6 +100,8 @@ this table says “measured”; protocol maxima are not capacity claims.
 | Expired challenges | persistent for two polls | persistent for 5 minutes; mail worker/storage incident |
 | Certificate lifetime | 45 days | 30 days; renewal owner must act |
 | Unexpected process restart | any | repeated restart or migration failure; keep traffic withdrawn |
+| `security` events `auth_rejected` / `rate_limited` | sustained rate above the reviewed baseline | sharp sustained increase; suspected credential-stuffing or enumeration campaign |
+| `security` event `honeypot` / `unmatched_path` | any hit | sustained scanning, or any honeypot hit correlated with a rise in `auth_rejected`; investigate the source |
 | Provider bounce/complaint rate | provider warning threshold | provider suspension threshold; disable external registration |
 
 Alert routes must have a named primary owner, secondary owner, and tested

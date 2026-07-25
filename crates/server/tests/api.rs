@@ -1412,6 +1412,85 @@ async fn account_deletion_requires_fresh_proof_and_removes_owned_state() {
 }
 
 #[tokio::test]
+async fn registration_does_not_reveal_whether_a_mailbox_is_already_registered() {
+    let path = test_db_path("enumeration");
+    let app = server::app_with_db_and_mailbox_verification(&path, "https://vault.example.com");
+    let known = "known@example.com";
+    let unknown = "stranger@example.com";
+    let (_vault, registration, _secret_key) =
+        Vault::register_with(b"known-password", fast_kdf()).unwrap();
+    let registration = serde_json::to_value(registration).unwrap();
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/registration-challenges",
+        None,
+        Some(json!({ "email": known })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let body: String = conn
+        .query_row("SELECT text_body FROM mail_outbox", [], |row| row.get(0))
+        .unwrap();
+    drop(conn);
+    let token = body
+        .split("#token=")
+        .nth(1)
+        .and_then(|tail| tail.lines().next())
+        .unwrap()
+        .to_string();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/registration-challenges/verify",
+        None,
+        Some(json!({ "token": token.clone() })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(json!({
+            "email": known,
+            "registration": registration.clone(),
+            "mailbox_proof": token
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // A caller holding no valid proof must not be able to tell a registered
+    // mailbox from an unknown one. Answering 409 for the registered address and
+    // 403 for the stranger turned registration into an enumeration oracle that
+    // defeated the prelogin decoy. The token below is well-formed but was never
+    // issued, so it clears parsing and fails verification for both addresses.
+    let unissued_proof = "A".repeat(43);
+    let mut answers = Vec::new();
+    for email in [known, unknown] {
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/v1/accounts",
+            None,
+            Some(json!({
+                "email": email,
+                "registration": registration.clone(),
+                "mailbox_proof": unissued_proof
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{email} leaked its status");
+        answers.push((status, body));
+    }
+    assert_eq!(answers[0], answers[1], "registration answers differ");
+}
+
+#[tokio::test]
 async fn health_reports_unavailable_when_the_schema_is_gone() {
     let path = test_db_path("health");
     let app = server::app_with_db(&path.to_string());
@@ -1424,6 +1503,12 @@ async fn health_reports_unavailable_when_the_schema_is_gone() {
     let breaker = rusqlite::Connection::open(&path).unwrap();
     breaker.execute_batch("DROP TABLE accounts;").unwrap();
     drop(breaker);
+
+    // Readiness answers from a sub-second cache so an unauthenticated probe
+    // flood cannot enqueue one storage command each. Detection is therefore
+    // delayed by at most that window — never suppressed — and once the fault is
+    // observed the instance stays failed closed.
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
 
     let (s, _) = send(&app, "GET", "/health", None, None).await;
     assert_eq!(s, StatusCode::SERVICE_UNAVAILABLE);
