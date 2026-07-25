@@ -97,3 +97,74 @@ describe("ItemEditor secret fields", () => {
     expect(cvv).toHaveAttribute("type", "password");
   });
 });
+
+describe("password age tracking", () => {
+  const IMPORTED: VaultItem = { ...LOGIN, updatedAt: 1_600_000_000_000 };
+
+  it("pins the age of an imported password when an unrelated field is edited", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async (_item: VaultItem) => true);
+    render(<ItemEditor initial={IMPORTED} onSave={onSave} onClose={vi.fn()} />);
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "GitLab");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.title).toBe("GitLab");
+    // updatedAt moves; the password age does not follow it.
+    expect(saved.updatedAt).toBeGreaterThan(IMPORTED.updatedAt);
+    expect(saved.passwordChangedAt).toBe(IMPORTED.updatedAt);
+  });
+
+  it("resets the age when the password itself changes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async (_item: VaultItem) => true);
+    const before = Date.now();
+    render(<ItemEditor initial={IMPORTED} onSave={onSave} onClose={vi.fn()} />);
+
+    await user.clear(screen.getByLabelText("Password"));
+    await user.type(screen.getByLabelText("Password"), "V7!kQ2#pL9@xR4$m");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.passwordChangedAt).toBeGreaterThanOrEqual(before);
+  });
+
+  it("keeps an explicit passwordChangedAt in preference to updatedAt", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async (_item: VaultItem) => true);
+    const recorded = 1_500_000_000_000;
+    render(
+      <ItemEditor
+        initial={{ ...IMPORTED, passwordChangedAt: recorded }}
+        onSave={onSave}
+        onClose={vi.fn()}
+      />
+    );
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "GitLab");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect((onSave.mock.calls[0][0]).passwordChangedAt).toBe(recorded);
+  });
+
+  it("records no password age for an item that has no password", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async (_item: VaultItem) => true);
+    render(
+      <ItemEditor
+        initial={{ id: "note", type: "note", title: "Wifi", notes: "ssid", updatedAt: 1 }}
+        onSave={onSave}
+        onClose={vi.fn()}
+      />
+    );
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Wifi 5G");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    expect((onSave.mock.calls[0][0]).passwordChangedAt).toBeUndefined();
+  });
+});

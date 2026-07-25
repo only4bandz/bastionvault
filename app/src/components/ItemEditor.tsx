@@ -71,10 +71,22 @@ export function ItemEditor({
     const now = Date.now();
     // Track password age separately: any edit bumps updatedAt, but only an
     // actual password change resets the age clock used by Password Health.
+    //
+    // The fallback matters as much as the reset. Password Health falls back to
+    // `updatedAt` when `passwordChangedAt` is absent — true of every item
+    // imported from a CSV that has no such column. Leaving it absent here
+    // means this save bumps `updatedAt` to now, and a five-year-old imported
+    // password silently reads as changed today: fixing a typo in a title would
+    // clear an "Old password" finding without touching the password.
+    //
+    // So when an existing item has a password but no recorded age, pin the age
+    // to the timestamp the item carried *before* this edit — the best evidence
+    // available for how long that password has existed.
+    const previouslyChangedAt = item.passwordChangedAt ?? initial?.passwordChangedAt;
     const passwordChangedAt =
       item.password && item.password !== initial?.password
         ? now
-        : item.passwordChangedAt ?? initial?.passwordChangedAt;
+        : previouslyChangedAt ?? (item.password && initial ? initial.updatedAt : undefined);
     const folder = item.folder?.trim();
     const saved = await onSave({
       ...item,
