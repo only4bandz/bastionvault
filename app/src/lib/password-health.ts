@@ -393,3 +393,30 @@ export function analyzePasswordHealth(items: VaultItem[], now?: number): Passwor
     assessments,
   };
 }
+
+/**
+ * One short risk label per at-risk item, for surfaces that have room for a
+ * badge but not for a section — the vault list, primarily.
+ *
+ * Priority is by how much the finding costs an attacker to exploit, cheapest
+ * first: a weak password falls to an offline crack on its own; reuse and
+ * near-reuse need one other breach; a self-derived password needs the attacker
+ * to be targeting this specific account; age alone is only a probability. An
+ * item that trips several checks shows the most severe one, so the badge is
+ * never reassuring by accident.
+ */
+export function riskLabels(analysis: PasswordHealthAnalysis): ReadonlyMap<string, string> {
+  const labels = new Map<string, string>();
+  const assign = (items: readonly VaultItem[], label: string): void => {
+    for (const item of items) if (!labels.has(item.id)) labels.set(item.id, label);
+  };
+  assign(analysis.weakItems, "Weak");
+  assign(analysis.reusedItems, "Reused");
+  assign(analysis.variantItems, "Near-identical");
+  assign(
+    analysis.identityItems.map((finding) => finding.item),
+    "Self-derived"
+  );
+  assign(analysis.oldItems, "Old");
+  return labels;
+}
