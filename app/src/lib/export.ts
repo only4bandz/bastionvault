@@ -69,17 +69,46 @@ export function exportFilename(now: Date): string {
   return `bastion-export-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}.csv`;
 }
 
-/** Hands the CSV to the browser as a download. Returns true on success. */
+/**
+ * How long the plaintext blob URL is allowed to stay resolvable.
+ *
+ * Revoking synchronously after `click()` is a real bug in Firefox and Safari:
+ * the download has not been handed to the browser's download manager yet, so
+ * the fetch of the just-revoked URL fails and the user gets nothing — while
+ * `downloadCsv` cheerfully returns true. Revoking on the next macrotask is the
+ * standard fix, and one tick is the shortest window that actually works.
+ */
+const OBJECT_URL_LIFETIME_MS = 0;
+
+/**
+ * Hands the CSV to the browser as a download. Returns true on success.
+ *
+ * ⚠️ The blob behind the returned URL is the entire vault in plaintext. It is
+ * revoked unconditionally — on the success path and on the throw path — so a
+ * `blob:` URL that resolves to every password in the vault never outlives the
+ * click that created it. Any code holding that string afterwards gets nothing.
+ */
 export function downloadCsv(csv: string, filename: string): boolean {
+  let url: string | undefined;
+  let anchor: HTMLAnchorElement | undefined;
   try {
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-    const anchor = document.createElement("a");
+    url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = filename;
+    // Firefox only dispatches the download for an anchor in the document.
+    anchor.style.display = "none";
+    anchor.rel = "noopener";
+    document.body.append(anchor);
     anchor.click();
-    URL.revokeObjectURL(url);
     return true;
   } catch {
     return false;
+  } finally {
+    anchor?.remove();
+    if (url !== undefined) {
+      const revoked = url;
+      setTimeout(() => URL.revokeObjectURL(revoked), OBJECT_URL_LIFETIME_MS);
+    }
   }
 }

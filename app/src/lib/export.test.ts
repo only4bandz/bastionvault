@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { exportFilename, itemsToCsv } from "./export";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { downloadCsv, exportFilename, itemsToCsv } from "./export";
 import { csvToItems } from "./import";
 import type { VaultItem } from "./types";
 
@@ -82,5 +82,73 @@ describe("itemsToCsv", () => {
 
   it("names the file with the export date", () => {
     expect(exportFilename(new Date(2026, 6, 17))).toBe("bastion-export-2026-07-17.csv");
+  });
+});
+
+describe("downloadCsv", () => {
+  const created: string[] = [];
+  const revoked: string[] = [];
+
+  beforeEach(() => {
+    // Fake timers throughout: the deferred revoke must never leak into a
+    // later test and be recorded against its stub.
+    vi.useFakeTimers();
+    created.length = 0;
+    revoked.length = 0;
+    vi.stubGlobal("URL", {
+      createObjectURL: () => {
+        const url = `blob:stub/${created.length}`;
+        created.push(url);
+        return url;
+      },
+      revokeObjectURL: (url: string) => revoked.push(url),
+    });
+  });
+
+  afterEach(() => {
+    vi.runAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  it("clicks an in-document anchor and leaves no node behind", () => {
+    const clicked: (string | null)[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      // The anchor must be attached at click time, or Firefox drops it.
+      clicked.push(this.isConnected ? this.download : null);
+    });
+
+    expect(downloadCsv("a,b\r\n", "bastion-export-2026-07-25.csv")).toBe(true);
+
+    expect(clicked).toEqual(["bastion-export-2026-07-25.csv"]);
+    expect(document.querySelector("a")).toBeNull();
+  });
+
+  it("revokes the plaintext blob URL, but only after the click has been handed off", () => {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    downloadCsv("secret,csv\r\n", "vault.csv");
+
+    // Revoking synchronously would break the download in Firefox/Safari.
+    expect(created).toHaveLength(1);
+    expect(revoked).toEqual([]);
+    vi.runAllTimers();
+    expect(revoked).toEqual(created);
+  });
+
+  it("revokes the blob URL and reports failure when the click throws", () => {
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+
+    expect(downloadCsv("secret,csv\r\n", "vault.csv")).toBe(false);
+
+    expect(document.querySelector("a")).toBeNull();
+    vi.runAllTimers();
+    expect(revoked).toEqual(created);
   });
 });
