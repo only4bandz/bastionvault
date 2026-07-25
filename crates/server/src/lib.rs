@@ -755,10 +755,17 @@ async fn security_headers(State(st): State<AppState>, request: Request, next: Ne
         "x-permitted-cross-domain-policies",
         HeaderValue::from_static("none"),
     );
+    // `includeSubDomains` closes the sibling-hostname hole: without it an
+    // attacker who can answer for any `*.vault.example.com` name still gets one
+    // plaintext round trip to plant a cookie or run a downgrade. `preload`
+    // extends the same guarantee to a browser's very first contact, before any
+    // HSTS header has ever been seen. Both are load-bearing for a credential
+    // store, and the production edge contract already requires HTTPS-only
+    // service of the whole public authority.
     if st.transport.is_some() {
         headers.insert(
             header::STRICT_TRANSPORT_SECURITY,
-            HeaderValue::from_static("max-age=31536000"),
+            HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
         );
     }
     response
@@ -4393,7 +4400,7 @@ mod tests {
             assert_eq!(response.status(), expected, "{name}");
             assert_eq!(
                 response.headers()[header::STRICT_TRANSPORT_SECURITY],
-                "max-age=31536000",
+                "max-age=31536000; includeSubDomains; preload",
                 "{name}"
             );
             assert!(
