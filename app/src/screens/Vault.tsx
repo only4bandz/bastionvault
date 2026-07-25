@@ -11,7 +11,12 @@ import {
   IcDownload, IcExternal, IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcStar, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
-import { analyzePasswordHealth, passwordAgeReference, riskLabels } from "../lib/password-health";
+import {
+  analyzePasswordHealth,
+  passwordAgeReference,
+  riskLabels,
+  PASSWORD_AGE_LIMIT_MS,
+} from "../lib/password-health";
 import { downloadCsv, exportFilename, itemsToCsv } from "../lib/export";
 import { lookupBin } from "../lib/bin";
 import type { ImportOutcome, ImportProgress, ImportResult } from "../lib/import";
@@ -1018,7 +1023,14 @@ function ItemDetailView({
 
 // ── Password Health ──
 function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) => void }): JSX.Element {
-  const analysis = useMemo(() => analyzePasswordHealth(items, Date.now()), [items]);
+  // One clock for the whole page. `analyzePasswordHealth` takes `now` as an
+  // argument precisely so the analysis is reproducible; reading `Date.now()`
+  // again while rendering a finding reintroduced the drift that design avoids
+  // — the memoized verdict and the rendered age could come from clocks minutes
+  // or hours apart, and an item could be listed as old while its own row
+  // computed an age below the threshold.
+  const [now] = useState(() => Date.now());
+  const analysis = useMemo(() => analyzePasswordHealth(items, now), [items, now]);
   const score = analysis.score;
   const scoreColor =
     score === null
@@ -1143,11 +1155,15 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
           <div className="health-section-title" style={{ color: "var(--warn)" }}>
             Old passwords · {analysis.oldItems.length}
           </div>
+          <div className="faint" style={{ marginBottom: 8, fontSize: 12 }}>
+            Unchanged for more than {Math.round(PASSWORD_AGE_LIMIT_MS / 86_400_000)} days. Age is
+            measured from the last password change, not the last edit.
+          </div>
           {analysis.oldItems.map((item) => (
             <Finding
               key={item.id}
               item={item}
-              detail={`Unchanged for ${Math.floor((Date.now() - passwordAgeReference(item)) / 86_400_000)} days`}
+              detail={`Unchanged since ${new Date(passwordAgeReference(item)).toLocaleDateString()} · ${relativeItemTime(passwordAgeReference(item), now)}`}
             />
           ))}
         </div>

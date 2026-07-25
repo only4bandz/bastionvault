@@ -207,6 +207,25 @@ describe("Vault dashboard accessibility", () => {
     expect(screen.getByText("51–62 of 62")).toBeVisible();
   });
 
+  it("dates old passwords from one clock and states the threshold", async () => {
+    const user = userEvent.setup();
+    const changedAt = Date.now() - 400 * 86_400_000;
+    renderVault([
+      { ...LOGIN, id: "stale", title: "Stale site", password: "V7!kQ2#pL9@xR4$m", passwordChangedAt: changedAt },
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "Password Health" }));
+
+    expect(screen.getByText(/Old passwords · 1/)).toBeVisible();
+    expect(screen.getByText(/Unchanged for more than 365 days/)).toBeVisible();
+    // Absolute date, so "1y ago" is never the only thing the user can act on.
+    expect(
+      screen.getByText(
+        new RegExp(`Unchanged since ${new Date(changedAt).toLocaleDateString()}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      )
+    ).toBeVisible();
+  });
+
   it("announces only transaction-backed sync states", () => {
     renderVault([], "saving");
     expect(screen.getByRole("status")).toHaveTextContent("Saving…");
