@@ -111,3 +111,36 @@ it("matches displayed card metadata but never secret fields", () => {
   expect(filterVaultItems([card], "all", "987")).toHaveLength(0);
   expect(filterVaultItems([card], "all", "hidden")).toHaveLength(0);
 });
+
+describe("accent- and unicode-insensitive search", () => {
+  const accented: VaultItem[] = [
+    { id: "precomposed", type: "login", title: "Caf\u00e9 R\u00e9servation", updatedAt: 1 },
+    // The same word written with a combining acute accent instead of the
+    // precomposed character — what many importers and IME keyboards produce.
+    { id: "decomposed", type: "login", title: "Cafe\u0301 S\u00fcd", updatedAt: 2 },
+    { id: "plain", type: "login", title: "Cafeteria", updatedAt: 3 },
+    { id: "turkish", type: "login", title: "\u0130stanbul Bank", updatedAt: 4 },
+  ];
+  const ids = (query: string): string[] =>
+    filterVaultItems(accented, "all", query)
+      .map((item) => item.id)
+      .sort();
+
+  it("matches an unaccented query against accented titles", () => {
+    expect(ids("cafe reservation")).toEqual(["precomposed"]);
+    expect(ids("sud")).toEqual(["decomposed"]);
+    expect(ids("istanbul")).toEqual(["turkish"]);
+  });
+
+  it("matches across both encodings of the same character", () => {
+    // "caf\u00e9" must find the precomposed title, the combining-mark title,
+    // and the unaccented one — all three are the same string to a reader.
+    expect(ids("caf\u00e9")).toEqual(["decomposed", "plain", "precomposed"]);
+    expect(ids("cafe\u0301")).toEqual(["decomposed", "plain", "precomposed"]);
+  });
+
+  it("still matches plain ASCII exactly as before", () => {
+    expect(ids("cafeteria")).toEqual(["plain"]);
+    expect(ids("nothing here")).toEqual([]);
+  });
+});
