@@ -27,6 +27,7 @@ import { makeApi, ApiError } from "./lib/api.js";
 import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.js";
 import { revealFieldValue } from "./lib/reveal-policy.js";
 import { CLIPBOARD_CLEAR_MS } from "./lib/clipboard-clear.js";
+import { validContentMessage } from "./lib/content-message-policy.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
 import {
@@ -97,7 +98,6 @@ chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch
 // Messages a content script (running on arbitrary web pages) is allowed to send.
 // Everything else (LIST/ITEM/REVEAL/FILL/UNLOCK/LOCK/STATE) is for extension
 // pages only — see the sender check in the message router.
-const CONTENT_ALLOWED = new Set(["SUGGEST", "CREDS", "STAGE_USER", "STAGE_SAVE", "PENDING_SAVE", "SAVE_LOGIN", "CLEAR_PENDING"]);
 const EXT_ORIGIN = chrome.runtime.getURL("").replace(/\/$/, "");
 
 // Host of the sender frame (for content-script messages); null for ext pages.
@@ -746,7 +746,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // content script is ever coerced, and forces content traffic through the
   // host-scoped SUGGEST/CREDS path only.
   const isExtPage = !!sender?.url && sender.url.startsWith(EXT_ORIGIN);
-  if (!isExtPage && !CONTENT_ALLOWED.has(msg?.type)) {
+  if (!isExtPage && !validContentMessage(msg)) {
     sendResponse({ ok: false, error: "forbidden" });
     return false;
   }

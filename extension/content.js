@@ -7,6 +7,11 @@
 // the password is fetched (CREDS) and written into the field only when the user
 // explicitly picks an account.
 (() => {
+  // Must match the receiving limits in lib/content-message-policy.js. These
+  // source-side caps avoid serializing pathological page-controlled fields;
+  // the background validates them again before storage or credential access.
+  const MAX_STAGED_USERNAME_CHARS = 16 * 1024;
+  const MAX_STAGED_PASSWORD_CHARS = 128 * 1024;
   if (window.__bastionInjected) return; // guard against double-injection
   window.__bastionInjected = true;
 
@@ -255,7 +260,7 @@
     activeField = field;
     let res;
     try {
-      res = await chrome.runtime.sendMessage({ type: "SUGGEST", host: HOST() });
+      res = await chrome.runtime.sendMessage({ type: "SUGGEST" });
     } catch {
       return; // background not ready
     }
@@ -302,20 +307,22 @@
   function bestUsername(scope) {
     const inputs = Array.from((scope || document).querySelectorAll("input"));
     const email = inputs.find((i) => (i.type || "").toLowerCase() === "email" && i.value);
-    if (email) return email.value.trim();
+    if (email) return email.value.trim().slice(0, MAX_STAGED_USERNAME_CHARS);
     const userlike = inputs.find(
       (i) => i.value && (i.type || "").toLowerCase() !== "password" && /user|email|login|account/i.test(`${i.name} ${i.id} ${i.autocomplete}`)
     );
-    return userlike ? userlike.value.trim() : "";
+    return userlike
+      ? userlike.value.trim().slice(0, MAX_STAGED_USERNAME_CHARS)
+      : "";
   }
 
   // When a password field was filled and the form is submitted, stage it.
   function stageFromForm(scope) {
     const pwField = (scope || document).querySelector('input[type="password"]');
     const pw = pwField && pwField.value;
-    if (!pw) return;
+    if (!pw || pw.length > MAX_STAGED_PASSWORD_CHARS) return;
     chrome.runtime
-      .sendMessage({ type: "STAGE_SAVE", host: HOST(), url: location.origin + location.pathname, username: bestUsername(scope), password: pw })
+      .sendMessage({ type: "STAGE_SAVE", username: bestUsername(scope), password: pw })
       .catch(() => {});
   }
 
@@ -345,7 +352,12 @@
       if (el?.tagName !== "INPUT" || !el.value) return;
       const t = (el.type || "").toLowerCase();
       if (t === "email" || (t !== "password" && /user|email|login|account/i.test(`${el.name} ${el.id} ${el.autocomplete}`))) {
-        chrome.runtime.sendMessage({ type: "STAGE_USER", username: el.value.trim() }).catch(() => {});
+        chrome.runtime
+          .sendMessage({
+            type: "STAGE_USER",
+            username: el.value.trim().slice(0, MAX_STAGED_USERNAME_CHARS),
+          })
+          .catch(() => {});
       }
     },
     true
@@ -370,7 +382,7 @@
       <div class="bx-save-body">
         <div class="bx-host"><div class="bx-ico" style="background:${colorFor(pending.host)};width:24px;height:24px;border-radius:6px;font-size:12px">${esc((pending.host || "?")[0].toUpperCase())}</div>${esc(pending.host)}</div>
         <div class="bx-lbl">Username</div>
-        <input class="bx-input" id="bx-user" value="${esc(pending.username || "")}" placeholder="you@example.com" />
+        <input class="bx-input" id="bx-user" maxlength="${MAX_STAGED_USERNAME_CHARS}" value="${esc(pending.username || "")}" placeholder="you@example.com" />
         <div class="bx-lbl">Password · captured ✓</div>
       </div>
       <div class="bx-msg" id="bx-msg" style="display:none"></div>
@@ -384,8 +396,11 @@
       removeSave();
     });
     shadow.querySelector(".bx-do").addEventListener("click", async () => {
-      const username = shadow.querySelector("#bx-user").value.trim();
-      const r = await chrome.runtime.sendMessage({ type: "SAVE_LOGIN", username, title: pending.host }).catch(() => null);
+      const username = shadow
+        .querySelector("#bx-user")
+        .value.trim()
+        .slice(0, MAX_STAGED_USERNAME_CHARS);
+      const r = await chrome.runtime.sendMessage({ type: "SAVE_LOGIN", username }).catch(() => null);
       if (r?.ok) {
         removeSave();
       } else {
@@ -399,7 +414,7 @@
   // On each page load, offer to save a credential staged on a previous step.
   (async () => {
     try {
-      const r = await chrome.runtime.sendMessage({ type: "PENDING_SAVE", host: HOST() });
+      const r = await chrome.runtime.sendMessage({ type: "PENDING_SAVE" });
       if (r?.ok && r.pending) showSavePrompt(r.pending);
     } catch {
       /* background not ready */
