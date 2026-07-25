@@ -13,6 +13,7 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::Address;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use zeroize::Zeroizing;
 
 use super::{now_secs, Db, DbError};
 
@@ -98,12 +99,11 @@ pub(super) fn enqueue_registration(
     Ok(true)
 }
 
-#[derive(Clone)]
 pub(super) struct SmtpConfig {
     host: String,
     port: u16,
     username: String,
-    password: String,
+    password: Zeroizing<String>,
     from: Mailbox,
 }
 
@@ -114,11 +114,15 @@ impl SmtpConfig {
         let host = lookup("BASTION_SMTP_HOST");
         let port = lookup("BASTION_SMTP_PORT");
         let username = lookup("BASTION_SMTP_USERNAME");
-        let password = lookup("BASTION_SMTP_PASSWORD");
+        // Wrap the environment-owned allocation immediately so every
+        // validation error path erases it on drop.
+        let password = lookup("BASTION_SMTP_PASSWORD").map(Zeroizing::new);
         let from = lookup("BASTION_MAIL_FROM");
-        if [&host, &port, &username, &password, &from]
-            .iter()
-            .all(|value| value.is_none())
+        if host.is_none()
+            && port.is_none()
+            && username.is_none()
+            && password.is_none()
+            && from.is_none()
         {
             return Ok(None);
         }
@@ -138,7 +142,11 @@ impl SmtpConfig {
             .filter(|port| *port != 0)
             .ok_or_else(|| "BASTION_SMTP_PORT must be an integer from 1 to 65535".to_string())?;
         let username = required("BASTION_SMTP_USERNAME", username)?;
-        let password = required("BASTION_SMTP_PASSWORD", password)?;
+        let password = password
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                "BASTION_SMTP_PASSWORD is required when SMTP mail is configured".to_string()
+            })?;
         let from = required("BASTION_MAIL_FROM", from)?
             .parse::<Mailbox>()
             .map_err(|_| "BASTION_MAIL_FROM must be one valid mailbox".to_string())?;
@@ -160,9 +168,12 @@ impl SmtpConfig {
             .map(|builder| {
                 builder
                     .port(self.port)
+                    // lettre retains the one operational credential copy used
+                    // for reconnects. The Zeroizing configuration allocation
+                    // is erased as soon as SmtpSender construction completes.
                     .credentials(Credentials::new(
                         self.username.clone(),
-                        self.password.clone(),
+                        self.password.as_str().to_owned(),
                     ))
                     .timeout(Some(SMTP_TIMEOUT))
                     .build()

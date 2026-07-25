@@ -29,7 +29,7 @@ async fn main() {
             config.bind_addr()
         );
     }
-    axum::serve(listener, server::app_with_config(&config))
+    axum::serve(listener, server::app_with_config(config))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server run");

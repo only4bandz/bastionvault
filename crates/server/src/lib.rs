@@ -130,7 +130,6 @@ const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
 
 /// Validated process configuration. Production is deliberately narrower than
 /// development: a same-host TLS ingress is public and Axum stays on loopback.
-#[derive(Clone)]
 pub struct ServerConfig {
     bind_addr: SocketAddr,
     db_path: String,
@@ -326,13 +325,19 @@ pub fn app() -> Router {
 
 /// Builds a router from startup settings that already failed closed on an
 /// invalid production transport or storage contract.
-pub fn app_with_config(config: &ServerConfig) -> Router {
+pub fn app_with_config(config: ServerConfig) -> Router {
+    let ServerConfig {
+        db_path,
+        transport,
+        smtp,
+        ..
+    } = config;
     build_with_transport(
         DEFAULT_TOKEN_TTL,
-        config.db_path(),
+        &db_path,
         MAX_CONCURRENT_AUTH,
-        config.transport.clone(),
-        config.smtp.clone(),
+        transport,
+        smtp,
     )
 }
 
