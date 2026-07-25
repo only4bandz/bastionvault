@@ -106,6 +106,25 @@ describe("Vault dashboard accessibility", () => {
     );
   });
 
+  it("warns in the item detail when the saved website is cleartext HTTP", () => {
+    renderVault([{ ...LOGIN, id: "http-1", title: "Router", url: "http://192.168.1.1/admin" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Open Router" }));
+
+    expect(screen.getByText("Not secure · HTTP")).toBeVisible();
+    // The link still works and the value stays copyable — this is a warning.
+    expect(screen.getByRole("link", { name: "Open website in a new tab" })).toHaveAttribute(
+      "href",
+      "http://192.168.1.1/admin"
+    );
+  });
+
+  it("does not warn for an HTTPS website", () => {
+    renderVault([LOGIN]);
+    fireEvent.click(screen.getByRole("button", { name: "Open GitHub" }));
+
+    expect(screen.queryByText("Not secure · HTTP")).not.toBeInTheDocument();
+  });
+
   it("announces only transaction-backed sync states", () => {
     renderVault([], "saving");
     expect(screen.getByRole("status")).toHaveTextContent("Saving…");
