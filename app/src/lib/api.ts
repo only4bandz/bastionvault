@@ -5,6 +5,7 @@ const BASE = "/api/v1";
 const REQUEST_TIMEOUT_MS = 15_000;
 export const MAX_ERROR_BODY_CHARS = 4096;
 export const MAX_SERVER_DETAIL_CHARS = 200;
+export const MAX_SUCCESS_BODY_BYTES = 80 * 1024 * 1024;
 
 export interface Blob {
   v: number;
@@ -95,6 +96,44 @@ async function readErrorBody(response: Response): Promise<string> {
   }
 }
 
+/** Stream and bound a successful JSON response before parsing it. */
+export async function readJsonBody<T>(
+  response: Response,
+  maxBytes: number = MAX_SUCCESS_BODY_BYTES
+): Promise<T> {
+  const declaredLength = response.headers.get("content-length");
+  if (
+    declaredLength &&
+    /^[0-9]+$/.test(declaredLength) &&
+    BigInt(declaredLength) > BigInt(maxBytes)
+  ) {
+    throw new ApiError(response.status, "Server response exceeded the safe size limit.");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new ApiError(response.status, "Server returned an unreadable JSON response.");
+  }
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytesRead += value.byteLength;
+    if (bytesRead > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new ApiError(response.status, "Server response exceeded the safe size limit.");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError(response.status, "Server returned invalid JSON.");
+  }
+}
+
 /**
  * Fired on `window` when a request that carried a session token is rejected
  * with 401 — i.e. the server no longer honors the session (expired/revoked).
@@ -137,11 +176,7 @@ async function req<T>(method: string, path: string, token?: string, body?: unkno
     }
     const ct = res.headers.get("content-type") || "";
     if (!ct.includes("application/json")) return undefined as T;
-    try {
-      return (await res.json()) as T;
-    } catch {
-      throw new ApiError(res.status, "Server returned invalid JSON.");
-    }
+    return await readJsonBody<T>(res);
   } catch (error) {
     if (controller.signal.aborted) {
       throw new ApiError(0, "Server request timed out. The result is unknown; refresh before retrying.");

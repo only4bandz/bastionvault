@@ -3,6 +3,7 @@ import {
   api,
   ApiError,
   MAX_SERVER_DETAIL_CHARS,
+  readJsonBody,
   SESSION_EXPIRED_EVENT,
   statusMessage,
 } from "./api";
@@ -151,5 +152,44 @@ describe("hostile server error handling", () => {
     expect(statusMessage(429)).toMatch(/rate-limiting/i);
     expect(statusMessage(503)).toMatch(/internal error/i);
     expect(statusMessage(418)).toBe("The server rejected the request (HTTP 418).");
+  });
+});
+
+describe("hostile successful response handling", () => {
+  it("rejects a streamed response above the configured byte ceiling", async () => {
+    const response = new Response(JSON.stringify({ vault: "x".repeat(128) }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+    await expect(readJsonBody(response, 32)).rejects.toMatchObject({
+      status: 200,
+      message: "Server response exceeded the safe size limit.",
+    });
+  });
+
+  it("rejects an oversized declared response before reading it", async () => {
+    const response = new Response("{}", {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "content-length": "1000",
+      },
+    });
+
+    await expect(readJsonBody(response, 32)).rejects.toMatchObject({
+      message: "Server response exceeded the safe size limit.",
+    });
+  });
+
+  it("parses a bounded successful JSON response", async () => {
+    const response = new Response('{"revision":9}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+    await expect(readJsonBody<{ revision: number }>(response, 32)).resolves.toEqual({
+      revision: 9,
+    });
   });
 });
