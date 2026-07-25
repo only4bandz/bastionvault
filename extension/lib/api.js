@@ -361,7 +361,8 @@ async function req(
   body,
   timeoutMs,
   maxResponseBytes,
-  responseKind = "json"
+  responseKind = "json",
+  expectedStatus = responseKind === "json" ? 200 : 204
 ) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -388,6 +389,13 @@ async function req(
         res.status,
         statusMessage(res.status),
         text.slice(0, MAX_SERVER_DETAIL_CHARS)
+      );
+    }
+    if (res.status !== expectedStatus) {
+      await res.body?.cancel?.().catch(() => {});
+      throw new ApiError(
+        res.status,
+        `Server returned an unexpected success status (expected HTTP ${expectedStatus}).`
       );
     }
     if (responseKind === "empty") return undefined;
