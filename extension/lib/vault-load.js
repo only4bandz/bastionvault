@@ -1,5 +1,9 @@
 import { requireContactsPayload } from "./send-contact-state.js";
 import { isVaultItemPayload } from "./vault-item-state.js";
+import {
+  isLockedSendRecord,
+  requireLockedRecordContacts,
+} from "./send-locked-state.js";
 
 const SEND_IDENTITY_ID = "bastion:send-identity";
 const SEND_CONTACTS_ID = "bastion:send-contacts";
@@ -63,7 +67,7 @@ function decryptVaultItems(account, rawItems) {
     if (id === SEND_CONTACTS_ID) {
       contacts = requireContactsPayload(parsed);
     } else if (id.startsWith(SEND_LOCKED_PREFIX)) {
-      if (!isRecord(parsed)) throw new VaultIntegrityError();
+      if (!isLockedSendRecord(parsed, id)) throw new VaultIntegrityError();
       lockedRecords.push(parsed);
     } else if (id.startsWith(SEND_RESERVED_PREFIX)) {
       throw new VaultIntegrityError();
@@ -72,6 +76,7 @@ function decryptVaultItems(account, rawItems) {
       if (parsed.deletedAt === undefined) items.set(id, parsed);
     }
   }
+  requireLockedRecordContacts(lockedRecords, contacts);
   return { items, contacts, lockedRecords };
 }
 
