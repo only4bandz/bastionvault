@@ -20,16 +20,19 @@ jobs:
     name: RustSec advisories (cargo audit)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # 1.91.0
         with:
-          path: |
-            ~/.cargo/bin/cargo-audit
-            ~/.cargo/advisory-db
-          key: cargo-audit-${{ runner.os }}
-      - name: Install cargo-audit
-        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
+          toolchain: 1.91.0
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.22.2-${{ runner.os }}
+      - name: Install cargo-audit 0.22.2
+        run: |
+          if ! cargo-audit --version 2>/dev/null | grep -Fxq 'cargo-audit 0.22.2'; then
+            cargo install cargo-audit --version 0.22.2 --locked
+          fi
       - name: Audit Cargo.lock against the RustSec database
         run: cargo audit --deny warnings
 
@@ -37,10 +40,10 @@ jobs:
     name: npm advisories (app)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: 22.22.0
       - name: Audit app dependency tree
         working-directory: app
         run: npm audit --audit-level=high
