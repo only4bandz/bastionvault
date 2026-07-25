@@ -738,11 +738,30 @@ async fn security_headers(State(st): State<AppState>, request: Request, next: Ne
         HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
     );
     // Deny every powerful browser feature to documents born from API bytes.
+    // The list is deliberately exhaustive rather than representative: the two
+    // that matter most for a credential store are `clipboard-read` (a copied
+    // password lives on the OS clipboard for up to 30s) and `display-capture`
+    // (a screen share of a revealed secret), and neither was covered before.
     headers.insert(
         "permissions-policy",
-        HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
+        HeaderValue::from_static(
+            "accelerometer=(), ambient-light-sensor=(), autoplay=(), bluetooth=(), camera=(), \
+             clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), \
+             fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), \
+             local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), \
+             picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), \
+             serial=(), usb=(), web-share=(), xr-spatial-tracking=()",
+        ),
     );
     // Isolate any such document from cross-origin windows and embedders.
+    // COOP severs the opener relationship; COEP refuses to pull in any
+    // cross-origin subresource that has not opted in, so the pair also
+    // prevents the document from being placed in a cross-origin-isolated
+    // agent cluster it never asked to join.
+    headers.insert(
+        "cross-origin-embedder-policy",
+        HeaderValue::from_static("require-corp"),
+    );
     headers.insert(
         "cross-origin-opener-policy",
         HeaderValue::from_static("same-origin"),
