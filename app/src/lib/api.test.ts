@@ -11,6 +11,7 @@ import {
   requirePublicConfigResponse,
   requireRevisionResponse,
   requireSessionTokenResponse,
+  requireVaultResponse,
   requireVerificationResponse,
   SESSION_EXPIRED_EVENT,
   statusMessage,
@@ -177,6 +178,33 @@ describe("hostile server error handling", () => {
 });
 
 describe("hostile successful response handling", () => {
+  it("validates the complete encrypted vault envelope", () => {
+    const blob = {
+      v: 1,
+      nonce: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX",
+      ct: "AAECAwQFBgcICQoLDA0ODw==",
+    };
+    const vault = { items: { "item-1": blob }, manifest: blob, revision: 4 };
+    expect(requireVaultResponse(vault)).toEqual(vault);
+    expect(requireVaultResponse({ items: {}, manifest: null, revision: 0 })).toEqual({
+      items: {},
+      manifest: null,
+      revision: 0,
+    });
+
+    for (const value of [
+      { ...vault, revision: -1 },
+      { ...vault, items: { "bad/item": blob } },
+      { ...vault, items: { "item-1": { ...blob, extra: true } } },
+      { ...vault, manifest: { ...blob, nonce: "short" } },
+      { ...vault, unexpected: true },
+    ]) {
+      expect(() => requireVaultResponse(value)).toThrow(
+        "Server returned an invalid vault response."
+      );
+    }
+  });
+
   it("accepts only the canonical prelogin envelope", () => {
     const prelogin = {
       salt: "AAECAwQFBgcICQoLDA0ODw==",
