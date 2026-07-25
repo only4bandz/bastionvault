@@ -39,7 +39,12 @@ The ingress and Axum process run on the same host. The ingress must:
    `X-Forwarded-Proto: https` value on proxied HTTPS requests;
 5. use a publicly trusted certificate, renew it automatically, and alert while
    at least 30 days of validity remain;
-6. pass through Bastion's `Strict-Transport-Security: max-age=31536000` header.
+6. pass through Bastion's
+   `Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`
+   header unmodified. Every hostname under the public authority must therefore
+   be served over HTTPS only — `includeSubDomains` applies to all of them, and
+   `preload` makes the commitment durable once the authority is submitted to
+   the browser preload list.
 
 Mailbox verification proofs are encoded in the URL fragment of
 `/verify-email#token=...`; fragments never reach HTTP servers. Ingress request
