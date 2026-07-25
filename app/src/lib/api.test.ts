@@ -7,6 +7,7 @@ import {
   MAX_SERVER_DETAIL_CHARS,
   readErrorBody,
   readJsonBody,
+  requireSessionTokenResponse,
   SESSION_EXPIRED_EVENT,
   statusMessage,
 } from "./api";
@@ -172,6 +173,40 @@ describe("hostile server error handling", () => {
 });
 
 describe("hostile successful response handling", () => {
+  it("accepts only the canonical session-token envelope", () => {
+    const token = "ab".repeat(32);
+    expect(requireSessionTokenResponse({ token })).toBe(token);
+    for (const value of [
+      { token: token.toUpperCase() },
+      { token: `${token}00` },
+      { token, extra: true },
+      { token: 7 },
+      null,
+    ]) {
+      expect(() => requireSessionTokenResponse(value)).toThrow(
+        "Server returned an invalid session response."
+      );
+    }
+  });
+
+  it("rejects a malformed successful login before exposing a bearer token", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () =>
+      new Response('{"token":"attacker-controlled"}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    try {
+      await expect(api.login("a@b.c", "derived-secret")).rejects.toMatchObject({
+        status: 200,
+        message: "Server returned an invalid session response.",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("accepts only the exact JSON media type with optional parameters", () => {
     expect(isJsonMediaType("application/json")).toBe(true);
     expect(isJsonMediaType("Application/JSON; charset=utf-8")).toBe(true);
