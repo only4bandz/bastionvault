@@ -32,6 +32,50 @@ const SEQUENCES = [
   "mnbvcxzlkjhgfdsaqpoiuytrewq",
 ];
 
+// QWERTY walks: paths a finger traces across the keyboard rather than paths
+// through the alphabet. `SEQUENCES` above only covers straight rows, so
+// "1qaz2wsx" — a column-by-column zigzag, and a permanent fixture of every
+// breach corpus — scored as a strong 16-bit-pool password.
+const KEYBOARD_WALKS = [
+  "1qaz2wsx3edc4rfv5tgb6yhn7ujm8ik9ol0p", // top-to-bottom columns, left to right
+  "qazwsxedcrfvtgbyhnujmikolp", // the same walk without the digit row
+  "zaq1xsw2cde3vfr4bgt5nhy6mju7", // bottom-to-top columns
+  "1q2w3e4r5t6y7u8i9o0p", // alternating between the digit and top rows
+  "qwaszxerdfcvtyghbnuijkmop", // adjacent column pairs, left to right
+];
+
+/**
+ * Shortest keyboard run treated as evidence. Four is too short — "asdf" is a
+ * substring of plenty of intentional passwords — while six starts missing real
+ * cases, so a run of five adjacent keys is the threshold.
+ */
+const MIN_KEYBOARD_RUN = 5;
+
+/** Alphanumeric skeleton, without the l33t folding `normalizeCommonPatterns` applies. */
+function keyboardSkeleton(password: string): string {
+  return password.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+/**
+ * True when the password contains a run of at least `MIN_KEYBOARD_RUN`
+ * consecutive keys along a known QWERTY walk, in either direction. Unlike the
+ * `SEQUENCES` check this looks *inside* the password, so "Tr0ub4dor1qaz2wsx"
+ * is caught as well as "1qaz2wsx" alone.
+ */
+function hasKeyboardWalk(password: string): boolean {
+  const skeleton = keyboardSkeleton(password);
+  if (skeleton.length < MIN_KEYBOARD_RUN) return false;
+  for (const walk of KEYBOARD_WALKS) {
+    const reversed = [...walk].reverse().join("");
+    for (const path of [walk, reversed]) {
+      for (let start = 0; start + MIN_KEYBOARD_RUN <= path.length; start++) {
+        if (skeleton.includes(path.slice(start, start + MIN_KEYBOARD_RUN))) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export interface PasswordAssessment {
   score: number;
   label: string;
@@ -233,6 +277,10 @@ export function assessPassword(password: string): PasswordAssessment {
   if (sequence) {
     score = Math.min(score, 1);
     reasons.push("Predictable sequence");
+  }
+  if (!sequence && hasKeyboardWalk(password)) {
+    score = Math.min(score, 1);
+    reasons.push("Keyboard pattern");
   }
   if (common) {
     score = Math.min(score, 1);
