@@ -438,15 +438,15 @@ async function scheduleClipboardClear(delayMs) {
     .catch(() => {});
 }
 
-async function cancelClipboardClear() {
-  if (!(await chrome.offscreen.hasDocument())) return;
+async function clearClipboardNow() {
+  await ensureOffscreen();
   chrome.runtime
-    .sendMessage({ target: "offscreen-clipboard", type: "CLIP_CANCEL_CLEAR" })
+    .sendMessage({ target: "offscreen-clipboard", type: "CLIP_CLEAR_NOW" })
     .catch(() => {});
 }
 
 async function lock() {
-  await cancelClipboardClear(); // a pending clear outliving the session is fine to drop
+  await clearClipboardNow(); // copied secrets must not outlive the session
   await clearPending(); // don't leave a staged plaintext password around
   lastUser = null;
   await chrome.storage.session.remove("lastUser");

@@ -29,6 +29,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   } else if (msg.type === "CLIP_CANCEL_CLEAR") {
     scheduler.cancel();
     sendResponse({ ok: true });
+  } else if (msg.type === "CLIP_CLEAR_NOW") {
+    scheduler.clearNow();
+    sendResponse({ ok: true });
   }
   return false;
 });

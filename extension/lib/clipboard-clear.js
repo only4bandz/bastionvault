@@ -36,6 +36,15 @@ export function makeClipboardClearScheduler({ setTimer, clearTimer, clearClipboa
         handle = undefined;
       }
     },
+    /** Cancel the timer and wipe immediately (for lock/session teardown). */
+    clearNow() {
+      token += 1;
+      if (handle !== undefined) {
+        clearTimer(handle);
+        handle = undefined;
+      }
+      clearClipboard();
+    },
   };
 }
 
