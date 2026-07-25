@@ -991,10 +991,11 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
           </div>
         )}
         <div className="faint" style={{ marginTop: 10, fontSize: 13 }}>
-          {analysis.assessedCount}/{analysis.loginCount} login passwords assessed · {analysis.weakItems.length} weak · {analysis.reusedGroups.length} reused {analysis.reusedGroups.length === 1 ? "group" : "groups"} · {analysis.oldItems.length} old
+          {analysis.assessedCount}/{analysis.loginCount} login passwords assessed · {analysis.weakItems.length} weak · {analysis.reusedGroups.length} reused {analysis.reusedGroups.length === 1 ? "group" : "groups"} · {analysis.identityItems.length} self-derived · {analysis.oldItems.length} old
         </div>
         <div className="faint" style={{ marginTop: 6, fontSize: 12 }}>
-          Offline analysis only: length, character variety, obvious patterns, and exact reuse.
+          Offline analysis only: length, character variety, obvious patterns, exact reuse, and
+          reuse of the entry's own username, website or title.
         </div>
       </div>
       <WeakSection />
@@ -1012,6 +1013,20 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
                 <Finding key={item.id} item={item} detail={item.username || "No username"} />
               ))}
             </div>
+          ))}
+        </div>
+      )}
+      {analysis.identityItems.length > 0 && (
+        <div className="card-section" style={{ maxWidth: 640, marginBottom: 16 }}>
+          <div className="health-section-title" style={{ color: "var(--warn)" }}>
+            Passwords built from the entry itself · {analysis.identityItems.length}
+          </div>
+          {analysis.identityItems.map(({ item, token, source }) => (
+            <Finding
+              key={item.id}
+              item={item}
+              detail={`Contains this item's ${source} “${token}”`}
+            />
           ))}
         </div>
       )}

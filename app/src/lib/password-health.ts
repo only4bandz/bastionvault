@@ -43,6 +43,90 @@ export interface ReusedPasswordGroup {
   items: VaultItem[];
 }
 
+/** An item whose own password is derived from its own visible identity. */
+export interface IdentityDerivedFinding {
+  item: VaultItem;
+  /** The identity token found inside the password, as stored (not normalized). */
+  token: string;
+  /** Where that token came from, for the UI to name it. */
+  source: "username" | "website" | "title";
+}
+
+/**
+ * Shortest identity fragment worth matching. Below this, hits are noise —
+ * "bob" appears inside plenty of unrelated strings, and a three-character
+ * word contributes almost nothing to a guess list anyway.
+ */
+const MIN_IDENTITY_TOKEN = 4;
+
+/** Registrable-looking labels that identify nothing about a specific site. */
+const GENERIC_HOST_LABELS = new Set(["www", "com", "net", "org", "co", "login", "auth", "account"]);
+
+function identityTokens(item: VaultItem): { token: string; source: IdentityDerivedFinding["source"] }[] {
+  const tokens: { token: string; source: IdentityDerivedFinding["source"] }[] = [];
+  const push = (raw: string | undefined, source: IdentityDerivedFinding["source"]): void => {
+    const token = (raw ?? "").trim();
+    if (token) tokens.push({ token, source });
+  };
+
+  // Username: the whole value and, for an email, the local part on its own —
+  // "ada@example.com" makes both "ada@example.com" and "ada" worth checking.
+  push(item.username, "username");
+  const at = (item.username ?? "").indexOf("@");
+  if (at > 0) push(item.username!.slice(0, at), "username");
+
+  // Website: each hostname label except the generic ones, so
+  // "https://login.github.com/x" contributes "github".
+  const host = (() => {
+    try {
+      return new URL(item.url!).hostname;
+    } catch {
+      return "";
+    }
+  })();
+  for (const label of host.split(".")) {
+    if (!GENERIC_HOST_LABELS.has(label.toLowerCase())) push(label, "website");
+  }
+
+  // Title: the whole thing plus each word, so "Acme Bank" yields "acme".
+  push(item.title, "title");
+  for (const word of item.title.split(/\s+/)) push(word, "title");
+
+  return tokens;
+}
+
+/**
+ * Report the identity fragment a password is built from, if any.
+ *
+ * "github2024", "AdaAda!" and "acmebank1" survive every generic strength check
+ * — they are long enough, mixed enough, and match no common-password list —
+ * yet they are the first candidates any targeted attacker tries, because the
+ * vault entry itself hands over the base word. This check is per-item and
+ * needs no wordlist: the item's own username, website and title are the list.
+ *
+ * The longest matching token wins, so a hit is reported against the most
+ * specific fragment rather than an incidental short one.
+ */
+export function identityDerivedToken(
+  item: VaultItem
+): Omit<IdentityDerivedFinding, "item"> | null {
+  const password = item.password;
+  if (!password) return null;
+  const normalizedPassword = normalizeCommonPatterns(password);
+  if (!normalizedPassword) return null;
+
+  let best: Omit<IdentityDerivedFinding, "item"> | null = null;
+  for (const { token, source } of identityTokens(item)) {
+    const normalizedToken = normalizeCommonPatterns(token);
+    if (normalizedToken.length < MIN_IDENTITY_TOKEN) continue;
+    if (!normalizedPassword.includes(normalizedToken)) continue;
+    if (best === null || normalizedToken.length > normalizeCommonPatterns(best.token).length) {
+      best = { token, source };
+    }
+  }
+  return best;
+}
+
 export interface PasswordHealthAnalysis {
   score: number | null;
   loginCount: number;
@@ -50,6 +134,7 @@ export interface PasswordHealthAnalysis {
   weakItems: VaultItem[];
   reusedItems: VaultItem[];
   reusedGroups: ReusedPasswordGroup[];
+  identityItems: IdentityDerivedFinding[];
   oldItems: VaultItem[];
   atRiskItems: VaultItem[];
   assessments: ReadonlyMap<string, PasswordAssessment>;
@@ -171,11 +256,19 @@ export function analyzePasswordHealth(items: VaultItem[], now?: number): Passwor
     .sort((left, right) => compareItems(left.items[0], right.items[0]));
   const reusedIds = new Set(reusedGroups.flatMap((group) => group.items.map((item) => item.id)));
   const reusedItems = assessed.filter((item) => reusedIds.has(item.id));
+  const identityItems = assessed.flatMap((item) => {
+    const finding = identityDerivedToken(item);
+    return finding ? [{ item, ...finding }] : [];
+  });
   const oldItems =
     now === undefined
       ? []
       : assessed.filter((item) => now - passwordAgeReference(item) > PASSWORD_AGE_LIMIT_MS);
-  const atRiskIds = new Set([...weakItems, ...reusedItems, ...oldItems].map((item) => item.id));
+  const atRiskIds = new Set(
+    [...weakItems, ...reusedItems, ...identityItems.map((finding) => finding.item), ...oldItems].map(
+      (item) => item.id
+    )
+  );
   const atRiskItems = assessed.filter((item) => atRiskIds.has(item.id));
   const score =
     assessed.length === 0
@@ -189,6 +282,7 @@ export function analyzePasswordHealth(items: VaultItem[], now?: number): Passwor
     weakItems,
     reusedItems,
     reusedGroups,
+    identityItems,
     oldItems,
     atRiskItems,
     assessments,
