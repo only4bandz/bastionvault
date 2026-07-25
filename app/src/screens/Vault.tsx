@@ -69,6 +69,51 @@ function pageNumbers(cur: number, total: number): (number | "…")[] {
   return out;
 }
 
+/**
+ * Shared pager for the vault and trash lists. Both paginate for the same
+ * reason — a vault with thousands of items must not render thousands of rows
+ * — and there is no reason for them to drift apart in markup or a11y.
+ */
+function Pager({
+  page,
+  pageCount,
+  total,
+  onPage,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  onPage: (page: number) => void;
+}): JSX.Element | null {
+  if (pageCount <= 1) return null;
+  return (
+    <div className="pager">
+      <span className="pager-info">
+        {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, total)} of {total}
+      </span>
+      <div className="pager-btns">
+        <button className="pg" disabled={page === 1} onClick={() => onPage(page - 1)} aria-label="Previous page">‹</button>
+        {pageNumbers(page, pageCount).map((p, idx) =>
+          p === "…" ? (
+            <span key={`e${idx}`} className="pg-gap">…</span>
+          ) : (
+            <button
+              key={p}
+              className={`pg${p === page ? " active" : ""}`}
+              aria-label={`Page ${p}`}
+              aria-current={p === page ? "page" : undefined}
+              onClick={() => onPage(p)}
+            >
+              {p}
+            </button>
+          )
+        )}
+        <button className="pg" disabled={page === pageCount} onClick={() => onPage(page + 1)} aria-label="Next page">›</button>
+      </div>
+    </div>
+  );
+}
+
 const typeIcon = (t: ItemType, size = 18) =>
   t === "login" ? <IcKey size={size} /> : t === "note" ? <IcNote size={size} /> : <IcCard size={size} />;
 
@@ -120,6 +165,7 @@ export function Vault({
   const [permanentDelete, setPermanentDelete] = useState<VaultItem | null>(null);
   const [emptyingTrash, setEmptyingTrash] = useState(false);
   const [page, setPage] = useState(1);
+  const [trashPage, setTrashPage] = useState(1);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -161,6 +207,16 @@ export function Vault({
   const filtered = useMemo(
     () => (atRiskOnly ? searched.filter((item) => risks.has(item.id)) : searched),
     [atRiskOnly, risks, searched]
+  );
+
+  // Trash is paginated on the same terms as the vault: emptying it is an
+  // explicit, confirmed action, so a long-lived trash is a normal state, not a
+  // transient one, and it must not render thousands of rows at once.
+  const trashPageCount = Math.max(1, Math.ceil(trashedItems.length / PAGE_SIZE));
+  const safeTrashPage = Math.min(trashPage, trashPageCount);
+  const pagedTrash = trashedItems.slice(
+    (safeTrashPage - 1) * PAGE_SIZE,
+    safeTrashPage * PAGE_SIZE
   );
 
   // Paginate so a 270-item vault doesn't scroll forever.
@@ -605,32 +661,7 @@ export function Vault({
                 </div>
               )}
 
-              {pageCount > 1 && (
-                <div className="pager">
-                  <span className="pager-info">
-                    {(safePage - 1) * PAGE_SIZE + 1}–{Math.min(safePage * PAGE_SIZE, filtered.length)} of {filtered.length}
-                  </span>
-                  <div className="pager-btns">
-                    <button className="pg" disabled={safePage === 1} onClick={() => setPage(safePage - 1)} aria-label="Previous page">‹</button>
-                    {pageNumbers(safePage, pageCount).map((p, idx) =>
-                      p === "…" ? (
-                        <span key={`e${idx}`} className="pg-gap">…</span>
-                      ) : (
-                        <button
-                          key={p}
-                          className={`pg${p === safePage ? " active" : ""}`}
-                          aria-label={`Page ${p}`}
-                          aria-current={p === safePage ? "page" : undefined}
-                          onClick={() => setPage(p)}
-                        >
-                          {p}
-                        </button>
-                      )
-                    )}
-                    <button className="pg" disabled={safePage === pageCount} onClick={() => setPage(safePage + 1)} aria-label="Next page">›</button>
-                  </div>
-                </div>
-              )}
+              <Pager page={safePage} pageCount={pageCount} total={filtered.length} onPage={setPage} />
             </>
           )}
 
@@ -664,7 +695,7 @@ export function Vault({
               ) : (
                 <div className="list">
                   <div className="list-head"><span>Title</span><span>Deleted</span><span style={{ textAlign: "right" }}>Actions</span></div>
-                  {trashedItems.map((item) => (
+                  {pagedTrash.map((item) => (
                     <div className="row" key={item.id}>
                       <div className="row-open">
                         <span className="title">
@@ -674,7 +705,11 @@ export function Vault({
                             <span className="sub">{item.folder || TYPE_LABEL[item.type]}</span>
                           </span>
                         </span>
-                        <time className="when" dateTime={new Date(item.deletedAt!).toISOString()}>
+                        <time
+                          className="when"
+                          dateTime={new Date(item.deletedAt!).toISOString()}
+                          title={new Date(item.deletedAt!).toLocaleString()}
+                        >
                           {relativeItemTime(item.deletedAt!, now)}
                         </time>
                       </div>
@@ -693,6 +728,12 @@ export function Vault({
                   ))}
                 </div>
               )}
+              <Pager
+                page={safeTrashPage}
+                pageCount={trashPageCount}
+                total={trashedItems.length}
+                onPage={setTrashPage}
+              />
             </>
           )}
 
