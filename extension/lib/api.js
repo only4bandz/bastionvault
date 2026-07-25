@@ -42,6 +42,10 @@ export function statusMessage(status) {
 export const REQUEST_TIMEOUT_MS = 15_000;
 export const API_PREFIX = "/v1";
 
+export function isJsonMediaType(value) {
+  return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
+}
+
 /** Reads at most MAX_ERROR_BODY_CHARS of an error body — a hostile server
  * must not be able to balloon the worker's memory with a huge error page. */
 async function readErrorBody(res) {
@@ -96,7 +100,16 @@ async function readJsonBody(res, maxBytes) {
   }
 }
 
-async function req(base, method, path, token, body, timeoutMs, maxResponseBytes) {
+async function req(
+  base,
+  method,
+  path,
+  token,
+  body,
+  timeoutMs,
+  maxResponseBytes,
+  responseKind = "json"
+) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -124,8 +137,10 @@ async function req(base, method, path, token, body, timeoutMs, maxResponseBytes)
         text.slice(0, MAX_SERVER_DETAIL_CHARS)
       );
     }
-    const ct = res.headers.get("content-type") || "";
-    if (!ct.includes("application/json")) return undefined;
+    if (responseKind === "empty") return undefined;
+    if (!isJsonMediaType(res.headers.get("content-type"))) {
+      throw new ApiError(res.status, "Server returned a non-JSON response.");
+    }
     return await readJsonBody(res, maxResponseBytes);
   } catch (error) {
     if (controller.signal.aborted) {
@@ -146,15 +161,24 @@ export function makeApi(
   base,
   { timeoutMs = REQUEST_TIMEOUT_MS, maxResponseBytes = MAX_SUCCESS_BODY_BYTES } = {}
 ) {
-  const call = (method, path, token, body) =>
-    req(base, method, API_PREFIX + path, token, body, timeoutMs, maxResponseBytes);
+  const call = (method, path, token, body, responseKind = "json") =>
+    req(
+      base,
+      method,
+      API_PREFIX + path,
+      token,
+      body,
+      timeoutMs,
+      maxResponseBytes,
+      responseKind
+    );
   return {
     prelogin: (email) => call("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
     login: (email, auth_secret) =>
       call("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),
-    logout: (token) => call("DELETE", "/sessions", token),
+    logout: (token) => call("DELETE", "/sessions", token, undefined, "empty"),
     deleteAccount: (token, authSecret) =>
-      call("DELETE", "/accounts", token, { auth_secret: authSecret }),
+      call("DELETE", "/accounts", token, { auth_secret: authSecret }, "empty"),
     getVault: (token) => call("GET", "/vault", token),
     getVaultRevision: (token) => call("GET", "/vault/revision", token),
     mutateVault: (token, expectedRevision, operations, manifest) =>
@@ -170,9 +194,9 @@ export function makeApi(
     whoami: (token) => call("GET", "/send/whoami", token),
     directory: (token, bastionId) =>
       call("GET", `/send/directory/${encodeURIComponent(bastionId)}`, token),
-    sendBlob: (token, body) => call("POST", "/send", token, body),
+    sendBlob: (token, body) => call("POST", "/send", token, body, "empty"),
     inbox: (token) => call("GET", "/send/inbox", token),
     inboxDelete: (token, messageId) =>
-      call("DELETE", `/send/inbox/${encodeURIComponent(messageId)}`, token),
+      call("DELETE", `/send/inbox/${encodeURIComponent(messageId)}`, token, undefined, "empty"),
   };
 }
