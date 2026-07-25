@@ -143,6 +143,40 @@ describe("Vault dashboard accessibility", () => {
     );
   });
 
+  it("filters the list to at-risk items and composes with the type tabs", async () => {
+    const user = userEvent.setup();
+    const fresh = Date.now();
+    renderVault([
+      { ...LOGIN, id: "weak", title: "Weak site", password: "P@ssw0rd123!", passwordChangedAt: fresh },
+      {
+        ...LOGIN,
+        id: "strong",
+        title: "Strong site",
+        password: "V7!kQ2#pL9@xR4$m",
+        passwordChangedAt: fresh,
+      },
+      { ...CARD, id: "card", title: "Operations card" },
+    ]);
+
+    const atRisk = screen.getByRole("button", { name: /At risk/ });
+    expect(atRisk).toHaveAttribute("aria-pressed", "false");
+    expect(atRisk).toHaveTextContent("1");
+
+    await user.click(atRisk);
+    expect(atRisk).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Open Weak site" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Open Strong site" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Operations card" })).not.toBeInTheDocument();
+
+    // Composes: Credit Cards ∩ at risk is empty, and the filter is not lost.
+    await user.click(screen.getByRole("button", { name: /Credit Cards/ }));
+    expect(screen.getByText("No matching items")).toBeVisible();
+    expect(atRisk).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(atRisk);
+    expect(screen.getByRole("button", { name: "Open Operations card" })).toBeVisible();
+  });
+
   it("announces only transaction-backed sync states", () => {
     renderVault([], "saving");
     expect(screen.getByRole("status")).toHaveTextContent("Saving…");

@@ -109,6 +109,7 @@ export function Vault({
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<"all" | ItemType>("all");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [atRiskOnly, setAtRiskOnly] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [sort, setSort] = useState<VaultSort>("favorites-recent");
   const [now, setNow] = useState(() => Date.now());
@@ -140,7 +141,7 @@ export function Vault({
     () => selectedFolder === null ? activeItems : activeItems.filter((item) => itemFolder(item) === selectedFolder),
     [activeItems, selectedFolder]
   );
-  const filtered = useMemo(
+  const searched = useMemo(
     () => filterVaultItems(folderItems, tab, query, favoritesOnly, sort),
     [favoritesOnly, folderItems, query, sort, tab]
   );
@@ -155,12 +156,18 @@ export function Vault({
     () => riskLabels(analyzePasswordHealth(activeItems, healthHour * 3_600_000)),
     [activeItems, healthHour]
   );
+  // Applied last, on the already-searched and already-sorted list, so it
+  // composes with every other filter instead of replacing them.
+  const filtered = useMemo(
+    () => (atRiskOnly ? searched.filter((item) => risks.has(item.id)) : searched),
+    [atRiskOnly, risks, searched]
+  );
 
   // Paginate so a 270-item vault doesn't scroll forever.
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const safePage = Math.min(page, pageCount);
   const paged = filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
-  useEffect(() => { setPage(1); }, [favoritesOnly, query, selectedFolder, tab]); // reset to first page on filter change
+  useEffect(() => { setPage(1); }, [atRiskOnly, favoritesOnly, query, selectedFolder, tab]); // reset to first page on filter change
 
   useEffect(() => {
     if (nav !== "vault") return;
@@ -237,6 +244,7 @@ export function Vault({
     note: folderItems.filter((i) => i.type === "note").length,
     card: folderItems.filter((i) => i.type === "card").length,
     favorite: folderItems.filter((i) => i.favorite).length,
+    atRisk: folderItems.filter((i) => risks.has(i.id)).length,
   };
 
   function go(n: Nav) {
@@ -463,6 +471,14 @@ export function Vault({
                   <IcStar size={14} filled={favoritesOnly} /> Favorites{" "}
                   <span className="faint">{counts.favorite}</span>
                 </button>
+                <button
+                  className={`tab${atRiskOnly ? " active" : ""}`}
+                  aria-pressed={atRiskOnly}
+                  title="Weak, reused, near-identical, self-derived or year-old passwords"
+                  onClick={() => setAtRiskOnly((active) => !active)}
+                >
+                  <IcHealth size={14} /> At risk <span className="faint">{counts.atRisk}</span>
+                </button>
               </div>
 
               <div className="vault-list-controls">
@@ -496,6 +512,8 @@ export function Vault({
                       ? "No items yet"
                       : selectedFolder && folderItems.length === 0
                         ? `No items in ${selectedFolder}`
+                      : atRiskOnly && !query.trim() && tab === "all" && !favoritesOnly
+                        ? "No passwords at risk"
                       : favoritesOnly && !query.trim() && tab === "all"
                         ? "No favorite items"
                         : "No matching items"}
@@ -505,6 +523,8 @@ export function Vault({
                       ? "Create your first item to get started."
                       : selectedFolder && folderItems.length === 0
                         ? "Assign this folder while creating or editing an item."
+                      : atRiskOnly && !query.trim() && tab === "all" && !favoritesOnly
+                        ? "Nothing here is weak, reused or overdue for a change."
                       : favoritesOnly && !query.trim() && tab === "all"
                         ? "Mark an item as a favorite to see it here."
                         : "Try another search or item type."}
@@ -517,6 +537,7 @@ export function Vault({
                         setQuery("");
                         setTab("all");
                         setFavoritesOnly(false);
+                        setAtRiskOnly(false);
                         searchInputRef.current?.focus();
                       }}
                     >
