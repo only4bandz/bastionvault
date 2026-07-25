@@ -71,7 +71,9 @@ describe("versioned account lifecycle client", () => {
           headers: { "content-type": "application/json" },
         });
       }
-      return new Response(null, { status: 204 });
+      return new Response(null, {
+        status: String(input).endsWith("/accounts") ? 201 : 202,
+      });
     });
     globalThis.fetch = fetchMock;
 
@@ -182,6 +184,24 @@ describe("hostile server error handling", () => {
 });
 
 describe("hostile successful response handling", () => {
+  it("accepts only the endpoint's exact success status", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async () =>
+      new Response('{"items":{},"manifest":null,"revision":0}', {
+        status: 206,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    try {
+      await expect(api.getVault("token")).rejects.toMatchObject({
+        status: 206,
+        message: "Server returned an unexpected success status (expected HTTP 200).",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("validates complete Send inbox envelopes before crypto processing", () => {
     const messageId = "AAECAwQFBgcICQoLDA0ODw==";
     const recipientId = "A".repeat(26);
