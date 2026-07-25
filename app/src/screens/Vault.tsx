@@ -20,7 +20,7 @@ import type { Contact } from "../lib/send";
 import type { Blob } from "../lib/api";
 import { filterVaultItems, type VaultSort } from "../lib/vault-search";
 import { copySecretWithFeedback, copyWithFeedback } from "../lib/clipboard";
-import { safeWebsiteUrl } from "../lib/safe-url";
+import { isInsecureWebsiteUrl, safeWebsiteUrl } from "../lib/safe-url";
 import { relativeItemTime } from "../lib/item-time";
 import { Send } from "./Send";
 import { BreachScanner } from "./BreachScanner";
@@ -796,6 +796,7 @@ function ItemDetailView({
         ? [["Cardholder", item.cardholderName, false], ["Number", item.cardNumber, true], ["Expiry", item.cardExp, false], ["CVV", item.cardCvv, true]]
         : [];
   const websiteUrl = safeWebsiteUrl(item.url);
+  const websiteInsecure = isInsecureWebsiteUrl(item.url);
 
   function conceal(key: string): void {
     const timer = concealTimers.current.get(key);
@@ -874,7 +875,17 @@ function ItemDetailView({
             return (
               <div className="row-copy" key={k}>
                 <span className="k">{k}</span>
-                <span className="v mono">{secret && !isRevealed ? "•".repeat(Math.min(14, (v || "").length)) : v}</span>
+                <span className="v mono">
+                  {secret && !isRevealed ? "•".repeat(Math.min(14, (v || "").length)) : v}
+                  {k === "Website" && websiteInsecure && (
+                    <span
+                      className="pill insecure-pill"
+                      title="This site is served over plain HTTP. Anything you type into it — including this password — travels unencrypted."
+                    >
+                      Not secure · HTTP
+                    </span>
+                  )}
+                </span>
                 {secret && (
                   <button
                     className="icon-btn"
