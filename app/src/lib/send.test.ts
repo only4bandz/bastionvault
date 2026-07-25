@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Account } from "./wasm";
-import { openMessage, type Contact } from "./send";
+import { openMessage, requireContactsPayload, type Contact } from "./send";
 
 const contact: Contact = {
   bastion_id: "ALICE",
@@ -38,5 +38,45 @@ describe("Send pinned plaintext release", () => {
         }),
     } as unknown as Account;
     expect(openMessage(account, [contact], {}).plaintext).toBe("verified plaintext");
+  });
+});
+
+describe("encrypted Send contact state", () => {
+  const bastionId = "A".repeat(26);
+  const valid = {
+    bastion_id: bastionId,
+    public: { enc_pub: Array(32).fill(1), sig_pub: Array(32).fill(2), key_version: 1 },
+    pinFp: "ab".repeat(32),
+    display: "Alice",
+    verified: true,
+    verified_at: 1,
+    safety_number: "1".repeat(60),
+  };
+
+  it("accepts only canonical, unique contact records", () => {
+    expect(requireContactsPayload([valid])).toEqual([valid]);
+    expect(requireContactsPayload([{ ...valid, verified: false, verified_at: null }]))
+      .toHaveLength(1);
+  });
+
+  it.each([
+    ["unknown fields", [{ ...valid, extra: true }]],
+    ["invalid address", [{ ...valid, bastion_id: "ALICE" }]],
+    ["invalid public identity", [{ ...valid, public: { ...valid.public, enc_pub: [1] } }]],
+    ["invalid pin", [{ ...valid, pinFp: "fingerprint" }]],
+    ["invalid safety number", [{ ...valid, safety_number: "123" }]],
+    ["unverified timestamp", [{ ...valid, verified: false }]],
+    ["duplicate address", [valid, { ...valid, display: "Duplicate" }]],
+  ])("rejects %s", (_name, value) => {
+    expect(() => requireContactsPayload(value)).toThrow("invalid contacts payload");
+  });
+
+  it("bounds contact count and display size", () => {
+    expect(() => requireContactsPayload(Array(1_001).fill(valid))).toThrow(
+      "invalid contacts payload"
+    );
+    expect(() =>
+      requireContactsPayload([{ ...valid, display: "é".repeat(101) }])
+    ).toThrow("invalid contacts payload");
   });
 });

@@ -35,6 +35,76 @@ export interface SendState {
 }
 
 export type PersistEncryptedItem = (id: string, blob: Blob) => Promise<void>;
+const MAX_CONTACTS = 1_000;
+const MAX_CONTACT_DISPLAY_BYTES = 200;
+const MAX_DATE_MS = 8_640_000_000_000_000;
+
+function exactRecord(value: unknown, keys: string[]): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+  );
+}
+
+function validPublicIdentity(value: unknown): value is SendPublic {
+  return (
+    exactRecord(value, ["enc_pub", "sig_pub", "key_version"]) &&
+    value.key_version === 1 &&
+    Array.isArray(value.enc_pub) &&
+    value.enc_pub.length === 32 &&
+    value.enc_pub.every((byte) => Number.isSafeInteger(byte) && byte >= 0 && byte <= 255) &&
+    Array.isArray(value.sig_pub) &&
+    value.sig_pub.length === 32 &&
+    value.sig_pub.every((byte) => Number.isSafeInteger(byte) && byte >= 0 && byte <= 255)
+  );
+}
+
+export function requireContactsPayload(value: unknown): Contact[] {
+  if (!Array.isArray(value) || value.length > MAX_CONTACTS) {
+    throw new Error("invalid contacts payload");
+  }
+  const ids = new Set<string>();
+  for (const contact of value) {
+    if (
+      !exactRecord(contact, [
+        "bastion_id",
+        "public",
+        "pinFp",
+        "display",
+        "verified",
+        "verified_at",
+        "safety_number",
+      ]) ||
+      typeof contact.bastion_id !== "string" ||
+      !/^[A-Z2-7]{25}[AEIMQUY4]$/.test(contact.bastion_id) ||
+      ids.has(contact.bastion_id) ||
+      !validPublicIdentity(contact.public) ||
+      typeof contact.pinFp !== "string" ||
+      !/^[0-9a-f]{64}$/.test(contact.pinFp) ||
+      typeof contact.display !== "string" ||
+      contact.display.length === 0 ||
+      new TextEncoder().encode(contact.display).byteLength > MAX_CONTACT_DISPLAY_BYTES ||
+      typeof contact.verified !== "boolean" ||
+      (contact.verified_at !== null &&
+        (!Number.isSafeInteger(contact.verified_at) ||
+          (contact.verified_at as number) < 0 ||
+          (contact.verified_at as number) > MAX_DATE_MS)) ||
+      (contact.safety_number !== null &&
+        (typeof contact.safety_number !== "string" ||
+          !/^[0-9]{60}$/.test(contact.safety_number))) ||
+      (contact.verified &&
+        (contact.verified_at === null || contact.safety_number === null)) ||
+      (!contact.verified && contact.verified_at !== null)
+    ) {
+      throw new Error("invalid contacts payload");
+    }
+    ids.add(contact.bastion_id);
+  }
+  return value as Contact[];
+}
 
 /** Whether Send is enabled on this account, and the published Bastion address. */
 export async function sendState(account: Account, token: string): Promise<SendState> {
@@ -95,24 +165,7 @@ export function loadContacts(account: Account, items: Record<string, Blob>): Con
   const blob = items[SEND_CONTACTS_ID];
   if (!blob) return [];
   const contacts: unknown = JSON.parse(account.decrypt_item(JSON.stringify(blob), SEND_CONTACTS_ID));
-  if (
-    !Array.isArray(contacts) ||
-    !contacts.every(
-      (contact) =>
-        contact &&
-        typeof contact === "object" &&
-        typeof (contact as Contact).bastion_id === "string" &&
-        typeof (contact as Contact).public === "object" &&
-        typeof (contact as Contact).pinFp === "string" &&
-        typeof (contact as Contact).display === "string" &&
-        typeof (contact as Contact).verified === "boolean" &&
-        ((contact as Contact).verified_at === null || typeof (contact as Contact).verified_at === "number") &&
-        ((contact as Contact).safety_number === null || typeof (contact as Contact).safety_number === "string")
-    )
-  ) {
-    throw new Error("invalid contacts payload");
-  }
-  return contacts as Contact[];
+  return requireContactsPayload(contacts);
 }
 
 /** Persist the contacts list as the encrypted reserved vault item. */
