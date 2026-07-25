@@ -746,9 +746,11 @@ struct AppState {
 
 struct Inner {
     accounts: HashMap<String, AccountRecord>, // email -> account
-    sessions: HashMap<String, Session>,       // token -> session
-    rate: HashMap<String, RateState>,         // "email:bucket" -> fixed-window counter
-    auth_rate: HashMap<String, RateState>,    // pre-Argon2 account/global counters
+    // Domain-separated token hash -> session. Raw bearer tokens never persist
+    // in server state after the login response is constructed.
+    sessions: HashMap<[u8; 32], Session>,
+    rate: HashMap<String, RateState>, // "email:bucket" -> fixed-window counter
+    auth_rate: HashMap<String, RateState>, // pre-Argon2 account/global counters
 }
 
 /// Fixed-window rate counter.
@@ -2765,15 +2767,15 @@ async fn create_session(
         .iter()
         .filter(|(_, session)| session.email == req.email)
         .min_by_key(|(_, session)| session.created_at)
-        .map(|(token, _)| token.clone());
+        .map(|(token_hash, _)| *token_hash);
     let account_sessions = inner
         .sessions
         .values()
         .filter(|session| session.email == req.email)
         .count();
     if account_sessions >= MAX_SESSIONS_PER_ACCOUNT {
-        if let Some(token) = oldest {
-            inner.sessions.remove(&token);
+        if let Some(token_hash) = oldest {
+            inner.sessions.remove(&token_hash);
         }
     }
     if inner.sessions.len() >= MAX_ACTIVE_SESSIONS {
@@ -2783,11 +2785,13 @@ async fn create_session(
         ));
     }
     let mut token = new_token();
-    while inner.sessions.contains_key(&token) {
+    let mut token_hash = session_token_hash(&token);
+    while inner.sessions.contains_key(&token_hash) {
         token = new_token();
+        token_hash = session_token_hash(&token);
     }
     inner.sessions.insert(
-        token.clone(),
+        token_hash,
         Session {
             email: req.email,
             created_at: now,
@@ -3339,8 +3343,8 @@ async fn delete_session(
     State(st): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
-    let token = bearer_token(&headers)?.to_string();
-    st.write().await.sessions.remove(&token);
+    let token_hash = session_token_hash(bearer_token(&headers)?);
+    st.write().await.sessions.remove(&token_hash);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3361,14 +3365,14 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
 /// Validates the token (existence + non-expiration) and returns the email.
 /// Evicts an expired token along the way.
 async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
-    let token = bearer_token(headers)?.to_string();
+    let token_hash = session_token_hash(bearer_token(headers)?);
     let now = Instant::now();
     // Fast path: a valid, unexpired token needs only a READ lock, so concurrent
     // authenticated requests (every GET /vault, /send/inbox…) don't serialize on
     // the global write lock just to be validated.
     {
         let inner = st.read().await;
-        match inner.sessions.get(&token) {
+        match inner.sessions.get(&token_hash) {
             Some(s) if now < s.expires_at => return Ok(s.email.clone()),
             Some(_) => {} // expired → fall through to evict under the write lock
             None => return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
@@ -3377,10 +3381,10 @@ async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiE
     // Slow path: the token exists but is expired — take the write lock to evict
     // it. Re-check under the lock in case another request already refreshed it.
     let mut inner = st.write().await;
-    match inner.sessions.get(&token) {
+    match inner.sessions.get(&token_hash) {
         Some(s) if now < s.expires_at => Ok(s.email.clone()),
         Some(_) => {
-            inner.sessions.remove(&token);
+            inner.sessions.remove(&token_hash);
             Err(ApiError(StatusCode::UNAUTHORIZED, "session expired"))
         }
         None => Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
@@ -3427,6 +3431,13 @@ fn new_token() -> String {
     let mut bytes = [0u8; SESSION_TOKEN_BYTES];
     OsRng.fill_bytes(&mut bytes);
     data_encoding::HEXLOWER.encode(&bytes)
+}
+
+fn session_token_hash(token: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"bastion-session-token-v1\0");
+    hasher.update(token.as_bytes());
+    hasher.finalize().into()
 }
 
 // ════════════════════════════════════════════════════════════════════════════
