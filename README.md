@@ -221,8 +221,8 @@ bash scripts/verify-production-edge.sh https://vault.example.com
 | `GET` | `/v1/vault` | Encrypted items + manifest + CAS revision (auth) |
 | `GET` | `/v1/vault/revision` | Cheap authenticated freshness probe; changed revisions still require a full verified fetch |
 | `PUT` | `/v1/vault/transaction` | Atomically apply item operations + sealed manifest at an expected revision |
-| `PUT`/`DELETE` | `/v1/vault/items/:id` | Deprecated compatibility endpoint; use `/v1/vault/transaction` |
-| `PUT` | `/v1/vault/manifest` | Deprecated compatibility endpoint; use `/v1/vault/transaction` |
+| `PUT`/`DELETE` | `/v1/vault/items/:id` | Development-only deprecated compatibility endpoint; not registered in production |
+| `PUT` | `/v1/vault/manifest` | Development-only deprecated compatibility endpoint; not registered in production |
 | `PUT` | `/v1/send/identity` | Publish a Send identity once (identical retries allowed) → stable Bastion address |
 | `GET` | `/v1/send/whoami` · `/v1/send/directory/:id` | Your address · resolve a contact (exact-match, rate-limited) |
 | `POST` `/v1/send` · `GET` `/v1/send/inbox` · `DELETE` `/v1/send/inbox/:id` | Validate and deliver / pull / read-once delete an opaque blob (explicit expiry ≤ 7 days) |
