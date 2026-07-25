@@ -1,6 +1,8 @@
 import type { VaultItem } from "./types";
 
 const RANGE_ENDPOINT = "https://api.pwnedpasswords.com/range/";
+export const PWNED_REQUEST_TIMEOUT_MS = 10_000;
+export const MAX_PWNED_RESPONSE_BYTES = 1024 * 1024;
 
 export interface PwnedPasswordFinding {
   item: VaultItem;
@@ -26,6 +28,64 @@ function parseRange(body: string): Map<string, number> {
   return suffixes;
 }
 
+async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
+  const declaredLength = response.headers.get("content-length");
+  if (
+    declaredLength &&
+    /^[0-9]+$/.test(declaredLength) &&
+    BigInt(declaredLength) > BigInt(maxBytes)
+  ) {
+    throw new Error("Breach service response exceeded the safe size limit.");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Breach service returned an unreadable response.");
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytesRead += value.byteLength;
+    if (bytesRead > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error("Breach service response exceeded the safe size limit.");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
+
+export async function fetchPwnedRange(
+  prefix: string,
+  signal?: AbortSignal,
+  timeoutMs: number = PWNED_REQUEST_TIMEOUT_MS,
+  maxBytes: number = MAX_PWNED_RESPONSE_BYTES
+): Promise<Map<string, number>> {
+  const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abortFromCaller();
+  else signal?.addEventListener("abort", abortFromCaller, { once: true });
+  const timeout = setTimeout(
+    () => controller.abort(new DOMException("Breach service request timed out.", "TimeoutError")),
+    timeoutMs
+  );
+  try {
+    const response = await fetch(`${RANGE_ENDPOINT}${prefix}`, {
+      headers: { "Add-Padding": "true" },
+      redirect: "error",
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`Breach service returned HTTP ${response.status}.`);
+    return parseRange(await readBoundedText(response, maxBytes));
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abortFromCaller);
+  }
+}
+
 /**
  * Check one candidate password (e.g. a master password before vault creation)
  * through the same k-anonymous range API. Only the five-character SHA-1 prefix
@@ -37,14 +97,7 @@ export async function checkPwnedPassword(
 ): Promise<number> {
   const hash = await sha1Hex(password);
   const prefix = hash.slice(0, 5);
-  const response = await fetch(`${RANGE_ENDPOINT}${prefix}`, {
-    headers: { "Add-Padding": "true" },
-    credentials: "omit",
-    referrerPolicy: "no-referrer",
-    signal,
-  });
-  if (!response.ok) throw new Error(`Breach service returned HTTP ${response.status}.`);
-  const suffixes = parseRange(await response.text());
+  const suffixes = await fetchPwnedRange(prefix, signal);
   return suffixes.get(hash.slice(5)) ?? 0;
 }
 
@@ -77,14 +130,7 @@ export async function scanPwnedPasswords(
 
   const findings: PwnedPasswordFinding[] = [];
   for (const [prefix, entries] of byPrefix) {
-    const response = await fetch(`${RANGE_ENDPOINT}${prefix}`, {
-      headers: { "Add-Padding": "true" },
-      credentials: "omit",
-      referrerPolicy: "no-referrer",
-      signal,
-    });
-    if (!response.ok) throw new Error(`Breach service returned HTTP ${response.status}.`);
-    const suffixes = parseRange(await response.text());
+    const suffixes = await fetchPwnedRange(prefix, signal);
     for (const entry of entries) {
       const occurrences = suffixes.get(entry.hash.slice(5)) ?? 0;
       if (occurrences === 0) continue;

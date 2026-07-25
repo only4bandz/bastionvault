@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { VaultItem } from "./types";
-import { checkPwnedPassword, scanPwnedPasswords } from "./pwned-passwords";
+import {
+  checkPwnedPassword,
+  fetchPwnedRange,
+  scanPwnedPasswords,
+} from "./pwned-passwords";
 
 const ITEM: VaultItem = {
   id: "login-1",
@@ -21,7 +25,9 @@ describe("Pwned Passwords scanner", () => {
         "https://api.pwnedpasswords.com/range/5BAA6",
         expect.objectContaining({
           credentials: "omit",
+          cache: "no-store",
           headers: { "Add-Padding": "true" },
+          redirect: "error",
           referrerPolicy: "no-referrer",
         })
       );
@@ -43,7 +49,9 @@ describe("Pwned Passwords scanner", () => {
         "https://api.pwnedpasswords.com/range/5BAA6",
         expect.objectContaining({
           credentials: "omit",
+          cache: "no-store",
           headers: { "Add-Padding": "true" },
+          redirect: "error",
           referrerPolicy: "no-referrer",
         })
       );
@@ -70,6 +78,39 @@ describe("Pwned Passwords scanner", () => {
       .mockResolvedValue(new Response("", { status: 503 }));
     try {
       await expect(checkPwnedPassword("password")).rejects.toThrow(/HTTP 503/);
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("rejects an oversized successful response before parsing it", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("x".repeat(128)));
+    try {
+      await expect(fetchPwnedRange("5BAA6", undefined, 1000, 32)).rejects.toThrow(
+        /safe size limit/i
+      );
+    } finally {
+      fetchMock.mockRestore();
+    }
+  });
+
+  it("aborts a breach request at its local deadline", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+      (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason ?? new DOMException("aborted", "AbortError")),
+            { once: true }
+          );
+        })
+    );
+    try {
+      await expect(fetchPwnedRange("5BAA6", undefined, 1, 1024)).rejects.toMatchObject({
+        name: "TimeoutError",
+      });
     } finally {
       fetchMock.mockRestore();
     }
