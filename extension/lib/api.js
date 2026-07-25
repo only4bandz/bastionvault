@@ -46,6 +46,21 @@ export function isJsonMediaType(value) {
   return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }
 
+export function requireSessionTokenResponse(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 1 ||
+    !Object.prototype.hasOwnProperty.call(value, "token") ||
+    typeof value.token !== "string" ||
+    !/^[0-9a-f]{64}$/.test(value.token)
+  ) {
+    throw new ApiError(200, "Server returned an invalid session response.");
+  }
+  return value.token;
+}
+
 /** Reads at most MAX_ERROR_BODY_BYTES of an error body — a hostile server
  * must not be able to balloon the worker's memory with a huge error page. */
 export async function readErrorBody(res) {
@@ -181,7 +196,9 @@ export function makeApi(
   return {
     prelogin: (email) => call("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
     login: (email, auth_secret) =>
-      call("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),
+      call("POST", "/sessions", undefined, { email, auth_secret }).then(
+        requireSessionTokenResponse
+      ),
     logout: (token) => call("DELETE", "/sessions", token, undefined, "empty"),
     deleteAccount: (token, authSecret) =>
       call("DELETE", "/accounts", token, { auth_secret: authSecret }, "empty"),
