@@ -4,6 +4,7 @@
 
 import { initTheme, applyTheme } from "./lib/theme.js";
 import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
+import { staleServerOrigins } from "./lib/permission-policy.js";
 
 const input = document.getElementById("server");
 const saved = document.getElementById("saved");
@@ -36,8 +37,18 @@ document.getElementById("save").addEventListener("click", async () => {
     return;
   }
 
+  const grantedBefore = await chrome.permissions.getAll().catch(() => null);
+  if (!grantedBefore) {
+    permnote.style.color = "var(--danger)";
+    permnote.textContent = "Could not verify the extension's server permissions. Nothing was saved.";
+    return;
+  }
+
   // localhost / 127.0.0.1 are covered by the static host_permissions; any other
   // host needs an explicit grant from the optional permissions.
+  const retainedPattern = server.hasBuiltInPermission ? null : server.permissionPattern;
+  const retainedWasAlreadyGranted =
+    retainedPattern !== null && grantedBefore.origins?.includes(retainedPattern);
   if (!server.hasBuiltInPermission) {
     const granted = await chrome.permissions
       .request({ origins: [server.permissionPattern] })
@@ -45,6 +56,21 @@ document.getElementById("save").addEventListener("click", async () => {
     if (!granted) {
       permnote.style.color = "var(--danger)";
       permnote.textContent = `Permission to reach ${server.permissionPattern} was denied — the extension can't contact that server.`;
+      return;
+    }
+  }
+
+  const staleOrigins = staleServerOrigins(grantedBefore.origins, retainedPattern);
+  if (staleOrigins.length > 0) {
+    const removed = await chrome.permissions
+      .remove({ origins: staleOrigins })
+      .catch(() => false);
+    if (!removed) {
+      if (retainedPattern && !retainedWasAlreadyGranted) {
+        await chrome.permissions.remove({ origins: [retainedPattern] }).catch(() => false);
+      }
+      permnote.style.color = "var(--danger)";
+      permnote.textContent = "Could not revoke access to the previous server. Nothing was saved.";
       return;
     }
   }
