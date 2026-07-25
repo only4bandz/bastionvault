@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ApiError, makeApi } from "../lib/api.js";
+import { ApiError, isJsonMediaType, makeApi } from "../lib/api.js";
 
 test("sends account deletion proof to the canonical v1 endpoint", async () => {
   const originalFetch = globalThis.fetch;
@@ -42,6 +42,34 @@ test("reads the canonical authenticated vault revision probe", async () => {
     assert.deepEqual(head, { revision: 9 });
     assert.equal(request.url, "https://vault.example.com/v1/vault/revision");
     assert.equal(request.options.headers.Authorization, "Bearer token");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("accepts only the exact JSON media type with optional parameters", () => {
+  assert.equal(isJsonMediaType("application/json"), true);
+  assert.equal(isJsonMediaType("Application/JSON; charset=utf-8"), true);
+  assert.equal(isJsonMediaType("text/application/json"), false);
+  assert.equal(isJsonMediaType("application/json-malicious"), false);
+  assert.equal(isJsonMediaType(null), false);
+});
+
+test("fails closed when a JSON endpoint returns another media type", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response('{"revision":9}', {
+      status: 200,
+      headers: { "content-type": "text/plain" },
+    });
+  try {
+    await assert.rejects(
+      makeApi("https://vault.example.com").getVaultRevision("token"),
+      (error) =>
+        error instanceof ApiError &&
+        error.status === 200 &&
+        error.message === "Server returned a non-JSON response."
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
