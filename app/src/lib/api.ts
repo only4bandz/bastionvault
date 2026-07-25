@@ -179,6 +179,42 @@ function exactRecord(value: unknown, keys: string[]): value is Record<string, un
   );
 }
 
+function exactBase64Bytes(value: unknown, decodedBytes: number): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length !== 4 * Math.ceil(decodedBytes / 3) ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+  ) {
+    return false;
+  }
+  try {
+    return atob(value).length === decodedBytes;
+  } catch {
+    return false;
+  }
+}
+
+export function requirePreloginResponse(value: unknown): Prelogin {
+  if (
+    !exactRecord(value, ["salt", "kdf", "wrapped_vault_key"]) ||
+    !exactBase64Bytes(value.salt, 16) ||
+    !exactRecord(value.kdf, ["mem_kib", "iterations", "parallelism"]) ||
+    !Number.isSafeInteger(value.kdf.mem_kib) ||
+    (value.kdf.mem_kib as number) <= 0 ||
+    !Number.isSafeInteger(value.kdf.iterations) ||
+    (value.kdf.iterations as number) <= 0 ||
+    !Number.isSafeInteger(value.kdf.parallelism) ||
+    (value.kdf.parallelism as number) <= 0 ||
+    !exactRecord(value.wrapped_vault_key, ["v", "nonce", "ct"]) ||
+    value.wrapped_vault_key.v !== 1 ||
+    !exactBase64Bytes(value.wrapped_vault_key.nonce, 24) ||
+    !exactBase64Bytes(value.wrapped_vault_key.ct, 48)
+  ) {
+    throw new ApiError(200, "Server returned an invalid prelogin response.");
+  }
+  return value as unknown as Prelogin;
+}
+
 export function requirePublicConfigResponse(value: unknown): PublicConfig {
   if (
     !exactRecord(value, ["email_verification_required"]) ||
@@ -287,7 +323,10 @@ export const api = {
       },
       "empty"
     ),
-  prelogin: (email: string) => req<Prelogin>("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
+  prelogin: (email: string) =>
+    req<unknown>("GET", `/accounts/${encodeURIComponent(email)}/prelogin`).then(
+      requirePreloginResponse
+    ),
   login: (email: string, auth_secret: string) =>
     req<unknown>("POST", "/sessions", undefined, { email, auth_secret }).then(
       requireSessionTokenResponse

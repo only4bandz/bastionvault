@@ -7,6 +7,7 @@ import {
   MAX_SERVER_DETAIL_CHARS,
   readErrorBody,
   readJsonBody,
+  requirePreloginResponse,
   requirePublicConfigResponse,
   requireRevisionResponse,
   requireSessionTokenResponse,
@@ -176,6 +177,32 @@ describe("hostile server error handling", () => {
 });
 
 describe("hostile successful response handling", () => {
+  it("accepts only the canonical prelogin envelope", () => {
+    const prelogin = {
+      salt: "AAECAwQFBgcICQoLDA0ODw==",
+      kdf: { mem_kib: 65_536, iterations: 3, parallelism: 1 },
+      wrapped_vault_key: {
+        v: 1,
+        nonce: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX",
+        ct: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
+      },
+    };
+    expect(requirePreloginResponse(prelogin)).toEqual(prelogin);
+    for (const value of [
+      { ...prelogin, salt: "not-base64" },
+      { ...prelogin, kdf: { ...prelogin.kdf, iterations: 0 } },
+      {
+        ...prelogin,
+        wrapped_vault_key: { ...prelogin.wrapped_vault_key, v: 2 },
+      },
+      { ...prelogin, extra: true },
+    ]) {
+      expect(() => requirePreloginResponse(value)).toThrow(
+        "Server returned an invalid prelogin response."
+      );
+    }
+  });
+
   it("validates configuration, verification, and revision envelopes", () => {
     expect(
       requirePublicConfigResponse({ email_verification_required: true })
