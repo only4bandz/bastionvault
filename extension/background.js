@@ -60,6 +60,11 @@ import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
 import { SIGNING_UNAVAILABLE, senderIdForMode } from "./lib/send-policy.js";
 import { openMessage as openSendMessage } from "./lib/send-open.js";
 import { requireTrustedStorageArea } from "./lib/trusted-storage.js";
+import {
+  CONTENT_SENDER,
+  POPUP_SENDER,
+  classifyMessageSender,
+} from "./lib/message-sender-policy.js";
 
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
@@ -112,8 +117,6 @@ chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch
 // Messages a content script (running on arbitrary web pages) is allowed to send.
 // Everything else (LIST/ITEM/REVEAL/FILL/UNLOCK/LOCK/STATE) is for extension
 // pages only — see the sender check in the message router.
-const EXT_ORIGIN = chrome.runtime.getURL("").replace(/\/$/, "");
-
 // Host of the sender frame (for content-script messages); null for ext pages.
 function hostFromSender(sender) {
   try {
@@ -771,8 +774,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // externally_connectable), but this contains the blast radius if our own
   // content script is ever coerced, and forces content traffic through the
   // host-scoped SUGGEST/CREDS path only.
-  const isExtPage = !!sender?.url && sender.url.startsWith(EXT_ORIGIN);
-  if (!isExtPage && !validContentMessage(msg)) {
+  const senderKind = classifyMessageSender(
+    sender,
+    chrome.runtime.id,
+    chrome.runtime.getURL("popup.html")
+  );
+  const isExtPage = senderKind === POPUP_SENDER;
+  if (
+    (!isExtPage && senderKind !== CONTENT_SENDER) ||
+    (senderKind === CONTENT_SENDER && !validContentMessage(msg))
+  ) {
     sendResponse({ ok: false, error: "forbidden" });
     return false;
   }
