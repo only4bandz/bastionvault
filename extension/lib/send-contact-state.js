@@ -28,6 +28,13 @@ export function requireContactsPayload(value) {
   }
   const ids = new Set();
   for (const contact of value) {
+    const hasLockMetadata =
+      !!contact &&
+      typeof contact === "object" &&
+      !Array.isArray(contact) &&
+      ["lock_enabled", "lock_salt", "lock_kdf"].some((key) =>
+        Object.prototype.hasOwnProperty.call(contact, key)
+      );
     if (
       !exactRecord(contact, [
         "bastion_id",
@@ -37,6 +44,7 @@ export function requireContactsPayload(value) {
         "verified",
         "verified_at",
         "safety_number",
+        ...(hasLockMetadata ? ["lock_enabled", "lock_salt", "lock_kdf"] : []),
       ]) ||
       typeof contact.bastion_id !== "string" ||
       !/^[A-Z2-7]{25}[AEIMQUY4]$/.test(contact.bastion_id) ||
@@ -58,6 +66,24 @@ export function requireContactsPayload(value) {
       (contact.verified &&
         (contact.verified_at === null || contact.safety_number === null)) ||
       (!contact.verified && contact.verified_at !== null)
+    ) {
+      throw new Error("invalid contacts payload");
+    }
+    if (
+      hasLockMetadata &&
+      (contact.lock_enabled !== true ||
+        typeof contact.lock_salt !== "string" ||
+        !/^(?:[A-Za-z0-9+/]{4}){5}[A-Za-z0-9+/][AQgw]==$/.test(contact.lock_salt) ||
+        !exactRecord(contact.lock_kdf, ["mem_kib", "iterations", "parallelism"]) ||
+        !Number.isSafeInteger(contact.lock_kdf.mem_kib) ||
+        contact.lock_kdf.mem_kib < 19 * 1024 ||
+        contact.lock_kdf.mem_kib > 128 * 1024 ||
+        !Number.isSafeInteger(contact.lock_kdf.iterations) ||
+        contact.lock_kdf.iterations < 2 ||
+        contact.lock_kdf.iterations > 6 ||
+        !Number.isSafeInteger(contact.lock_kdf.parallelism) ||
+        contact.lock_kdf.parallelism < 1 ||
+        contact.lock_kdf.parallelism > 4)
     ) {
       throw new Error("invalid contacts payload");
     }

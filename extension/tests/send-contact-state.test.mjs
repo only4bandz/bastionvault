@@ -19,6 +19,17 @@ test("accepts canonical verified and unverified contact state", () => {
     requireContactsPayload([{ ...valid, verified: false, verified_at: null }]).length,
     1
   );
+  assert.equal(
+    requireContactsPayload([
+      {
+        ...valid,
+        lock_enabled: true,
+        lock_salt: "AAECAwQFBgcICQoLDA0ODw==",
+        lock_kdf: { mem_kib: 128 * 1024, iterations: 3, parallelism: 1 },
+      },
+    ]).length,
+    1
+  );
 });
 
 test("rejects malformed, ambiguous, and duplicate contact state", () => {
@@ -32,6 +43,19 @@ test("rejects malformed, ambiguous, and duplicate contact state", () => {
     [valid, { ...valid, display: "Duplicate" }],
     [{ ...valid, display: "é".repeat(101) }],
     Array(1_001).fill(valid),
+    [{ ...valid, lock_enabled: true }],
+    [{
+      ...valid,
+      lock_enabled: true,
+      lock_salt: "AAECAwQFBgcICQoLDA0ODw==",
+      lock_kdf: { mem_kib: 8, iterations: 1, parallelism: 1 },
+    }],
+    [{
+      ...valid,
+      lock_enabled: true,
+      lock_salt: "AAECAwQFBgcICQoLDA0ODw==",
+      lock_kdf: { mem_kib: 128 * 1024 + 1, iterations: 3, parallelism: 1 },
+    }],
   ]) {
     assert.throws(() => requireContactsPayload(value), /invalid contacts payload/);
   }
