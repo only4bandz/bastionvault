@@ -25,6 +25,7 @@ import {
 } from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
 import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.js";
+import { assertUnlockKdfPolicy } from "./lib/kdf-policy.js";
 import { revealFieldValue } from "./lib/reveal-policy.js";
 import { CLIPBOARD_CLEAR_MS } from "./lib/clipboard-clear.js";
 import { validContentMessage } from "./lib/content-message-policy.js";
@@ -591,6 +592,8 @@ async function doUnlock(email, password, secretKey) {
     if (e instanceof ApiError && e.status === 404) throw new Error("No vault found for this email.");
     throw e;
   }
+
+  assertUnlockKdfPolicy(pre.kdf);
 
   // unlock() only needs salt/kdf/wrapped key; the auth secret is re-derived inside.
   const regJson = JSON.stringify({
