@@ -31,6 +31,11 @@ import { validContentMessage } from "./lib/content-message-policy.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
 import {
+  makePendingSave,
+  pendingSaveExpiresAt,
+  pendingSaveIsExpired,
+} from "./lib/pending-save.js";
+import {
   completeBootstrap,
   completeVaultMutation,
   decryptVerifiedVaultState,
@@ -58,6 +63,7 @@ import { requireTrustedStorageArea } from "./lib/trusted-storage.js";
 
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
+const PENDING_SAVE_ALARM = "bastion-pending-save-expiry";
 const SESSION_KEY = "session"; // key in chrome.storage.session
 
 // Reserved id for the encrypted Send identity (must match crypto-wasm
@@ -88,8 +94,6 @@ async function saveContacts(s, contacts = s.contacts || []) {
 function openMessage(s, blob, passphrase) {
   return openSendMessage(s.account, s.contacts || [], blob, passphrase);
 }
-const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
-
 // Every session-storage operation awaits this guard. The session area carries
 // the exported vault key and staged passwords, so an absent or rejected access
 // control API must stop the operation instead of silently widening exposure.
@@ -393,15 +397,16 @@ async function persistSession() {
 let pendingSave = null;
 let lastUser = null; // origin-bound username for multi-step sign-ups
 async function setPending(p) {
-  pendingSave = { ...p, stagedAt: Date.now() };
+  pendingSave = makePendingSave(p);
   const area = await trustedSessionArea();
   await area.set({ pendingSave });
+  chrome.alarms.create(PENDING_SAVE_ALARM, { when: pendingSaveExpiresAt(pendingSave) });
 }
 async function getPending() {
   const area = await trustedSessionArea();
   if (!pendingSave) pendingSave = (await area.get("pendingSave")).pendingSave || null;
   // Expire a staged credential so a plaintext password never lingers.
-  if (pendingSave && Date.now() - (pendingSave.stagedAt || 0) > PENDING_TTL_MS) {
+  if (pendingSaveIsExpired(pendingSave)) {
     await clearPending();
     return null;
   }
@@ -411,6 +416,7 @@ async function clearPending() {
   pendingSave = null;
   const area = await trustedSessionArea();
   await area.remove("pendingSave");
+  await chrome.alarms.clear(PENDING_SAVE_ALARM);
 }
 
 async function setLastUser(username, host) {
@@ -559,6 +565,7 @@ async function ensureSession() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === AUTOLOCK_ALARM) lock();
+  if (alarm.name === PENDING_SAVE_ALARM) clearPending();
 });
 
 // The keep-unlocked window must not outlive the user's presence: when the OS
