@@ -169,6 +169,50 @@ export function requireSessionTokenResponse(value: unknown): string {
   return token;
 }
 
+function exactRecord(value: unknown, keys: string[]): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+  );
+}
+
+export function requirePublicConfigResponse(value: unknown): PublicConfig {
+  if (
+    !exactRecord(value, ["email_verification_required"]) ||
+    typeof value.email_verification_required !== "boolean"
+  ) {
+    throw new ApiError(200, "Server returned an invalid configuration response.");
+  }
+  return { email_verification_required: value.email_verification_required };
+}
+
+export function requireVerificationResponse(value: unknown): { email: string } {
+  if (
+    !exactRecord(value, ["email"]) ||
+    typeof value.email !== "string" ||
+    value.email.length === 0 ||
+    value.email.length > 254
+  ) {
+    throw new ApiError(200, "Server returned an invalid verification response.");
+  }
+  return { email: value.email };
+}
+
+export function requireRevisionResponse(value: unknown): { revision: number } {
+  if (
+    !exactRecord(value, ["revision"]) ||
+    typeof value.revision !== "number" ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0
+  ) {
+    throw new ApiError(200, "Server returned an invalid revision response.");
+  }
+  return { revision: value.revision };
+}
+
 async function req<T>(
   method: string,
   path: string,
@@ -224,11 +268,13 @@ async function req<T>(
 }
 
 export const api = {
-  config: () => req<PublicConfig>("GET", "/config"),
+  config: () => req<unknown>("GET", "/config").then(requirePublicConfigResponse),
   requestRegistrationChallenge: (email: string) =>
     req<void>("POST", "/registration-challenges", undefined, { email }, "empty"),
   verifyRegistrationChallenge: (token: string) =>
-    req<{ email: string }>("POST", "/registration-challenges/verify", undefined, { token }),
+    req<unknown>("POST", "/registration-challenges/verify", undefined, { token }).then(
+      requireVerificationResponse
+    ),
   createAccount: (email: string, registration: Registration, mailboxProof?: string) =>
     req<void>(
       "POST",
@@ -256,11 +302,11 @@ export const api = {
     operations: VaultOperation[],
     manifest: Blob
   ) =>
-    req<{ revision: number }>("PUT", "/vault/transaction", token, {
+    req<unknown>("PUT", "/vault/transaction", token, {
       expected_revision: expectedRevision,
       operations,
       manifest,
-    }),
+    }).then(requireRevisionResponse),
 
   // ── Bastion Send ──
   publishIdentity: (token: string, pub: SendPublic) =>

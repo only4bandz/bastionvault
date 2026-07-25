@@ -7,7 +7,10 @@ import {
   MAX_SERVER_DETAIL_CHARS,
   readErrorBody,
   readJsonBody,
+  requirePublicConfigResponse,
+  requireRevisionResponse,
   requireSessionTokenResponse,
+  requireVerificationResponse,
   SESSION_EXPIRED_EVENT,
   statusMessage,
 } from "./api";
@@ -173,6 +176,29 @@ describe("hostile server error handling", () => {
 });
 
 describe("hostile successful response handling", () => {
+  it("validates configuration, verification, and revision envelopes", () => {
+    expect(
+      requirePublicConfigResponse({ email_verification_required: true })
+    ).toEqual({ email_verification_required: true });
+    expect(requireVerificationResponse({ email: "alice@example.com" })).toEqual({
+      email: "alice@example.com",
+    });
+    expect(requireRevisionResponse({ revision: 7 })).toEqual({ revision: 7 });
+
+    expect(() =>
+      requirePublicConfigResponse({ email_verification_required: "yes" })
+    ).toThrow(/configuration response/);
+    expect(() =>
+      requireVerificationResponse({ email: "", proof: "unexpected" })
+    ).toThrow(/verification response/);
+    expect(() => requireRevisionResponse({ revision: -1 })).toThrow(
+      /revision response/
+    );
+    expect(() =>
+      requireRevisionResponse({ revision: Number.MAX_SAFE_INTEGER + 1 })
+    ).toThrow(/revision response/);
+  });
+
   it("accepts only the canonical session-token envelope", () => {
     const token = "ab".repeat(32);
     expect(requireSessionTokenResponse({ token })).toBe(token);
