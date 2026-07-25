@@ -9,10 +9,13 @@ import {
   readJsonBody,
   requirePreloginResponse,
   requirePublicConfigResponse,
+  requirePublishedIdentityResponse,
   requireRevisionResponse,
+  requireSendPublicResponse,
   requireSessionTokenResponse,
   requireVaultResponse,
   requireVerificationResponse,
+  requireWhoamiResponse,
   SESSION_EXPIRED_EVENT,
   statusMessage,
 } from "./api";
@@ -178,6 +181,38 @@ describe("hostile server error handling", () => {
 });
 
 describe("hostile successful response handling", () => {
+  it("validates every Send identity response envelope", () => {
+    const bastionId = "A".repeat(26);
+    const publicIdentity = {
+      enc_pub: Array(32).fill(1),
+      sig_pub: Array(32).fill(2),
+      key_version: 1,
+    };
+    expect(requireSendPublicResponse(publicIdentity)).toEqual(publicIdentity);
+    expect(requirePublishedIdentityResponse({ bastion_id: bastionId })).toEqual({
+      bastion_id: bastionId,
+    });
+    expect(
+      requireWhoamiResponse({ bastion_id: bastionId, public: publicIdentity })
+    ).toEqual({ bastion_id: bastionId, public: publicIdentity });
+
+    for (const value of [
+      { ...publicIdentity, enc_pub: Array(31).fill(1) },
+      { ...publicIdentity, sig_pub: [...Array(31).fill(2), 256] },
+      { ...publicIdentity, key_version: 2 },
+      { ...publicIdentity, extra: true },
+    ]) {
+      expect(() => requireSendPublicResponse(value)).toThrow(
+        "Server returned an invalid Send identity."
+      );
+    }
+    for (const bastion_id of ["a".repeat(26), `${"A".repeat(25)}B`, "A".repeat(27)]) {
+      expect(() => requirePublishedIdentityResponse({ bastion_id })).toThrow(
+        "Server returned an invalid Send identity response."
+      );
+    }
+  });
+
   it("validates the complete encrypted vault envelope", () => {
     const blob = {
       v: 1,
