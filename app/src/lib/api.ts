@@ -3,7 +3,7 @@
 // encrypted blobs + a hash of the auth secret — never plaintext.
 const BASE = "/api/v1";
 const REQUEST_TIMEOUT_MS = 15_000;
-export const MAX_ERROR_BODY_CHARS = 4096;
+export const MAX_ERROR_BODY_BYTES = 4096;
 export const MAX_SERVER_DETAIL_CHARS = 200;
 export const MAX_SUCCESS_BODY_BYTES = 80 * 1024 * 1024;
 
@@ -78,19 +78,25 @@ export function statusMessage(status: number): string {
 }
 
 /** Bound hostile error bodies before retaining a short diagnostic excerpt. */
-async function readErrorBody(response: Response): Promise<string> {
+export async function readErrorBody(response: Response): Promise<string> {
   try {
     const reader = response.body?.getReader();
-    if (!reader) return ((await response.text()) || "").slice(0, MAX_ERROR_BODY_CHARS);
+    if (!reader) return "";
     const decoder = new TextDecoder();
     let output = "";
-    while (output.length < MAX_ERROR_BODY_CHARS) {
+    let bytesRead = 0;
+    while (bytesRead < MAX_ERROR_BODY_BYTES) {
       const { done, value } = await reader.read();
       if (done) break;
-      output += decoder.decode(value, { stream: true });
+      const remaining = MAX_ERROR_BODY_BYTES - bytesRead;
+      const accepted = value.subarray(0, remaining);
+      bytesRead += accepted.byteLength;
+      output += decoder.decode(accepted, { stream: true });
+      if (accepted.byteLength < value.byteLength) break;
     }
     await reader.cancel().catch(() => undefined);
-    return output.slice(0, MAX_ERROR_BODY_CHARS);
+    output += decoder.decode();
+    return output;
   } catch {
     return "";
   }

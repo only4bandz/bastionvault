@@ -3,7 +3,9 @@ import {
   api,
   ApiError,
   isJsonMediaType,
+  MAX_ERROR_BODY_BYTES,
   MAX_SERVER_DETAIL_CHARS,
+  readErrorBody,
   readJsonBody,
   SESSION_EXPIRED_EVENT,
   statusMessage,
@@ -148,6 +150,13 @@ describe("hostile server error handling", () => {
     const error = await captureApiError(api.prelogin("a@b.c"));
     expect(error.message).toBe("The server hit an internal error.");
     expect(error.serverDetail).toHaveLength(MAX_SERVER_DETAIL_CHARS);
+  });
+
+  it("caps hostile multibyte diagnostics by encoded bytes", async () => {
+    const detail = await readErrorBody(new Response("é".repeat(10_000), { status: 503 }));
+    expect(new TextEncoder().encode(detail).byteLength).toBeLessThanOrEqual(
+      MAX_ERROR_BODY_BYTES
+    );
   });
 
   it("maps status classes to deterministic local copy", () => {
