@@ -18,6 +18,8 @@ export class ApiError extends Error {
 export const MAX_ERROR_BODY_CHARS = 4096;
 /** How much raw server text is kept on the error, for debugging only. */
 export const MAX_SERVER_DETAIL_CHARS = 200;
+/** Maximum successful JSON response accepted from the sync server (80 MiB). */
+export const MAX_SUCCESS_BODY_BYTES = 80 * 1024 * 1024;
 
 /**
  * Fixed, local message per status class. The server's response body is
@@ -60,7 +62,41 @@ async function readErrorBody(res) {
   }
 }
 
-async function req(base, method, path, token, body, timeoutMs) {
+async function readJsonBody(res, maxBytes) {
+  const declaredLength = res.headers.get("content-length");
+  if (
+    declaredLength &&
+    /^[0-9]+$/.test(declaredLength) &&
+    BigInt(declaredLength) > BigInt(maxBytes)
+  ) {
+    throw new ApiError(res.status, "Server response exceeded the safe size limit.");
+  }
+  const reader = res.body?.getReader?.();
+  if (!reader) {
+    throw new ApiError(res.status, "Server returned an unreadable JSON response.");
+  }
+  const decoder = new TextDecoder();
+  let bytesRead = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytesRead += value.byteLength;
+    if (bytesRead > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new ApiError(res.status, "Server response exceeded the safe size limit.");
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  text += decoder.decode();
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new ApiError(res.status, "Server returned invalid JSON.");
+  }
+}
+
+async function req(base, method, path, token, body, timeoutMs, maxResponseBytes) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -90,11 +126,7 @@ async function req(base, method, path, token, body, timeoutMs) {
     }
     const ct = res.headers.get("content-type") || "";
     if (!ct.includes("application/json")) return undefined;
-    try {
-      return await res.json();
-    } catch {
-      throw new ApiError(res.status, "Server returned invalid JSON.");
-    }
+    return await readJsonBody(res, maxResponseBytes);
   } catch (error) {
     if (controller.signal.aborted) {
       throw new ApiError(0, "Server request timed out. The result is unknown; refresh before retrying.");
@@ -110,9 +142,12 @@ async function req(base, method, path, token, body, timeoutMs) {
 }
 
 /** Build an API bound to a given server base URL (e.g. http://127.0.0.1:7777). */
-export function makeApi(base, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
+export function makeApi(
+  base,
+  { timeoutMs = REQUEST_TIMEOUT_MS, maxResponseBytes = MAX_SUCCESS_BODY_BYTES } = {}
+) {
   const call = (method, path, token, body) =>
-    req(base, method, API_PREFIX + path, token, body, timeoutMs);
+    req(base, method, API_PREFIX + path, token, body, timeoutMs, maxResponseBytes);
   return {
     prelogin: (email) => call("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
     login: (email, auth_secret) =>
