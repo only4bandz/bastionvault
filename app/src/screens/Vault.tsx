@@ -824,14 +824,26 @@ function ItemDetailView({
     concealTimers.current.set(key, window.setTimeout(() => conceal(key), SECRET_REVEAL_MS));
   }
 
+  // Concealing is not locking. App.tsx deliberately refuses to auto-lock on
+  // window `blur` because that event fires for the address bar, extensions,
+  // autofill and screenshot tools — locking there would evict the user
+  // constantly. Re-hiding an on-screen secret costs one click to undo, so the
+  // same event is worth acting on here: the moment this window stops being
+  // the focused one, a shoulder-surfer, a screen recorder or a screen share
+  // of the *other* window can still be pointed at this one.
   useEffect(() => {
     const timers = concealTimers.current;
     const onVisibilityChange = (): void => {
       if (document.visibilityState === "hidden") concealAll();
     };
+    const onWindowBlur = (): void => concealAll();
     document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("blur", onWindowBlur);
+    window.addEventListener("pagehide", onWindowBlur);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("pagehide", onWindowBlur);
       timers.forEach((timer) => window.clearTimeout(timer));
       timers.clear();
     };
