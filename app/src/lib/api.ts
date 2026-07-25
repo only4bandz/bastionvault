@@ -152,6 +152,23 @@ export function isJsonMediaType(value: string | null): boolean {
   return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }
 
+export function requireSessionTokenResponse(value: unknown): string {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 1 ||
+    !Object.prototype.hasOwnProperty.call(value, "token")
+  ) {
+    throw new ApiError(200, "Server returned an invalid session response.");
+  }
+  const token = (value as { token?: unknown }).token;
+  if (typeof token !== "string" || !/^[0-9a-f]{64}$/.test(token)) {
+    throw new ApiError(200, "Server returned an invalid session response.");
+  }
+  return token;
+}
+
 async function req<T>(
   method: string,
   path: string,
@@ -226,7 +243,9 @@ export const api = {
     ),
   prelogin: (email: string) => req<Prelogin>("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
   login: (email: string, auth_secret: string) =>
-    req<{ token: string }>("POST", "/sessions", undefined, { email, auth_secret }).then((r) => r.token),
+    req<unknown>("POST", "/sessions", undefined, { email, auth_secret }).then(
+      requireSessionTokenResponse
+    ),
   logout: (token: string) => req<void>("DELETE", "/sessions", token, undefined, "empty"),
   deleteAccount: (token: string, auth_secret: string) =>
     req<void>("DELETE", "/accounts", token, { auth_secret }, "empty"),
