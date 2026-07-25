@@ -8,10 +8,47 @@ import {
   MAX_ERROR_BODY_BYTES,
   readErrorBody,
   requirePreloginResponse,
+  requirePublishedIdentityResponse,
   requireRevisionResponse,
+  requireSendPublicResponse,
   requireSessionTokenResponse,
   requireVaultResponse,
+  requireWhoamiResponse,
 } from "../lib/api.js";
+
+test("validates every Send identity response envelope", () => {
+  const bastionId = "A".repeat(26);
+  const publicIdentity = {
+    enc_pub: Array(32).fill(1),
+    sig_pub: Array(32).fill(2),
+    key_version: 1,
+  };
+  assert.deepEqual(requireSendPublicResponse(publicIdentity), publicIdentity);
+  assert.deepEqual(requirePublishedIdentityResponse({ bastion_id: bastionId }), {
+    bastion_id: bastionId,
+  });
+  assert.deepEqual(
+    requireWhoamiResponse({ bastion_id: bastionId, public: publicIdentity }),
+    { bastion_id: bastionId, public: publicIdentity }
+  );
+  for (const value of [
+    { ...publicIdentity, enc_pub: Array(33).fill(1) },
+    { ...publicIdentity, sig_pub: [...Array(31).fill(2), -1] },
+    { ...publicIdentity, key_version: 0 },
+    { ...publicIdentity, extra: true },
+  ]) {
+    assert.throws(
+      () => requireSendPublicResponse(value),
+      /invalid Send identity/
+    );
+  }
+  for (const bastion_id of ["a".repeat(26), `${"A".repeat(25)}B`, "A".repeat(25)]) {
+    assert.throws(
+      () => requirePublishedIdentityResponse({ bastion_id }),
+      /invalid Send identity response/
+    );
+  }
+});
 
 test("validates the complete encrypted vault envelope", () => {
   const blob = {
