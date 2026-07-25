@@ -7,9 +7,37 @@ import {
   makeApi,
   MAX_ERROR_BODY_BYTES,
   readErrorBody,
+  requirePreloginResponse,
   requireRevisionResponse,
   requireSessionTokenResponse,
 } from "../lib/api.js";
+
+test("accepts only the canonical prelogin envelope", () => {
+  const prelogin = {
+    salt: "AAECAwQFBgcICQoLDA0ODw==",
+    kdf: { mem_kib: 65_536, iterations: 3, parallelism: 1 },
+    wrapped_vault_key: {
+      v: 1,
+      nonce: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX",
+      ct: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
+    },
+  };
+  assert.deepEqual(requirePreloginResponse(prelogin), prelogin);
+  for (const value of [
+    { ...prelogin, salt: "not-base64" },
+    { ...prelogin, kdf: { ...prelogin.kdf, mem_kib: 0 } },
+    {
+      ...prelogin,
+      wrapped_vault_key: { ...prelogin.wrapped_vault_key, nonce: "short" },
+    },
+    { ...prelogin, extra: true },
+  ]) {
+    assert.throws(
+      () => requirePreloginResponse(value),
+      /invalid prelogin response/
+    );
+  }
+});
 
 test("sends account deletion proof to the canonical v1 endpoint", async () => {
   const originalFetch = globalThis.fetch;
