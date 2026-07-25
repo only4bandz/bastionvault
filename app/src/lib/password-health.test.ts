@@ -5,6 +5,7 @@ import {
   assessPassword,
   identityDerivedToken,
   passwordStem,
+  riskLabels,
 } from "./password-health";
 
 const login = (id: string, title: string, password?: string): VaultItem => ({
@@ -259,5 +260,49 @@ describe("keyboard-walk detection", () => {
     const assessment = assessPassword("qwertyui");
     expect(assessment.reasons).toContain("Predictable sequence");
     expect(assessment.reasons).not.toContain("Keyboard pattern");
+  });
+});
+
+describe("riskLabels", () => {
+  const NOW = 1_800_000_000_000;
+  const YEAR = 366 * 24 * 60 * 60 * 1000;
+
+  it("labels each finding and reports the most severe one per item", () => {
+    const items: VaultItem[] = [
+      // Weak *and* reused: weak wins, it is cheaper to exploit.
+      login("weak-a", "Alpha", "P@ssw0rd123!"),
+      login("weak-b", "Beta", "P@ssw0rd123!"),
+      // Reused but strong.
+      login("reused-a", "Charlie", "V7!kQ2#pL9@xR4$m"),
+      login("reused-b", "Delta", "V7!kQ2#pL9@xR4$m"),
+      // Near-identical pair.
+      login("variant-a", "Echo", "Xq7vPzRtKm1"),
+      login("variant-b", "Foxtrot", "xq7vpzrtkm2!"),
+      // Strong, unique, but built from the title.
+      login("identity", "Zanzibar", "zanzibar-Nq8!vT3z"),
+      // Strong, unique, unrelated — only old.
+      { ...login("old", "Golf", "N8@vT3!sW6#qY2%h"), passwordChangedAt: NOW - YEAR },
+      // Clean.
+      { ...login("clean", "Hotel", "W4#nR8!zK2@yD6%b"), passwordChangedAt: NOW },
+    ];
+    const labels = riskLabels(analyzePasswordHealth(items, NOW));
+
+    expect(Object.fromEntries(labels)).toEqual({
+      "weak-a": "Weak",
+      "weak-b": "Weak",
+      "reused-a": "Reused",
+      "reused-b": "Reused",
+      "variant-a": "Near-identical",
+      "variant-b": "Near-identical",
+      identity: "Self-derived",
+      old: "Old",
+    });
+    expect(labels.has("clean")).toBe(false);
+  });
+
+  it("is empty for a healthy vault", () => {
+    const fresh = { ...login("a", "Alpha", "V7!kQ2#pL9@xR4$m"), passwordChangedAt: NOW };
+    const analysis = analyzePasswordHealth([fresh], NOW);
+    expect(riskLabels(analysis).size).toBe(0);
   });
 });

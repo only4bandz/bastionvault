@@ -11,7 +11,7 @@ import {
   IcDownload, IcExternal, IcLock, IcMask, IcMenu, IcNote, IcPlus, IcSearch, IcShared, IcStar, IcTrash, IcUpload, IcVault, IcX,
 } from "../components/icons";
 import { TYPE_LABEL, type ItemType, type VaultItem } from "../lib/types";
-import { analyzePasswordHealth, passwordAgeReference } from "../lib/password-health";
+import { analyzePasswordHealth, passwordAgeReference, riskLabels } from "../lib/password-health";
 import { downloadCsv, exportFilename, itemsToCsv } from "../lib/export";
 import { lookupBin } from "../lib/bin";
 import type { ImportOutcome, ImportProgress, ImportResult } from "../lib/import";
@@ -143,6 +143,17 @@ export function Vault({
   const filtered = useMemo(
     () => filterVaultItems(folderItems, tab, query, favoritesOnly, sort),
     [favoritesOnly, folderItems, query, sort, tab]
+  );
+
+  // Health findings, surfaced as a per-row badge so a weak or reused password
+  // is visible where the user already is instead of only on a page they have
+  // to remember to visit. Bucketed to the hour: the only clock-dependent input
+  // is the one-year age threshold, so re-running this on every `now` tick
+  // (once a minute) would rescan the whole vault to change nothing.
+  const healthHour = Math.floor(now / 3_600_000);
+  const risks = useMemo(
+    () => riskLabels(analyzePasswordHealth(activeItems, healthHour * 3_600_000)),
+    [activeItems, healthHour]
   );
 
   // Paginate so a 270-item vault doesn't scroll forever.
@@ -534,6 +545,9 @@ export function Vault({
                                 <CardSubtitle item={i} />
                               ) : (
                                 TYPE_LABEL[i.type]
+                              )}
+                              {risks.has(i.id) && (
+                                <span className="risk-badge">{risks.get(i.id)}</span>
                               )}
                             </span>
                           </span>

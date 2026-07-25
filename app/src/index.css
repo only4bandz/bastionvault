@@ -304,6 +304,22 @@ select.input option { background: var(--surface-2); color: var(--text); }
 .row-copy .v { flex: 1; font-size: 14px; word-break: break-all; }
 .health-row { width: 100%; background: none; color: inherit; text-align: left; border-top: 0; border-right: 0; border-left: 0; }
 .health-row:hover { background: var(--surface-2); }
+/* Password-health finding on a vault row. Sits in the subtitle line, so it
+   must not push the username out of its ellipsis. */
+.risk-badge {
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 20px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  color: var(--warn);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .03em;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
 /* Cleartext-HTTP warning next to a saved website. Uses the danger colour on a
    translucent fill so it reads as a warning, not as neutral metadata. */
 .insecure-pill {

@@ -125,6 +125,24 @@ describe("Vault dashboard accessibility", () => {
     expect(screen.queryByText("Not secure · HTTP")).not.toBeInTheDocument();
   });
 
+  it("badges at-risk rows in the vault list and leaves healthy rows clean", () => {
+    renderVault([
+      { ...LOGIN, id: "weak", title: "Weak site", password: "P@ssw0rd123!" },
+      { ...LOGIN, id: "strong", title: "Strong site", password: "V7!kQ2#pL9@xR4$m" },
+      { ...CARD, id: "card", title: "Operations card" },
+    ]);
+
+    const rows = screen.getAllByRole("button", { name: /^Open / });
+    expect(rows.find((row) => row.textContent?.includes("Weak site"))).toHaveTextContent("Weak");
+    expect(
+      rows.find((row) => row.textContent?.includes("Strong site"))
+    ).not.toHaveTextContent("Weak");
+    // Cards carry no password, so they are never badged.
+    expect(rows.find((row) => row.textContent?.includes("Operations card"))).not.toHaveTextContent(
+      /Weak|Reused|Old/
+    );
+  });
+
   it("announces only transaction-backed sync states", () => {
     renderVault([], "saving");
     expect(screen.getByRole("status")).toHaveTextContent("Saving…");
