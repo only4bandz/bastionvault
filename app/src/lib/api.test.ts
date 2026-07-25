@@ -7,6 +7,7 @@ import {
   MAX_SERVER_DETAIL_CHARS,
   readErrorBody,
   readJsonBody,
+  requireInboxResponse,
   requirePreloginResponse,
   requirePublicConfigResponse,
   requirePublishedIdentityResponse,
@@ -181,6 +182,46 @@ describe("hostile server error handling", () => {
 });
 
 describe("hostile successful response handling", () => {
+  it("validates complete Send inbox envelopes before crypto processing", () => {
+    const messageId = "AAECAwQFBgcICQoLDA0ODw==";
+    const recipientId = "A".repeat(26);
+    const nonce = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX";
+    const key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    const wrapped = {
+      v: 1,
+      nonce,
+      ct: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v",
+    };
+    const body = { v: 1, nonce, ct: "AAECAwQFBgcICQoLDA0ODw==" };
+    const blob = {
+      v: 1,
+      type: "send",
+      message_id: messageId,
+      recipient_id: recipientId,
+      recipient_enc_pub: key,
+      recipient_key_version: 1,
+      eph_pub: key,
+      wrapped_cek: wrapped,
+      cek_commit: key,
+      body,
+    };
+    const inbox = [
+      { message_id: messageId, blob, created_at: 100, expires_at: 200 },
+    ];
+    expect(requireInboxResponse(inbox)).toEqual(inbox);
+    for (const value of [
+      [{ ...inbox[0], message_id: "not-base64" }],
+      [{ ...inbox[0], expires_at: 100 }],
+      [{ ...inbox[0], blob: { ...blob, message_id: "AAAAAAAAAAAAAAAAAAAAAA==" } }],
+      [{ ...inbox[0], blob: { ...blob, wrapped_cek: body } }],
+      [{ ...inbox[0], extra: true }],
+    ]) {
+      expect(() => requireInboxResponse(value)).toThrow(
+        "Server returned an invalid Send inbox response."
+      );
+    }
+  });
+
   it("validates every Send identity response envelope", () => {
     const bastionId = "A".repeat(26);
     const publicIdentity = {
