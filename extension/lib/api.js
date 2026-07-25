@@ -46,6 +46,52 @@ export function isJsonMediaType(value) {
   return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }
 
+function exactRecord(value, keys) {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+  );
+}
+
+function exactBase64Bytes(value, decodedBytes) {
+  if (
+    typeof value !== "string" ||
+    value.length !== 4 * Math.ceil(decodedBytes / 3) ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
+  ) {
+    return false;
+  }
+  try {
+    return atob(value).length === decodedBytes;
+  } catch {
+    return false;
+  }
+}
+
+export function requirePreloginResponse(value) {
+  if (
+    !exactRecord(value, ["salt", "kdf", "wrapped_vault_key"]) ||
+    !exactBase64Bytes(value.salt, 16) ||
+    !exactRecord(value.kdf, ["mem_kib", "iterations", "parallelism"]) ||
+    !Number.isSafeInteger(value.kdf.mem_kib) ||
+    value.kdf.mem_kib <= 0 ||
+    !Number.isSafeInteger(value.kdf.iterations) ||
+    value.kdf.iterations <= 0 ||
+    !Number.isSafeInteger(value.kdf.parallelism) ||
+    value.kdf.parallelism <= 0 ||
+    !exactRecord(value.wrapped_vault_key, ["v", "nonce", "ct"]) ||
+    value.wrapped_vault_key.v !== 1 ||
+    !exactBase64Bytes(value.wrapped_vault_key.nonce, 24) ||
+    !exactBase64Bytes(value.wrapped_vault_key.ct, 48)
+  ) {
+    throw new ApiError(200, "Server returned an invalid prelogin response.");
+  }
+  return value;
+}
+
 export function requireSessionTokenResponse(value) {
   if (
     !value ||
@@ -209,7 +255,10 @@ export function makeApi(
       responseKind
     );
   return {
-    prelogin: (email) => call("GET", `/accounts/${encodeURIComponent(email)}/prelogin`),
+    prelogin: (email) =>
+      call("GET", `/accounts/${encodeURIComponent(email)}/prelogin`).then(
+        requirePreloginResponse
+      ),
     login: (email, auth_secret) =>
       call("POST", "/sessions", undefined, { email, auth_secret }).then(
         requireSessionTokenResponse
