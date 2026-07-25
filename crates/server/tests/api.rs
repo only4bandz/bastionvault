@@ -2829,3 +2829,37 @@ async fn request_bodies_reject_unknown_fields() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 }
+
+#[tokio::test]
+async fn rate_limits_vault_transactions_before_large_body_extraction() {
+    let app = server::app_in_memory();
+    let token = signup_login(&app, "vault-write-limit@example.com").await;
+
+    // Authentication middleware owns the enlarged transaction body boundary.
+    // Even malformed requests consume the per-account write budget before
+    // Axum allocates or deserializes that route-specific body.
+    for attempt in 0..120 {
+        let (status, _) = send(
+            &app,
+            "PUT",
+            "/vault/transaction",
+            Some(&token),
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "attempt {attempt}"
+        );
+    }
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/transaction",
+        Some(&token),
+        Some(json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
