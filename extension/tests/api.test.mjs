@@ -7,6 +7,7 @@ import {
   makeApi,
   MAX_ERROR_BODY_BYTES,
   readErrorBody,
+  requireSessionTokenResponse,
 } from "../lib/api.js";
 
 test("sends account deletion proof to the canonical v1 endpoint", async () => {
@@ -75,6 +76,43 @@ test("fails closed when a JSON endpoint returns another media type", async () =>
         error instanceof ApiError &&
         error.status === 200 &&
         error.message === "Server returned a non-JSON response."
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("accepts only the canonical session-token envelope", () => {
+  const token = "ab".repeat(32);
+  assert.equal(requireSessionTokenResponse({ token }), token);
+  for (const value of [
+    { token: token.toUpperCase() },
+    { token: `${token}00` },
+    { token, extra: true },
+    { token: 7 },
+    null,
+  ]) {
+    assert.throws(
+      () => requireSessionTokenResponse(value),
+      /invalid session response/
+    );
+  }
+});
+
+test("rejects a malformed successful login before exposing a bearer token", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response('{"token":"attacker-controlled"}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  try {
+    await assert.rejects(
+      makeApi("https://vault.example.com").login("a@b.c", "derived-secret"),
+      (error) =>
+        error instanceof ApiError &&
+        error.status === 200 &&
+        error.message === "Server returned an invalid session response."
     );
   } finally {
     globalThis.fetch = originalFetch;
