@@ -489,6 +489,10 @@ fn build_with_rate_limits(
     auth_limit: usize,
     options: RuntimeOptions,
 ) -> Router {
+    // The compatibility routes mutate ciphertext and its manifest separately.
+    // Keep them available to development clients, but do not expose a
+    // non-atomic vault write path once the production transport contract is on.
+    let allow_deprecated_vault_mutations = options.transport.is_none();
     let state = AppState::new(token_ttl, db_path, auth_limit, options);
     let transaction_route = put(apply_vault_transaction)
         .layer(DefaultBodyLimit::max(MAX_VAULT_TRANSACTION_BODY_BYTES))
@@ -510,8 +514,6 @@ fn build_with_rate_limits(
         .route("/sessions", post(create_session).delete(delete_session))
         .route("/vault", get(get_vault))
         .route("/vault/revision", get(get_vault_revision))
-        .route("/vault/items/:id", put(put_item).delete(delete_item))
-        .route("/vault/manifest", put(put_manifest))
         .route("/vault/transaction", transaction_route)
         // ── Bastion Send ──
         .route("/send/identity", put(publish_identity))
@@ -527,6 +529,13 @@ fn build_with_rate_limits(
             state.clone(),
             storage_availability_gate,
         ));
+    let protected_routes = if allow_deprecated_vault_mutations {
+        protected_routes
+            .route("/vault/items/:id", put(put_item).delete(delete_item))
+            .route("/vault/manifest", put(put_manifest))
+    } else {
+        protected_routes
+    };
     let routes = Router::new()
         .route("/config", get(public_config))
         .route("/health", get(health))
@@ -4427,6 +4436,57 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn production_exposes_only_atomic_vault_mutations() {
+        let app = build_with_transport(
+            DEFAULT_TOKEN_TTL,
+            ":memory:",
+            MAX_CONCURRENT_AUTH,
+            Some(TransportPolicy::parse("https://vault.example.com").unwrap()),
+            None,
+        );
+
+        for path in [
+            "/vault/items/item-9",
+            "/v1/vault/items/item-9",
+            "/vault/manifest",
+            "/v1/vault/manifest",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("PUT")
+                        .uri(path)
+                        .header(header::HOST, "vault.example.com")
+                        .header(FORWARDED_PROTO_HEADER, "https")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "deprecated mutation route remained registered at {path}"
+            );
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/v1/vault/transaction")
+                    .header(header::HOST, "vault.example.com")
+                    .header(FORWARDED_PROTO_HEADER, "https")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test(flavor = "current_thread")]
