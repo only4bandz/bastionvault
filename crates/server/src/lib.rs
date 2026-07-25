@@ -2152,10 +2152,7 @@ impl Db {
                 let (email, id, blob_s) = row?;
                 let blob = serde_json::from_str(&blob_s)?;
                 let acc = accounts.get_mut(&email).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("orphaned item {id:?} for account {email:?}"),
-                    )
+                    io::Error::new(io::ErrorKind::InvalidData, "orphaned persisted vault item")
                 })?;
                 if !is_valid_item_id(&id)
                     || blob_s.len() > MAX_VAULT_BLOB_BYTES
@@ -2167,7 +2164,7 @@ impl Db {
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("vault quota exceeded for account {email:?}"),
+                        "persisted vault item violates storage limits",
                     )
                     .into());
                 }
@@ -2186,7 +2183,7 @@ impl Db {
                 let acc = accounts.get_mut(&email).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("orphaned manifest for account {email:?}"),
+                        "orphaned persisted vault manifest",
                     )
                 })?;
                 if blob_s.len() > MAX_VAULT_MANIFEST_BYTES
@@ -2197,7 +2194,7 @@ impl Db {
                 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("vault quota exceeded for account {email:?}"),
+                        "persisted vault manifest violates storage limits",
                     )
                     .into());
                 }
@@ -3340,7 +3337,7 @@ fn validate_persisted_credentials(
     if !valid {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("invalid persisted credentials for account {email:?}"),
+            "invalid persisted account credentials",
         ));
     }
     Ok(())
@@ -4554,5 +4551,28 @@ mod tests {
             "/v1/{unmatched}"
         );
         assert_eq!(redacted_path("/v1evil/token"), "/{unmatched}");
+    }
+
+    #[test]
+    fn persistence_validation_errors_do_not_disclose_account_ids() {
+        let sensitive_account = "customer+incident@example.com";
+        let error = validate_persisted_credentials(
+            sensitive_account,
+            "invalid",
+            KdfParams {
+                mem_kib: 0,
+                iterations: 0,
+                parallelism: 0,
+            },
+            &EncryptedBlob {
+                v: 0,
+                nonce: String::new(),
+                ct: String::new(),
+            },
+            "invalid",
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "invalid persisted account credentials");
+        assert!(!error.to_string().contains(sensitive_account));
     }
 }
