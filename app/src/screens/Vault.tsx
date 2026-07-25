@@ -991,11 +991,11 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
           </div>
         )}
         <div className="faint" style={{ marginTop: 10, fontSize: 13 }}>
-          {analysis.assessedCount}/{analysis.loginCount} login passwords assessed · {analysis.weakItems.length} weak · {analysis.reusedGroups.length} reused {analysis.reusedGroups.length === 1 ? "group" : "groups"} · {analysis.identityItems.length} self-derived · {analysis.oldItems.length} old
+          {analysis.assessedCount}/{analysis.loginCount} login passwords assessed · {analysis.weakItems.length} weak · {analysis.reusedGroups.length} reused {analysis.reusedGroups.length === 1 ? "group" : "groups"} · {analysis.variantGroups.length} near-identical · {analysis.identityItems.length} self-derived · {analysis.oldItems.length} old
         </div>
         <div className="faint" style={{ marginTop: 6, fontSize: 12 }}>
-          Offline analysis only: length, character variety, obvious patterns, exact reuse, and
-          reuse of the entry's own username, website or title.
+          Offline analysis only: length, character variety, obvious patterns, exact and
+          near-identical reuse, and reuse of the entry's own username, website or title.
         </div>
       </div>
       <WeakSection />
@@ -1008,6 +1008,27 @@ function Health({ items, onOpen }: { items: VaultItem[]; onOpen: (i: VaultItem) 
             <div className="reuse-group" key={group.items.map((item) => item.id).join(":")}>
               <div className="faint reuse-group-title">
                 Group {index + 1} · {group.items.length} accounts
+              </div>
+              {group.items.map((item) => (
+                <Finding key={item.id} item={item} detail={item.username || "No username"} />
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {analysis.variantGroups.length > 0 && (
+        <div className="card-section" style={{ maxWidth: 640, marginBottom: 16 }}>
+          <div className="health-section-title" style={{ color: "var(--warn)" }}>
+            Near-identical password groups · {analysis.variantGroups.length}
+          </div>
+          <div className="faint" style={{ marginBottom: 8, fontSize: 12 }}>
+            These differ only by case, spacing, or a trailing number — cracking one gives away
+            the rest.
+          </div>
+          {analysis.variantGroups.map((group, index) => (
+            <div className="reuse-group" key={group.items.map((item) => item.id).join(":")}>
+              <div className="faint reuse-group-title">
+                Variant group {index + 1} · {group.items.length} accounts
               </div>
               {group.items.map((item) => (
                 <Finding key={item.id} item={item} detail={item.username || "No username"} />

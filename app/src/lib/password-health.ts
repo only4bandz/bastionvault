@@ -43,6 +43,31 @@ export interface ReusedPasswordGroup {
   items: VaultItem[];
 }
 
+/**
+ * Shared stem behind a set of near-identical passwords, or null when the
+ * password has no stem worth grouping on.
+ *
+ * `Hunter2`, `hunter3!` and ` HUNTER_2024 ` are one password to an attacker
+ * who has cracked any one of them: the increment is the first thing a targeted
+ * guess list tries. Exact-match reuse detection sees three unrelated strings.
+ *
+ * The stem is deliberately conservative — case-folded, unicode-normalized,
+ * trimmed, with only a *trailing* run of digits and punctuation removed. It
+ * never touches the interior of the password, so unrelated random values do
+ * not collide.
+ */
+export function passwordStem(password: string): string | null {
+  const stem = password
+    .normalize("NFKC")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\p{P}\p{S}\d]+$/u, "");
+  return stem.length >= MIN_STEM_LENGTH ? stem : null;
+}
+
+/** Below this a stem is too generic to be evidence of anything. */
+const MIN_STEM_LENGTH = 4;
+
 /** An item whose own password is derived from its own visible identity. */
 export interface IdentityDerivedFinding {
   item: VaultItem;
@@ -134,6 +159,13 @@ export interface PasswordHealthAnalysis {
   weakItems: VaultItem[];
   reusedItems: VaultItem[];
   reusedGroups: ReusedPasswordGroup[];
+  /**
+   * Groups sharing a stem but not an exact password — the increment pattern
+   * (`hunter2` / `hunter3`). Never overlaps `reusedGroups`, which already
+   * reports the exact-match case.
+   */
+  variantGroups: ReusedPasswordGroup[];
+  variantItems: VaultItem[];
   identityItems: IdentityDerivedFinding[];
   oldItems: VaultItem[];
   atRiskItems: VaultItem[];
@@ -256,6 +288,23 @@ export function analyzePasswordHealth(items: VaultItem[], now?: number): Passwor
     .sort((left, right) => compareItems(left.items[0], right.items[0]));
   const reusedIds = new Set(reusedGroups.flatMap((group) => group.items.map((item) => item.id)));
   const reusedItems = assessed.filter((item) => reusedIds.has(item.id));
+  // Stem grouping, minus the groups whose members all share one exact
+  // password — those are already reported as exact reuse.
+  const byStem = new Map<string, VaultItem[]>();
+  assessed.forEach((item) => {
+    const stem = passwordStem(item.password!);
+    if (stem === null) return;
+    byStem.set(stem, [...(byStem.get(stem) ?? []), item]);
+  });
+  const variantGroups = [...byStem.values()]
+    .filter(
+      (group) => group.length > 1 && new Set(group.map((item) => item.password)).size > 1
+    )
+    .map((group) => ({ items: group.slice().sort(compareItems) }))
+    .sort((left, right) => compareItems(left.items[0], right.items[0]));
+  const variantIds = new Set(variantGroups.flatMap((group) => group.items.map((item) => item.id)));
+  const variantItems = assessed.filter((item) => variantIds.has(item.id));
+
   const identityItems = assessed.flatMap((item) => {
     const finding = identityDerivedToken(item);
     return finding ? [{ item, ...finding }] : [];
@@ -265,7 +314,13 @@ export function analyzePasswordHealth(items: VaultItem[], now?: number): Passwor
       ? []
       : assessed.filter((item) => now - passwordAgeReference(item) > PASSWORD_AGE_LIMIT_MS);
   const atRiskIds = new Set(
-    [...weakItems, ...reusedItems, ...identityItems.map((finding) => finding.item), ...oldItems].map(
+    [
+      ...weakItems,
+      ...reusedItems,
+      ...variantItems,
+      ...identityItems.map((finding) => finding.item),
+      ...oldItems,
+    ].map(
       (item) => item.id
     )
   );
@@ -282,6 +337,8 @@ export function analyzePasswordHealth(items: VaultItem[], now?: number): Passwor
     weakItems,
     reusedItems,
     reusedGroups,
+    variantGroups,
+    variantItems,
     identityItems,
     oldItems,
     atRiskItems,
