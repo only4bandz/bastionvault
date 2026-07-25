@@ -10,7 +10,32 @@ import {
   requirePreloginResponse,
   requireRevisionResponse,
   requireSessionTokenResponse,
+  requireVaultResponse,
 } from "../lib/api.js";
+
+test("validates the complete encrypted vault envelope", () => {
+  const blob = {
+    v: 1,
+    nonce: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYX",
+    ct: "AAECAwQFBgcICQoLDA0ODw==",
+  };
+  const vault = { items: { "item-1": blob }, manifest: blob, revision: 4 };
+  assert.deepEqual(requireVaultResponse(vault), vault);
+  assert.deepEqual(requireVaultResponse({ items: {}, manifest: null, revision: 0 }), {
+    items: {},
+    manifest: null,
+    revision: 0,
+  });
+  for (const value of [
+    { ...vault, revision: Number.MAX_SAFE_INTEGER + 1 },
+    { ...vault, items: { "bad/item": blob } },
+    { ...vault, items: { "item-1": { ...blob, ct: "not-base64" } } },
+    { ...vault, manifest: [] },
+    { ...vault, extra: true },
+  ]) {
+    assert.throws(() => requireVaultResponse(value), /invalid vault response/);
+  }
+});
 
 test("accepts only the canonical prelogin envelope", () => {
   const prelogin = {

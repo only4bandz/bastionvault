@@ -20,6 +20,10 @@ export const MAX_ERROR_BODY_BYTES = 4096;
 export const MAX_SERVER_DETAIL_CHARS = 200;
 /** Maximum successful JSON response accepted from the sync server (80 MiB). */
 export const MAX_SUCCESS_BODY_BYTES = 80 * 1024 * 1024;
+const MAX_VAULT_ITEMS = 10_000;
+const MAX_ITEM_ID_BYTES = 256;
+const MAX_VAULT_BLOB_BYTES = 512 * 1024;
+const MAX_VAULT_MANIFEST_BYTES = 8 * 1024 * 1024;
 
 /**
  * Fixed, local message per status class. The server's response body is
@@ -56,19 +60,66 @@ function exactRecord(value, keys) {
   );
 }
 
-function exactBase64Bytes(value, decodedBytes) {
+function canonicalBase64Length(value) {
   if (
     typeof value !== "string" ||
-    value.length !== 4 * Math.ceil(decodedBytes / 3) ||
+    value.length % 4 !== 0 ||
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
   ) {
-    return false;
+    return null;
   }
-  try {
-    return atob(value).length === decodedBytes;
-  } catch {
-    return false;
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return (value.length / 4) * 3 - padding;
+}
+
+function exactBase64Bytes(value, decodedBytes) {
+  return canonicalBase64Length(value) === decodedBytes;
+}
+
+function validEncryptedBlob(value, maxCiphertextBytes) {
+  if (!exactRecord(value, ["v", "nonce", "ct"]) || value.v !== 1) return false;
+  const ciphertextBytes = canonicalBase64Length(value.ct);
+  return (
+    ciphertextBytes !== null &&
+    ciphertextBytes >= 16 &&
+    ciphertextBytes <= maxCiphertextBytes &&
+    exactBase64Bytes(value.nonce, 24)
+  );
+}
+
+function validItemId(value) {
+  return (
+    value.length > 0 &&
+    value.length <= MAX_ITEM_ID_BYTES &&
+    /^[\x21-\x7e]+$/.test(value) &&
+    !/[\\/ ?#]/.test(value)
+  );
+}
+
+export function requireVaultResponse(value) {
+  if (
+    !exactRecord(value, ["items", "manifest", "revision"]) ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0 ||
+    !value.items ||
+    typeof value.items !== "object" ||
+    Array.isArray(value.items)
+  ) {
+    throw new ApiError(200, "Server returned an invalid vault response.");
   }
+  const items = Object.entries(value.items);
+  if (
+    items.length > MAX_VAULT_ITEMS ||
+    items.some(
+      ([id, blob]) =>
+        !validItemId(id) || !validEncryptedBlob(blob, MAX_VAULT_BLOB_BYTES)
+    ) ||
+    (value.manifest !== null &&
+      !validEncryptedBlob(value.manifest, MAX_VAULT_MANIFEST_BYTES))
+  ) {
+    throw new ApiError(200, "Server returned an invalid vault response.");
+  }
+  return value;
 }
 
 export function requirePreloginResponse(value) {
@@ -266,7 +317,8 @@ export function makeApi(
     logout: (token) => call("DELETE", "/sessions", token, undefined, "empty"),
     deleteAccount: (token, authSecret) =>
       call("DELETE", "/accounts", token, { auth_secret: authSecret }, "empty"),
-    getVault: (token) => call("GET", "/vault", token),
+    getVault: (token) =>
+      call("GET", "/vault", token).then(requireVaultResponse),
     getVaultRevision: (token) =>
       call("GET", "/vault/revision", token).then(requireRevisionResponse),
     mutateVault: (token, expectedRevision, operations, manifest) =>
