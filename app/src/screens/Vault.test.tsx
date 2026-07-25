@@ -84,6 +84,28 @@ describe("Vault dashboard accessibility", () => {
     }
   });
 
+  it.each([
+    ["window blur", () => fireEvent.blur(window)],
+    ["page hide", () => fireEvent.pageHide(window)],
+  ])("conceals every revealed secret on %s", (_name, leaveWindow) => {
+    renderVault([CARD]);
+    fireEvent.click(screen.getByRole("button", { name: "Open Operations card" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reveal number" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reveal cvv" }));
+    expect(screen.getByText(CARD.cardNumber!)).toBeVisible();
+    expect(screen.getByText(CARD.cardCvv!)).toBeVisible();
+
+    act(leaveWindow);
+
+    expect(screen.queryByText(CARD.cardNumber!)).not.toBeInTheDocument();
+    expect(screen.queryByText(CARD.cardCvv!)).not.toBeInTheDocument();
+    // The detail view stays open — concealing is not locking.
+    expect(screen.getByRole("button", { name: "Reveal number" })).toHaveAttribute(
+      "aria-pressed",
+      "false"
+    );
+  });
+
   it("announces only transaction-backed sync states", () => {
     renderVault([], "saving");
     expect(screen.getByRole("status")).toHaveTextContent("Saving…");

@@ -38,12 +38,22 @@ export function RevealSecret({
   // full Secret Key) auto-collapses when the tab is hidden, mirroring the item
   // detail view's conceal-on-hide: a backgrounded tab must not keep the kit
   // on screen for whoever looks next. The user reopens it with one click.
+  // Losing window focus collapses it too, for the same reason the item detail
+  // view conceals there: the kit stays readable to anything pointed at this
+  // window while the user is looking at another one.
   useEffect(() => {
     const onVisibilityChange = (): void => {
       if (document.visibilityState === "hidden") setShowKit(false);
     };
+    const onWindowBlur = (): void => setShowKit(false);
     document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("blur", onWindowBlur);
+    window.addEventListener("pagehide", onWindowBlur);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("blur", onWindowBlur);
+      window.removeEventListener("pagehide", onWindowBlur);
+    };
   }, []);
 
   function copy() {
