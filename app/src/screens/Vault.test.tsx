@@ -177,6 +177,36 @@ describe("Vault dashboard accessibility", () => {
     expect(screen.getByRole("button", { name: "Open Operations card" })).toBeVisible();
   });
 
+  it("paginates trash and dates each deletion absolutely", async () => {
+    const user = userEvent.setup();
+    const trashed = Array.from({ length: 62 }, (_, index) => ({
+      ...LOGIN,
+      id: `trash-${index}`,
+      title: `Trashed ${String(index).padStart(2, "0")}`,
+      deletedAt: 1_700_000_000_000 - index * 1000,
+    }));
+    renderVault(trashed);
+
+    await user.click(screen.getByRole("button", { name: /^Trash/ }));
+
+    // 50 per page, newest deletion first.
+    expect(screen.getAllByRole("button", { name: "Restore" })).toHaveLength(50);
+    expect(screen.getByText("Trashed 00")).toBeVisible();
+    expect(screen.queryByText("Trashed 61")).not.toBeInTheDocument();
+    expect(screen.getByText("1–50 of 62")).toBeVisible();
+
+    // The absolute deletion time is available on hover, not only as "2y ago".
+    expect(screen.getAllByRole("time")[0]).toHaveAttribute(
+      "title",
+      new Date(1_700_000_000_000).toLocaleString()
+    );
+
+    await user.click(screen.getByRole("button", { name: "Page 2" }));
+    expect(screen.getAllByRole("button", { name: "Restore" })).toHaveLength(12);
+    expect(screen.getByText("Trashed 61")).toBeVisible();
+    expect(screen.getByText("51–62 of 62")).toBeVisible();
+  });
+
   it("announces only transaction-backed sync states", () => {
     renderVault([], "saving");
     expect(screen.getByRole("status")).toHaveTextContent("Saving…");
