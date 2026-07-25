@@ -1,14 +1,10 @@
 import { requireContactsPayload } from "./send-contact-state.js";
+import { isVaultItemPayload } from "./vault-item-state.js";
 
 const SEND_IDENTITY_ID = "bastion:send-identity";
 const SEND_CONTACTS_ID = "bastion:send-contacts";
 const SEND_LOCKED_PREFIX = "bastion:send-locked:";
 const SEND_RESERVED_PREFIX = "bastion:send-";
-const ITEM_TYPES = new Set(["login", "note", "card"]);
-const OPTIONAL_STRING_FIELDS = [
-  "username", "password", "url", "cardNumber", "cardholderName", "cardExp", "cardCvv",
-  "cardBrand", "cardBank", "cardBankDomain", "cardType", "notes", "folder",
-];
 
 export class VaultIntegrityError extends Error {
   constructor() {
@@ -18,25 +14,6 @@ export class VaultIntegrityError extends Error {
 }
 
 const isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
-
-function isVaultItem(value, storageId) {
-  return (
-    isRecord(value) &&
-    value.id === storageId &&
-    ITEM_TYPES.has(value.type) &&
-    typeof value.title === "string" &&
-    typeof value.updatedAt === "number" &&
-    Number.isFinite(value.updatedAt) &&
-    OPTIONAL_STRING_FIELDS.every((field) => value[field] === undefined || typeof value[field] === "string") &&
-    (value.folder === undefined || value.folder.length <= 80) &&
-    (value.favorite === undefined || typeof value.favorite === "boolean") &&
-    (value.passwordChangedAt === undefined || (typeof value.passwordChangedAt === "number" && Number.isFinite(value.passwordChangedAt))) &&
-    (value.deletedAt === undefined ||
-      (Number.isSafeInteger(value.deletedAt) &&
-        value.deletedAt >= 0 &&
-        value.deletedAt <= 8_640_000_000_000_000))
-  );
-}
 
 function requireSafeRevision(revision) {
   if (!Number.isSafeInteger(revision) || revision < 0) throw new VaultIntegrityError();
@@ -91,7 +68,7 @@ function decryptVaultItems(account, rawItems) {
     } else if (id.startsWith(SEND_RESERVED_PREFIX)) {
       throw new VaultIntegrityError();
     } else {
-      if (!isVaultItem(parsed, id)) throw new VaultIntegrityError();
+      if (!isVaultItemPayload(parsed, id)) throw new VaultIntegrityError();
       if (parsed.deletedAt === undefined) items.set(id, parsed);
     }
   }
