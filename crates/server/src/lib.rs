@@ -46,7 +46,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{
     mpsc, oneshot, OwnedSemaphorePermit, RwLock, RwLockReadGuard, RwLockWriteGuard, Semaphore,
 };
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crypto_core::{AuthSecret, EncryptedBlob, KdfParams, PublicIdentity, Registration, SendBlob};
 
@@ -1118,12 +1118,12 @@ pub fn backup_database(
             "backup destination must name a file",
         )
     })?;
-    let mut random = [0u8; 16];
-    OsRng.fill_bytes(&mut random);
+    let mut random = Zeroizing::new([0u8; 16]);
+    OsRng.fill_bytes(random.as_mut());
     let partial_name = format!(
         ".{}.partial-{}",
         destination_name.to_string_lossy(),
-        data_encoding::HEXLOWER.encode(&random)
+        data_encoding::HEXLOWER.encode(random.as_ref())
     );
     let partial_path = destination_parent.join(partial_name);
     let mut options = OpenOptions::new();
@@ -1666,8 +1666,8 @@ impl Db {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS server_meta(key TEXT PRIMARY KEY, value BLOB NOT NULL)",
         )?;
-        let mut fresh = [0u8; 32];
-        OsRng.fill_bytes(&mut fresh);
+        let mut fresh = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(fresh.as_mut());
         conn.execute(
             "INSERT OR IGNORE INTO server_meta(key,value) VALUES('prelogin_decoy_seed',?1)",
             [fresh.as_slice()],
@@ -2365,14 +2365,13 @@ fn verification_token_hash(token: &str) -> Option<[u8; 32]> {
 }
 
 fn new_registration_mail(email: &str, origin: &str, now: i64) -> RegistrationMail {
-    let mut raw_token = [0u8; VERIFICATION_TOKEN_BYTES];
-    OsRng.fill_bytes(&mut raw_token);
-    let token = URL_SAFE_NO_PAD.encode(raw_token);
-    let token_hash = Sha256::digest(raw_token).into();
-    raw_token.zeroize();
-    let mut raw_id = [0u8; 16];
-    OsRng.fill_bytes(&mut raw_id);
-    let outbox_id = data_encoding::HEXLOWER.encode(&raw_id);
+    let mut raw_token = Zeroizing::new([0u8; VERIFICATION_TOKEN_BYTES]);
+    OsRng.fill_bytes(raw_token.as_mut());
+    let token = URL_SAFE_NO_PAD.encode(raw_token.as_ref());
+    let token_hash = Sha256::digest(raw_token.as_ref()).into();
+    let mut raw_id = Zeroizing::new([0u8; 16]);
+    OsRng.fill_bytes(raw_id.as_mut());
+    let outbox_id = data_encoding::HEXLOWER.encode(raw_id.as_ref());
     let text_body = format!(
         "Verify this mailbox for a new Bastion vault:\n\n{origin}/verify-email#token={token}\n\nThis link expires in 30 minutes. It proves mailbox control only. It cannot recover your vault, master password, or Secret Key. If you did not request this, ignore this message."
     );
@@ -3398,9 +3397,10 @@ async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiE
 /// time separated "no such account" (~µs) from "wrong secret" (~100 ms),
 /// re-opening the account-enumeration oracle the identical 401 body closes.
 static DUMMY_PHC: LazyLock<String> = LazyLock::new(|| {
-    let mut secret = [0u8; 32];
-    OsRng.fill_bytes(&mut secret);
-    hash_secret(&data_encoding::BASE64.encode(&secret)).expect("hash dummy login secret")
+    let mut secret = Zeroizing::new([0u8; 32]);
+    OsRng.fill_bytes(secret.as_mut());
+    let encoded = Zeroizing::new(data_encoding::BASE64.encode(secret.as_ref()));
+    hash_secret(encoded.as_str()).expect("hash dummy login secret")
 });
 
 /// Slow Argon2id hash (PHC) of the authentication secret.
@@ -3428,9 +3428,9 @@ fn verify_secret(secret: &str, phc: &str) -> bool {
 
 /// Random 256-bit session token, hex-encoded.
 fn new_token() -> String {
-    let mut bytes = [0u8; SESSION_TOKEN_BYTES];
-    OsRng.fill_bytes(&mut bytes);
-    data_encoding::HEXLOWER.encode(&bytes)
+    let mut bytes = Zeroizing::new([0u8; SESSION_TOKEN_BYTES]);
+    OsRng.fill_bytes(bytes.as_mut());
+    data_encoding::HEXLOWER.encode(bytes.as_ref())
 }
 
 fn session_token_hash(token: &str) -> [u8; 32] {
@@ -3448,9 +3448,9 @@ fn session_token_hash(token: &str) -> [u8; 32] {
 
 /// New 128-bit opaque Bastion ID (base32, non-enumerable).
 fn new_bastion_id() -> String {
-    let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
-    data_encoding::BASE32_NOPAD.encode(&bytes)
+    let mut bytes = Zeroizing::new([0u8; 16]);
+    OsRng.fill_bytes(bytes.as_mut());
+    data_encoding::BASE32_NOPAD.encode(bytes.as_ref())
 }
 
 /// Fixed-window per-key rate limit. New keys are rejected when the strictly
