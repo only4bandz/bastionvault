@@ -10,6 +10,8 @@ const MAX_VAULT_ITEMS = 10_000;
 const MAX_ITEM_ID_BYTES = 256;
 const MAX_VAULT_BLOB_BYTES = 512 * 1024;
 const MAX_VAULT_MANIFEST_BYTES = 8 * 1024 * 1024;
+const MAX_INBOX_PAGE = 100;
+const MAX_SEND_BLOB_BYTES = 256 * 1024;
 
 export interface Blob {
   v: number;
@@ -294,6 +296,79 @@ export function requireWhoamiResponse(
   };
 }
 
+function validSendPasswordParams(value: unknown): boolean {
+  return (
+    exactRecord(value, ["salt", "mem_kib", "iterations", "parallelism"]) &&
+    exactBase64Bytes(value.salt, 16) &&
+    Number.isSafeInteger(value.mem_kib) &&
+    (value.mem_kib as number) > 0 &&
+    Number.isSafeInteger(value.iterations) &&
+    (value.iterations as number) > 0 &&
+    Number.isSafeInteger(value.parallelism) &&
+    (value.parallelism as number) > 0
+  );
+}
+
+function validSendBlob(value: unknown, messageId: string): boolean {
+  const hasPassword =
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, "pw");
+  const keys = [
+    "v",
+    "type",
+    "message_id",
+    "recipient_id",
+    "recipient_enc_pub",
+    "recipient_key_version",
+    "eph_pub",
+    "wrapped_cek",
+    "cek_commit",
+    "body",
+    ...(hasPassword ? ["pw"] : []),
+  ];
+  return (
+    exactRecord(value, keys) &&
+    value.v === 1 &&
+    value.type === "send" &&
+    value.message_id === messageId &&
+    validBastionId(value.recipient_id) &&
+    exactBase64Bytes(value.recipient_enc_pub, 32) &&
+    Number.isSafeInteger(value.recipient_key_version) &&
+    (value.recipient_key_version as number) > 0 &&
+    exactBase64Bytes(value.eph_pub, 32) &&
+    requireEncryptedBlob(value.wrapped_cek, 48) &&
+    canonicalBase64Length(
+      (value.wrapped_cek as { ct: unknown }).ct
+    ) === 48 &&
+    exactBase64Bytes(value.cek_commit, 32) &&
+    requireEncryptedBlob(value.body, MAX_SEND_BLOB_BYTES) &&
+    (!hasPassword || validSendPasswordParams(value.pw))
+  );
+}
+
+export function requireInboxResponse(value: unknown): InboxItem[] {
+  if (!Array.isArray(value) || value.length > MAX_INBOX_PAGE) {
+    throw new ApiError(200, "Server returned an invalid Send inbox response.");
+  }
+  for (const item of value) {
+    if (
+      !exactRecord(item, ["message_id", "blob", "created_at", "expires_at"]) ||
+      !exactBase64Bytes(item.message_id, 16) ||
+      !Number.isSafeInteger(item.created_at) ||
+      (item.created_at as number) < 0 ||
+      (item.expires_at !== null &&
+        (!Number.isSafeInteger(item.expires_at) ||
+          (item.expires_at as number) <= (item.created_at as number))) ||
+      !validSendBlob(item.blob, item.message_id as string)
+    ) {
+      throw new ApiError(200, "Server returned an invalid Send inbox response.");
+    }
+  }
+  return value as InboxItem[];
+}
+
 export function requirePreloginResponse(value: unknown): Prelogin {
   if (
     !exactRecord(value, ["salt", "kdf", "wrapped_vault_key"]) ||
@@ -463,7 +538,8 @@ export const api = {
     ).then(requireSendPublicResponse),
   sendBlob: (token: string, body: { recipient_id: string; message_id: string; blob: unknown; expires_at?: number | null }) =>
     req<void>("POST", "/send", token, body, "empty"),
-  inbox: (token: string) => req<InboxItem[]>("GET", "/send/inbox", token),
+  inbox: (token: string) =>
+    req<unknown>("GET", "/send/inbox", token).then(requireInboxResponse),
   inboxDelete: (token: string, messageId: string) =>
     req<void>("DELETE", `/send/inbox/${encodeURIComponent(messageId)}`, token, undefined, "empty"),
 };
