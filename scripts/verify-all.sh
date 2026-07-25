@@ -43,6 +43,7 @@ run bash scripts/check-no-vault-metadata-egress.sh
 run bash scripts/check-web-demo-csp.sh
 run bash scripts/check-app-csp.sh
 run bash scripts/check-workflow-pins.sh
+run bash scripts/test-workflow-pin-guard.sh
 run git diff --check
 
 echo
