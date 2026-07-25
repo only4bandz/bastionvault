@@ -429,7 +429,8 @@ async function req<T>(
   path: string,
   token?: string,
   body?: unknown,
-  responseKind: "json" | "empty" = "json"
+  responseKind: "json" | "empty" = "json",
+  expectedStatus: number = responseKind === "json" ? 200 : 204
 ): Promise<T> {
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -462,6 +463,13 @@ async function req<T>(
         detail.slice(0, MAX_SERVER_DETAIL_CHARS)
       );
     }
+    if (res.status !== expectedStatus) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new ApiError(
+        res.status,
+        `Server returned an unexpected success status (expected HTTP ${expectedStatus}).`
+      );
+    }
     if (responseKind === "empty") return undefined as T;
     if (!isJsonMediaType(res.headers.get("content-type"))) {
       throw new ApiError(res.status, "Server returned a non-JSON response.");
@@ -481,7 +489,14 @@ async function req<T>(
 export const api = {
   config: () => req<unknown>("GET", "/config").then(requirePublicConfigResponse),
   requestRegistrationChallenge: (email: string) =>
-    req<void>("POST", "/registration-challenges", undefined, { email }, "empty"),
+    req<void>(
+      "POST",
+      "/registration-challenges",
+      undefined,
+      { email },
+      "empty",
+      202
+    ),
   verifyRegistrationChallenge: (token: string) =>
     req<unknown>("POST", "/registration-challenges/verify", undefined, { token }).then(
       requireVerificationResponse
@@ -496,7 +511,8 @@ export const api = {
         registration,
         ...(mailboxProof ? { mailbox_proof: mailboxProof } : {}),
       },
-      "empty"
+      "empty",
+      201
     ),
   prelogin: (email: string) =>
     req<unknown>("GET", `/accounts/${encodeURIComponent(email)}/prelogin`).then(
