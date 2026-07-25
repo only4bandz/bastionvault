@@ -54,6 +54,7 @@ import {
 import { DEFAULT_SERVER, normalizeServerUrl } from "./lib/server-url.js";
 import { SIGNING_UNAVAILABLE, senderIdForMode } from "./lib/send-policy.js";
 import { openMessage as openSendMessage } from "./lib/send-open.js";
+import { requireTrustedStorageArea } from "./lib/trusted-storage.js";
 
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
@@ -89,10 +90,19 @@ function openMessage(s, blob, passphrase) {
 }
 const PENDING_TTL_MS = 10 * 60 * 1000; // a staged "save?" expires after 10 min
 
-// chrome.storage.session is TRUSTED_CONTEXTS by default (NOT readable by content
-// scripts); set it explicitly so a future code change can't silently widen it
-// and expose the in-RAM vault key / staged passwords to page-injected scripts.
-chrome.storage.session.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch(() => {});
+// Every session-storage operation awaits this guard. The session area carries
+// the exported vault key and staged passwords, so an absent or rejected access
+// control API must stop the operation instead of silently widening exposure.
+let trustedSessionAreaPromise;
+function trustedSessionArea() {
+  if (!trustedSessionAreaPromise) {
+    trustedSessionAreaPromise = requireTrustedStorageArea(chrome.storage.session).catch((error) => {
+      trustedSessionAreaPromise = null;
+      throw error;
+    });
+  }
+  return trustedSessionAreaPromise;
+}
 chrome.storage.local.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" }).catch(() => {});
 
 // Messages a content script (running on arbitrary web pages) is allowed to send.
@@ -351,10 +361,11 @@ async function touchSession() {
   const expiresAt = Date.now() + minutes * 60_000;
   chrome.alarms.create(AUTOLOCK_ALARM, { when: expiresAt });
   if (session) session.expiresAt = expiresAt;
-  const stored = await chrome.storage.session.get(SESSION_KEY);
+  const area = await trustedSessionArea();
+  const stored = await area.get(SESSION_KEY);
   if (stored[SESSION_KEY]) {
     stored[SESSION_KEY].expiresAt = expiresAt;
-    await chrome.storage.session.set({ [SESSION_KEY]: stored[SESSION_KEY] });
+    await area.set({ [SESSION_KEY]: stored[SESSION_KEY] });
   }
   return expiresAt;
 }
@@ -365,7 +376,8 @@ async function persistSession() {
   await persistVaultIntegrityAnchor(session);
   const minutes = await getKeepMinutes();
   if (!session.expiresAt) session.expiresAt = Date.now() + minutes * 60_000;
-  await chrome.storage.session.set({
+  const area = await trustedSessionArea();
+  await area.set({
     [SESSION_KEY]: {
       crypto: session.account.export_session(), // contains the vault key (RAM only)
       email: session.email,
@@ -382,10 +394,12 @@ let pendingSave = null;
 let lastUser = null; // origin-bound username for multi-step sign-ups
 async function setPending(p) {
   pendingSave = { ...p, stagedAt: Date.now() };
-  await chrome.storage.session.set({ pendingSave });
+  const area = await trustedSessionArea();
+  await area.set({ pendingSave });
 }
 async function getPending() {
-  if (!pendingSave) pendingSave = (await chrome.storage.session.get("pendingSave")).pendingSave || null;
+  const area = await trustedSessionArea();
+  if (!pendingSave) pendingSave = (await area.get("pendingSave")).pendingSave || null;
   // Expire a staged credential so a plaintext password never lingers.
   if (pendingSave && Date.now() - (pendingSave.stagedAt || 0) > PENDING_TTL_MS) {
     await clearPending();
@@ -395,20 +409,23 @@ async function getPending() {
 }
 async function clearPending() {
   pendingSave = null;
-  await chrome.storage.session.remove("pendingSave");
+  const area = await trustedSessionArea();
+  await area.remove("pendingSave");
 }
 
 async function setLastUser(username, host) {
   lastUser = makeStagedUsername(username, host);
-  if (lastUser) await chrome.storage.session.set({ lastUser });
-  else await chrome.storage.session.remove("lastUser");
+  const area = await trustedSessionArea();
+  if (lastUser) await area.set({ lastUser });
+  else await area.remove("lastUser");
 }
 
 async function takeLastUser(host) {
-  if (!lastUser) lastUser = (await chrome.storage.session.get("lastUser")).lastUser || null;
+  const area = await trustedSessionArea();
+  if (!lastUser) lastUser = (await area.get("lastUser")).lastUser || null;
   const username = stagedUsernameFor(lastUser, host);
   lastUser = null;
-  await chrome.storage.session.remove("lastUser");
+  await area.remove("lastUser");
   return username;
 }
 
@@ -449,7 +466,8 @@ async function lock() {
   await clearClipboardNow(); // copied secrets must not outlive the session
   await clearPending(); // don't leave a staged plaintext password around
   lastUser = null;
-  await chrome.storage.session.remove("lastUser");
+  const area = await trustedSessionArea();
+  await area.remove("lastUser");
   if (session) {
     const { account, token, server } = session;
     if (token) makeApi(server).logout(token).catch(() => {});
@@ -460,7 +478,7 @@ async function lock() {
     }
   }
   session = null;
-  await chrome.storage.session.remove(SESSION_KEY);
+  await area.remove(SESSION_KEY);
   chrome.alarms.clear(AUTOLOCK_ALARM);
   chrome.action.setBadgeText({ text: "" });
 }
@@ -476,10 +494,11 @@ async function ensureSession() {
     return session;
   }
 
-  const stored = (await chrome.storage.session.get(SESSION_KEY))[SESSION_KEY];
+  const area = await trustedSessionArea();
+  const stored = (await area.get(SESSION_KEY))[SESSION_KEY];
   if (!stored) return null;
   if (Date.now() > stored.expiresAt) {
-    await chrome.storage.session.remove(SESSION_KEY);
+    await area.remove(SESSION_KEY);
     return null;
   }
 
@@ -487,7 +506,7 @@ async function ensureSession() {
   try {
     server = normalizeServerUrl(stored.server).url;
   } catch {
-    await chrome.storage.session.remove(SESSION_KEY);
+    await area.remove(SESSION_KEY);
     return null;
   }
 
@@ -530,7 +549,7 @@ async function ensureSession() {
     if (token && api) api.logout(token).catch(() => {});
     try { account?.lock(); } catch { /* already locked */ }
     if (error instanceof VaultIntegrityError || error instanceof VaultRollbackError) {
-      await chrome.storage.session.remove(SESSION_KEY);
+      await area.remove(SESSION_KEY);
     }
     // Integrity failures discard the rehydration blob. Transient failures keep
     // it so a later attempt can retry until the bounded session expires.
@@ -903,7 +922,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         case "CLEAR_PENDING":
           await clearPending();
           lastUser = null;
-          await chrome.storage.session.remove("lastUser");
+          await (await trustedSessionArea()).remove("lastUser");
           sendResponse({ ok: true });
           break;
         case "CLIP_CLEAR": {
