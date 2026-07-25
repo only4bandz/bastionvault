@@ -78,13 +78,9 @@ test("aborts a request that exceeds its deadline", async () => {
 
 test("reports malformed JSON as a protocol error", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({
-    ok: true,
+  globalThis.fetch = async () => new Response("{bad json", {
     status: 200,
-    headers: new Headers({ "content-type": "application/json" }),
-    json: async () => {
-      throw new SyntaxError("bad json");
-    },
+    headers: { "content-type": "application/json" },
   });
 
   try {
@@ -105,12 +101,10 @@ test("sends atomic vault operations with the expected revision and manifest", as
   let request;
   globalThis.fetch = async (url, options) => {
     request = { url, options };
-    return {
-      ok: true,
+    return new Response(JSON.stringify({ revision: 8 }), {
       status: 200,
-      headers: new Headers({ "content-type": "application/json" }),
-      json: async () => ({ revision: 8 }),
-    };
+      headers: { "content-type": "application/json" },
+    });
   };
 
   try {
@@ -131,6 +125,48 @@ test("sends atomic vault operations with the expected revision and manifest", as
       operations,
       manifest,
     });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rejects oversized successful JSON before parsing it", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ vault: "x".repeat(128) }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  try {
+    await assert.rejects(
+      makeApi("https://vault.example.com", { maxResponseBytes: 32 }).getVault("token"),
+      (error) =>
+        error instanceof ApiError &&
+        error.status === 200 &&
+        error.message === "Server response exceeded the safe size limit."
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("rejects an oversized declared response before reading the body", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response("{}", {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "content-length": "1000",
+      },
+    });
+  try {
+    await assert.rejects(
+      makeApi("https://vault.example.com", { maxResponseBytes: 32 }).getVault("token"),
+      (error) =>
+        error instanceof ApiError &&
+        error.message === "Server response exceeded the safe size limit."
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
