@@ -10,6 +10,7 @@
 // pending clears via the scheduler's token.
 
 import { makeClipboardClearScheduler } from "./lib/clipboard-clear.js";
+import { authorizedClipboardMessage } from "./lib/offscreen-message-policy.js";
 
 const scheduler = makeClipboardClearScheduler({
   setTimer: (fn, ms) => setTimeout(fn, ms),
@@ -21,8 +22,17 @@ const scheduler = makeClipboardClearScheduler({
   },
 });
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-  if (msg?.target !== "offscreen-clipboard") return false;
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (
+    !authorizedClipboardMessage(
+      msg,
+      sender,
+      chrome.runtime.id,
+      chrome.runtime.getURL("background.js")
+    )
+  ) {
+    return false;
+  }
   if (msg.type === "CLIP_SCHEDULE_CLEAR") {
     scheduler.schedule(msg.delayMs);
     sendResponse({ ok: true });
