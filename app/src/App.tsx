@@ -17,6 +17,7 @@ import {
 import { SEND_CONTACTS_ID, SEND_IDENTITY_ID, loadContacts, type Contact } from "./lib/send";
 import type { VaultItem } from "./lib/types";
 import { isVaultItemPayload } from "./lib/vault-item-state";
+import { isLockedSendRecord } from "./lib/send-locked-state";
 import type { ImportOutcome, ImportProgress, ImportResult } from "./lib/import";
 import {
   completeBootstrap,
@@ -63,7 +64,11 @@ function loadItems(account: Account, items: Record<string, Blob>): VaultItem[] {
     try {
       const item: unknown = JSON.parse(account.decrypt_item(JSON.stringify(blob), id));
       if (id === SEND_CONTACTS_ID || id.startsWith(SEND_LOCKED_PREFIX)) {
-        if (id === SEND_CONTACTS_ID ? !Array.isArray(item) : !item || typeof item !== "object") {
+        if (
+          id === SEND_CONTACTS_ID
+            ? !Array.isArray(item)
+            : !isLockedSendRecord(item, id)
+        ) {
           throw new Error("invalid reserved item payload");
         }
         continue;
