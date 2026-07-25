@@ -245,6 +245,55 @@ export function requireVaultResponse(value: unknown): VaultData {
   return value as unknown as VaultData;
 }
 
+function validBastionId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Z2-7]{25}[AEIMQUY4]$/.test(value);
+}
+
+export function requireSendPublicResponse(value: unknown): SendPublic {
+  if (
+    !exactRecord(value, ["enc_pub", "sig_pub", "key_version"]) ||
+    value.key_version !== 1 ||
+    !Array.isArray(value.enc_pub) ||
+    value.enc_pub.length !== 32 ||
+    !value.enc_pub.every(
+      (byte) => Number.isSafeInteger(byte) && byte >= 0 && byte <= 255
+    ) ||
+    !Array.isArray(value.sig_pub) ||
+    value.sig_pub.length !== 32 ||
+    !value.sig_pub.every(
+      (byte) => Number.isSafeInteger(byte) && byte >= 0 && byte <= 255
+    )
+  ) {
+    throw new ApiError(200, "Server returned an invalid Send identity.");
+  }
+  return value as unknown as SendPublic;
+}
+
+export function requirePublishedIdentityResponse(value: unknown): { bastion_id: string } {
+  if (
+    !exactRecord(value, ["bastion_id"]) ||
+    !validBastionId(value.bastion_id)
+  ) {
+    throw new ApiError(200, "Server returned an invalid Send identity response.");
+  }
+  return { bastion_id: value.bastion_id };
+}
+
+export function requireWhoamiResponse(
+  value: unknown
+): { bastion_id: string; public: SendPublic } {
+  if (
+    !exactRecord(value, ["bastion_id", "public"]) ||
+    !validBastionId(value.bastion_id)
+  ) {
+    throw new ApiError(200, "Server returned an invalid Send identity response.");
+  }
+  return {
+    bastion_id: value.bastion_id,
+    public: requireSendPublicResponse(value.public),
+  };
+}
+
 export function requirePreloginResponse(value: unknown): Prelogin {
   if (
     !exactRecord(value, ["salt", "kdf", "wrapped_vault_key"]) ||
@@ -401,10 +450,17 @@ export const api = {
 
   // ── Bastion Send ──
   publishIdentity: (token: string, pub: SendPublic) =>
-    req<{ bastion_id: string }>("PUT", "/send/identity", token, pub),
-  whoami: (token: string) => req<{ bastion_id: string; public: SendPublic }>("GET", "/send/whoami", token),
+    req<unknown>("PUT", "/send/identity", token, pub).then(
+      requirePublishedIdentityResponse
+    ),
+  whoami: (token: string) =>
+    req<unknown>("GET", "/send/whoami", token).then(requireWhoamiResponse),
   directory: (token: string, bastionId: string) =>
-    req<SendPublic>("GET", `/send/directory/${encodeURIComponent(bastionId)}`, token),
+    req<unknown>(
+      "GET",
+      `/send/directory/${encodeURIComponent(bastionId)}`,
+      token
+    ).then(requireSendPublicResponse),
   sendBlob: (token: string, body: { recipient_id: string; message_id: string; blob: unknown; expires_at?: number | null }) =>
     req<void>("POST", "/send", token, body, "empty"),
   inbox: (token: string) => req<InboxItem[]>("GET", "/send/inbox", token),
