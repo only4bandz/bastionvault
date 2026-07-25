@@ -20,6 +20,9 @@ export interface Contact {
   verified: boolean;
   verified_at: number | null;
   safety_number: string | null;
+  lock_enabled?: true;
+  lock_salt?: string;
+  lock_kdf?: { mem_kib: number; iterations: number; parallelism: number };
 }
 
 // Canonical JSON of a PublicIdentity (stable key order) for fingerprinting.
@@ -68,6 +71,13 @@ export function requireContactsPayload(value: unknown): Contact[] {
   }
   const ids = new Set<string>();
   for (const contact of value) {
+    const hasLockMetadata =
+      typeof contact === "object" &&
+      contact !== null &&
+      !Array.isArray(contact) &&
+      ["lock_enabled", "lock_salt", "lock_kdf"].some((key) =>
+        Object.prototype.hasOwnProperty.call(contact, key)
+      );
     if (
       !exactRecord(contact, [
         "bastion_id",
@@ -77,6 +87,7 @@ export function requireContactsPayload(value: unknown): Contact[] {
         "verified",
         "verified_at",
         "safety_number",
+        ...(hasLockMetadata ? ["lock_enabled", "lock_salt", "lock_kdf"] : []),
       ]) ||
       typeof contact.bastion_id !== "string" ||
       !/^[A-Z2-7]{25}[AEIMQUY4]$/.test(contact.bastion_id) ||
@@ -98,6 +109,24 @@ export function requireContactsPayload(value: unknown): Contact[] {
       (contact.verified &&
         (contact.verified_at === null || contact.safety_number === null)) ||
       (!contact.verified && contact.verified_at !== null)
+    ) {
+      throw new Error("invalid contacts payload");
+    }
+    if (
+      hasLockMetadata &&
+      (contact.lock_enabled !== true ||
+        typeof contact.lock_salt !== "string" ||
+        !/^(?:[A-Za-z0-9+/]{4}){5}[A-Za-z0-9+/][AQgw]==$/.test(contact.lock_salt) ||
+        !exactRecord(contact.lock_kdf, ["mem_kib", "iterations", "parallelism"]) ||
+        !Number.isSafeInteger(contact.lock_kdf.mem_kib) ||
+        (contact.lock_kdf.mem_kib as number) < 19 * 1024 ||
+        (contact.lock_kdf.mem_kib as number) > 128 * 1024 ||
+        !Number.isSafeInteger(contact.lock_kdf.iterations) ||
+        (contact.lock_kdf.iterations as number) < 2 ||
+        (contact.lock_kdf.iterations as number) > 6 ||
+        !Number.isSafeInteger(contact.lock_kdf.parallelism) ||
+        (contact.lock_kdf.parallelism as number) < 1 ||
+        (contact.lock_kdf.parallelism as number) > 4)
     ) {
       throw new Error("invalid contacts payload");
     }

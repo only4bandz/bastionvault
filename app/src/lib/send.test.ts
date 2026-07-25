@@ -57,6 +57,16 @@ describe("encrypted Send contact state", () => {
     expect(requireContactsPayload([valid])).toEqual([valid]);
     expect(requireContactsPayload([{ ...valid, verified: false, verified_at: null }]))
       .toHaveLength(1);
+    expect(
+      requireContactsPayload([
+        {
+          ...valid,
+          lock_enabled: true,
+          lock_salt: "AAECAwQFBgcICQoLDA0ODw==",
+          lock_kdf: { mem_kib: 128 * 1024, iterations: 3, parallelism: 1 },
+        },
+      ])
+    ).toHaveLength(1);
   });
 
   it.each([
@@ -67,6 +77,25 @@ describe("encrypted Send contact state", () => {
     ["invalid safety number", [{ ...valid, safety_number: "123" }]],
     ["unverified timestamp", [{ ...valid, verified: false }]],
     ["duplicate address", [valid, { ...valid, display: "Duplicate" }]],
+    ["partial lock metadata", [{ ...valid, lock_enabled: true }]],
+    [
+      "weak lock KDF",
+      [{
+        ...valid,
+        lock_enabled: true,
+        lock_salt: "AAECAwQFBgcICQoLDA0ODw==",
+        lock_kdf: { mem_kib: 8, iterations: 1, parallelism: 1 },
+      }],
+    ],
+    [
+      "oversized lock KDF",
+      [{
+        ...valid,
+        lock_enabled: true,
+        lock_salt: "AAECAwQFBgcICQoLDA0ODw==",
+        lock_kdf: { mem_kib: 128 * 1024 + 1, iterations: 3, parallelism: 1 },
+      }],
+    ],
   ])("rejects %s", (_name, value) => {
     expect(() => requireContactsPayload(value)).toThrow("invalid contacts payload");
   });
