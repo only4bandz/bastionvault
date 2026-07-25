@@ -72,6 +72,13 @@ async function req(base, method, path, token, body, timeoutMs) {
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
+      // The sync server is outside the extension trust boundary. Never let a
+      // bearer token follow a redirect, attach ambient browser credentials,
+      // populate an HTTP cache, or disclose the current page as a referrer.
+      redirect: "error",
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
     });
     if (!res.ok) {
       const text = await readErrorBody(res);

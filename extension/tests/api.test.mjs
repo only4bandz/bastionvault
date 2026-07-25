@@ -15,6 +15,10 @@ test("sends account deletion proof to the canonical v1 endpoint", async () => {
     assert.equal(request.url, "https://vault.example.com/v1/accounts");
     assert.equal(request.options.method, "DELETE");
     assert.equal(request.options.headers.Authorization, "Bearer token");
+    assert.equal(request.options.redirect, "error");
+    assert.equal(request.options.credentials, "omit");
+    assert.equal(request.options.cache, "no-store");
+    assert.equal(request.options.referrerPolicy, "no-referrer");
     assert.deepEqual(JSON.parse(request.options.body), {
       auth_secret: "derived-secret",
     });
