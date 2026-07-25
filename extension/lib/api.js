@@ -15,7 +15,7 @@ export class ApiError extends Error {
 }
 
 /** Longest server error body we bother reading (anti memory-DoS). */
-export const MAX_ERROR_BODY_CHARS = 4096;
+export const MAX_ERROR_BODY_BYTES = 4096;
 /** How much raw server text is kept on the error, for debugging only. */
 export const MAX_SERVER_DETAIL_CHARS = 200;
 /** Maximum successful JSON response accepted from the sync server (80 MiB). */
@@ -46,21 +46,27 @@ export function isJsonMediaType(value) {
   return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }
 
-/** Reads at most MAX_ERROR_BODY_CHARS of an error body — a hostile server
+/** Reads at most MAX_ERROR_BODY_BYTES of an error body — a hostile server
  * must not be able to balloon the worker's memory with a huge error page. */
-async function readErrorBody(res) {
+export async function readErrorBody(res) {
   try {
     const reader = res.body?.getReader?.();
-    if (!reader) return ((await res.text()) || "").slice(0, MAX_ERROR_BODY_CHARS);
+    if (!reader) return "";
     const decoder = new TextDecoder();
     let out = "";
-    while (out.length < MAX_ERROR_BODY_CHARS) {
+    let bytesRead = 0;
+    while (bytesRead < MAX_ERROR_BODY_BYTES) {
       const { done, value } = await reader.read();
       if (done) break;
-      out += decoder.decode(value, { stream: true });
+      const remaining = MAX_ERROR_BODY_BYTES - bytesRead;
+      const accepted = value.subarray(0, remaining);
+      bytesRead += accepted.byteLength;
+      out += decoder.decode(accepted, { stream: true });
+      if (accepted.byteLength < value.byteLength) break;
     }
     reader.cancel().catch(() => {});
-    return out.slice(0, MAX_ERROR_BODY_CHARS);
+    out += decoder.decode();
+    return out;
   } catch {
     return "";
   }

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ApiError, isJsonMediaType, makeApi } from "../lib/api.js";
+import {
+  ApiError,
+  isJsonMediaType,
+  makeApi,
+  MAX_ERROR_BODY_BYTES,
+  readErrorBody,
+} from "../lib/api.js";
 
 test("sends account deletion proof to the canonical v1 endpoint", async () => {
   const originalFetch = globalThis.fetch;
@@ -234,6 +240,11 @@ test("huge error bodies are read capped and detail is bounded", async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("caps hostile multibyte error bodies by encoded bytes", async () => {
+  const detail = await readErrorBody(new Response("é".repeat(10_000), { status: 503 }));
+  assert.ok(new TextEncoder().encode(detail).byteLength <= MAX_ERROR_BODY_BYTES);
 });
 
 test("statusMessage covers the status classes with fixed local copy", async () => {
