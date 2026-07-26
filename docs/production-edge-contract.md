@@ -39,7 +39,9 @@ The ingress and Axum process run on the same host. The ingress must:
    request reaches Axum;
 3. preserve the original public `Host` header;
 4. remove every client-supplied forwarding header, then set exactly one
-   `X-Forwarded-Proto: https` value on proxied HTTPS requests;
+   `X-Forwarded-Proto: https` value and exactly one `X-Forwarded-For` value
+   containing only the canonical client IP address (never a comma-separated
+   proxy chain) on proxied HTTPS requests;
 5. use a publicly trusted certificate, renew it automatically, and alert while
    at least 30 days of validity remain;
 6. pass through Bastion's
@@ -61,13 +63,16 @@ routes. This preserves the narrow Axum trust boundary and prevents a generic
 reverse-proxy fallback from shadowing the web application.
 
 Axum rejects non-health application requests unless `Host` exactly matches the
-configured public authority and the trusted proto value is exactly `https`.
-Only `/health`, `/livez`, and `/readyz` (versioned or legacy) bypass that check
-so private loopback probes do not need forged forwarding metadata.
+configured public authority, the trusted proto value is exactly `https`, and
+the trusted client-address value parses as one IP address. Missing, duplicate,
+malformed, and chained client-address values fail closed. Only `/health`,
+`/livez`, and `/readyz` (versioned or legacy) bypass that check so private
+loopback probes do not need forged forwarding metadata.
 
-`X-Forwarded-Proto` is trusted only because production startup makes the Axum
-listener loopback-only. Do not expose that listener through port publishing,
-a sidecar, or a host-network rule.
+`X-Forwarded-Proto` and `X-Forwarded-For` are trusted only because production
+startup makes the Axum listener loopback-only and the same-host ingress
+overwrites both values. Do not expose that listener through port publishing, a
+sidecar, or a host-network rule.
 
 ## Origin and CORS policy
 

@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -83,15 +83,18 @@ const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 const MAX_ACTIVE_SESSIONS: usize = 100_000;
 const MAX_AUTH_RATE_ENTRIES: usize = 10_000;
 const MAX_ACCOUNT_CREATIONS_GLOBAL_PER_MIN: u32 = 20;
+const MAX_ACCOUNT_CREATIONS_PER_SOURCE_PER_MIN: u32 = 5;
 const MAX_ACCOUNT_CREATIONS_PER_ACCOUNT_PER_MIN: u32 = 2;
 const MAX_LOGIN_ATTEMPTS_GLOBAL_PER_MIN: u32 = 120;
+const MAX_LOGIN_ATTEMPTS_PER_SOURCE_PER_MIN: u32 = 30;
 const MAX_LOGIN_ATTEMPTS_PER_ACCOUNT_PER_MIN: u32 = 10;
 // Prelogin is unauthenticated and reveals whether an account exists (plus its
 // KDF params), so it gets its own throttle against bulk enumeration.
 const MAX_PRELOGINS_GLOBAL_PER_MIN: u32 = 300;
+const MAX_PRELOGINS_PER_SOURCE_PER_MIN: u32 = 60;
 const MAX_PRELOGINS_PER_ACCOUNT_PER_MIN: u32 = 15;
 /// Bastion Send: max stored blob size, per-recipient inbox cap, and per-account
-/// fixed-window rate limits (abuse controls — see docs/bastion-send-design.md §8).
+/// token-bucket rate limits (abuse controls — see docs/bastion-send-design.md §8).
 const MAX_SEND_BLOB: usize = 256 * 1024;
 const MAX_SEND_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const MAX_INBOX: i64 = 500;
@@ -134,11 +137,14 @@ const VERIFICATION_TOKEN_BYTES: usize = 32;
 const VERIFICATION_TTL_SECONDS: i64 = 30 * 60;
 const VERIFICATION_RESEND_SECONDS: i64 = 2 * 60;
 const MAX_CHALLENGES_GLOBAL_PER_MIN: u32 = 30;
+const MAX_CHALLENGES_PER_SOURCE_PER_MIN: u32 = 10;
 const MAX_CHALLENGES_PER_EMAIL_PER_MIN: u32 = 2;
 const MAX_VERIFICATIONS_GLOBAL_PER_MIN: u32 = 120;
+const MAX_VERIFICATIONS_PER_SOURCE_PER_MIN: u32 = 30;
 const MAX_VERIFICATIONS_PER_TOKEN_PER_MIN: u32 = 5;
 const DEFAULT_BIND_ADDR: &str = "127.0.0.1:7777";
 const DEFAULT_DB_PATH: &str = "bastion.db";
+const FORWARDED_FOR_HEADER: &str = "x-forwarded-for";
 const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
 
 /// Validated process configuration. Production is deliberately narrower than
@@ -855,12 +861,33 @@ fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a HeaderVal
     values.next().is_none().then_some(value)
 }
 
+fn canonical_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    let address = single_header(headers, FORWARDED_FOR_HEADER)?
+        .to_str()
+        .ok()?
+        .parse::<IpAddr>()
+        .ok()?;
+    Some(match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(address)),
+        address => address,
+    })
+}
+
 async fn production_transport_boundary(
     State(st): State<AppState>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     let Some(policy) = &st.transport else {
+        // Development binds to loopback by default and has no trusted ingress.
+        // Treat all direct requests as one local source instead of trusting a
+        // caller-supplied forwarding header.
+        request
+            .extensions_mut()
+            .insert(ClientSource(IpAddr::V4(Ipv4Addr::LOCALHOST)));
         return Ok(next.run(request).await);
     };
 
@@ -887,14 +914,19 @@ async fn production_transport_boundary(
             "trusted ingress did not attest HTTPS",
         ));
     }
+    let client_ip = canonical_client_ip(request.headers()).ok_or(ApiError(
+        StatusCode::BAD_REQUEST,
+        "trusted ingress did not attest client address",
+    ))?;
+    request.extensions_mut().insert(ClientSource(client_ip));
     Ok(next.run(request).await)
 }
 
 async fn security_headers(State(st): State<AppState>, request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
-    // Fixed-window limiters: retrying after a full window is always safe.
-    // Advertise that upper bound so well-behaved clients back off instead of
-    // hammering, per RFC 9110 §10.2.3.
+    // Retrying after one complete token-bucket refill window is always safe.
+    // Advertise that conservative upper bound so well-behaved clients back off
+    // instead of hammering, per RFC 9110 §10.2.3.
     if response.status() == StatusCode::TOO_MANY_REQUESTS {
         let window = st.rate_window.max(st.auth_rate_limits.window);
         if let Ok(value) = HeaderValue::from_str(&window.as_secs().max(1).to_string()) {
@@ -1007,10 +1039,12 @@ struct RateLimiters {
     authentication: Mutex<HashMap<String, RateState>>,
 }
 
-/// Fixed-window rate counter.
+/// Deterministic integer token bucket. `refill_remainder` carries fractional
+/// tokens without floating-point drift.
 struct RateState {
-    window_start: Instant,
-    count: u32,
+    updated_at: Instant,
+    tokens: u32,
+    refill_remainder: u128,
 }
 
 /// Active session: the token's owner and its expiration instant.
@@ -2679,6 +2713,10 @@ struct VaultTransactionResponse {
 #[derive(Clone)]
 struct AuthenticatedAccount(String);
 
+/// Canonical client address asserted by the same-host trusted ingress.
+#[derive(Clone, Copy)]
+struct ClientSource(IpAddr);
+
 // ─── Handlers ───
 
 /// Process liveness deliberately avoids the storage queue. It must remain
@@ -2750,6 +2788,7 @@ fn new_registration_mail(email: &str, origin: &str, now: i64) -> RegistrationMai
 
 async fn request_registration_challenge(
     State(st): State<AppState>,
+    Extension(source): Extension<ClientSource>,
     Json(req): Json<RegistrationChallengeRequest>,
 ) -> Result<StatusCode, ApiError> {
     let origin = st.verification_origin.as_deref().ok_or(ApiError(
@@ -2760,6 +2799,12 @@ async fn request_registration_challenge(
     if !mail_outbox::valid_recipient(&req.email) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid mailbox"));
     }
+    source_auth_rate_limit(
+        &st,
+        source,
+        "challenge-source",
+        MAX_CHALLENGES_PER_SOURCE_PER_MIN,
+    )?;
     auth_rate_limit(
         &st,
         "global",
@@ -2789,6 +2834,7 @@ async fn request_registration_challenge(
 
 async fn verify_registration_challenge(
     State(st): State<AppState>,
+    Extension(source): Extension<ClientSource>,
     Json(mut req): Json<VerifyRegistrationChallengeRequest>,
 ) -> Result<Json<VerifyRegistrationChallengeResponse>, ApiError> {
     if st.verification_origin.is_none() {
@@ -2803,6 +2849,12 @@ async fn verify_registration_challenge(
         StatusCode::BAD_REQUEST,
         "invalid or expired proof",
     ))?;
+    source_auth_rate_limit(
+        &st,
+        source,
+        "verify-source",
+        MAX_VERIFICATIONS_PER_SOURCE_PER_MIN,
+    )?;
     auth_rate_limit(
         &st,
         "global",
@@ -2830,6 +2882,7 @@ async fn verify_registration_challenge(
 
 async fn create_account(
     State(st): State<AppState>,
+    Extension(source): Extension<ClientSource>,
     Json(mut req): Json<CreateAccount>,
 ) -> Result<StatusCode, ApiError> {
     validate_account_id(&req.email)?;
@@ -2851,6 +2904,12 @@ async fn create_account(
     } else {
         None
     };
+    source_auth_rate_limit(
+        &st,
+        source,
+        "account-create-source",
+        MAX_ACCOUNT_CREATIONS_PER_SOURCE_PER_MIN,
+    )?;
     auth_rate_limit(
         &st,
         "global",
@@ -3000,11 +3059,18 @@ async fn delete_account(
 
 async fn prelogin(
     State(st): State<AppState>,
+    Extension(source): Extension<ClientSource>,
     Path(email): Path<String>,
 ) -> Result<Json<Prelogin>, ApiError> {
     validate_account_id(&email)?;
     // Unauthenticated existence oracle: throttle before the account lookup so
     // bulk enumeration (and KDF-parameter harvesting) is rate-bound.
+    source_auth_rate_limit(
+        &st,
+        source,
+        "prelogin-source",
+        MAX_PRELOGINS_PER_SOURCE_PER_MIN,
+    )?;
     auth_rate_limit(
         &st,
         "global",
@@ -3072,12 +3138,19 @@ fn prelogin_decoy(seed: &[u8; 32], email: &str) -> Prelogin {
 
 async fn create_session(
     State(st): State<AppState>,
+    Extension(source): Extension<ClientSource>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
     validate_account_id(&req.email)?;
     if !is_exact_b64(req.auth_secret.expose_b64(), AUTH_SECRET_BYTES) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
+    source_auth_rate_limit(
+        &st,
+        source,
+        "login-source",
+        MAX_LOGIN_ATTEMPTS_PER_SOURCE_PER_MIN,
+    )?;
     auth_rate_limit(
         &st,
         "global",
@@ -3824,8 +3897,9 @@ fn new_bastion_id() -> String {
     data_encoding::BASE32_NOPAD.encode(bytes.as_ref())
 }
 
-/// Fixed-window per-key rate limit. New keys are rejected when the strictly
-/// bounded state map is full and no expired window can be reclaimed.
+/// Per-key token bucket with an integer refill accumulator. New keys are
+/// rejected when the strictly bounded state map is full and no idle bucket can
+/// be reclaimed.
 fn rate_limit_map(
     rate: &mut HashMap<String, RateState>,
     max_entries: usize,
@@ -3834,26 +3908,69 @@ fn rate_limit_map(
     bucket: &str,
     max: u32,
 ) -> Result<(), ApiError> {
+    rate_limit_map_at(
+        rate,
+        max_entries,
+        window,
+        subject,
+        bucket,
+        max,
+        Instant::now(),
+    )
+}
+
+fn rate_limit_map_at(
+    rate: &mut HashMap<String, RateState>,
+    max_entries: usize,
+    window: Duration,
+    subject: &str,
+    bucket: &str,
+    max: u32,
+    now: Instant,
+) -> Result<(), ApiError> {
     if max == 0 {
         return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
     let key = format!("{bucket}\0{subject}");
-    let now = Instant::now();
 
     if let Some(entry) = rate.get_mut(&key) {
-        if now.saturating_duration_since(entry.window_start) >= window {
-            entry.window_start = now;
-            entry.count = 0;
+        if window.is_zero() {
+            entry.updated_at = now;
+            entry.tokens = max.saturating_sub(1);
+            entry.refill_remainder = 0;
+            return Ok(());
         }
-        if entry.count >= max {
+
+        let generated = now
+            .saturating_duration_since(entry.updated_at)
+            .as_nanos()
+            .saturating_mul(u128::from(max))
+            .saturating_add(entry.refill_remainder);
+        let window_nanos = window.as_nanos();
+        let refilled = generated / window_nanos;
+        let missing = u128::from(max.saturating_sub(entry.tokens));
+        let (available, remainder) = if refilled >= missing {
+            // A full bucket cannot bank additional idle time for a later burst.
+            (max, 0)
+        } else {
+            (
+                entry.tokens.saturating_add(refilled as u32),
+                generated % window_nanos,
+            )
+        };
+        if available == 0 {
+            // Do not advance the accumulator on rejection. Repeated denied
+            // requests therefore cannot pin the key or postpone its refill.
             return Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
         }
-        entry.count += 1;
+        entry.updated_at = now;
+        entry.tokens = available - 1;
+        entry.refill_remainder = remainder;
         return Ok(());
     }
 
     if rate.len() >= max_entries {
-        rate.retain(|_, entry| now.saturating_duration_since(entry.window_start) < window);
+        rate.retain(|_, entry| now.saturating_duration_since(entry.updated_at) < window);
     }
 
     if rate.len() >= max_entries {
@@ -3866,8 +3983,9 @@ fn rate_limit_map(
     rate.insert(
         key,
         RateState {
-            window_start: now,
-            count: 1,
+            updated_at: now,
+            tokens: max - 1,
+            refill_remainder: 0,
         },
     );
     Ok(())
@@ -3907,6 +4025,15 @@ fn auth_rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Resu
         bucket,
         max,
     )
+}
+
+fn source_auth_rate_limit(
+    st: &AppState,
+    source: ClientSource,
+    bucket: &str,
+    max: u32,
+) -> Result<(), ApiError> {
+    auth_rate_limit(st, &source.0.to_string(), bucket, max)
 }
 
 impl Db {
@@ -4548,6 +4675,83 @@ mod tests {
     }
 
     #[test]
+    fn token_bucket_refills_gradually_without_a_window_boundary_burst() {
+        let mut rate = HashMap::new();
+        let start = Instant::now();
+        let window = Duration::from_secs(60);
+
+        assert!(rate_limit_map_at(&mut rate, 1, window, "source", "login", 2, start).is_ok());
+        assert!(rate_limit_map_at(&mut rate, 1, window, "source", "login", 2, start).is_ok());
+        assert!(rate_limit_map_at(&mut rate, 1, window, "source", "login", 2, start).is_err());
+        assert!(rate_limit_map_at(
+            &mut rate,
+            1,
+            window,
+            "source",
+            "login",
+            2,
+            start + Duration::from_secs(29),
+        )
+        .is_err());
+        assert!(rate_limit_map_at(
+            &mut rate,
+            1,
+            window,
+            "source",
+            "login",
+            2,
+            start + Duration::from_secs(30),
+        )
+        .is_ok());
+        assert!(rate_limit_map_at(
+            &mut rate,
+            1,
+            window,
+            "source",
+            "login",
+            2,
+            start + Duration::from_secs(30),
+        )
+        .is_err());
+        assert!(rate_limit_map_at(
+            &mut rate,
+            1,
+            window,
+            "source",
+            "login",
+            2,
+            start + Duration::from_secs(60),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn trusted_client_address_is_single_and_canonical() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            FORWARDED_FOR_HEADER,
+            HeaderValue::from_static("::ffff:192.0.2.44"),
+        );
+        assert_eq!(
+            canonical_client_ip(&headers),
+            Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 44)))
+        );
+
+        headers.append(
+            FORWARDED_FOR_HEADER,
+            HeaderValue::from_static("198.51.100.8"),
+        );
+        assert_eq!(canonical_client_ip(&headers), None);
+
+        let mut chained = HeaderMap::new();
+        chained.insert(
+            FORWARDED_FOR_HEADER,
+            HeaderValue::from_static("192.0.2.44, 198.51.100.8"),
+        );
+        assert_eq!(canonical_client_ip(&chained), None);
+    }
+
+    #[test]
     fn smtp_configuration_is_complete_and_starttls_only() {
         let configured = config_from(&[
             ("BASTION_SMTP_HOST", "smtp.example.com"),
@@ -4709,47 +4913,75 @@ mod tests {
             None,
         );
 
-        for (name, host, proto, expected) in [
+        for (name, host, proto, source, expected) in [
             (
                 "missing host",
                 None,
                 Some("https"),
+                Some("192.0.2.1"),
                 StatusCode::MISDIRECTED_REQUEST,
             ),
             (
                 "wrong host",
                 Some("attacker.example"),
                 Some("https"),
+                Some("192.0.2.1"),
                 StatusCode::MISDIRECTED_REQUEST,
             ),
             (
                 "wrong port",
                 Some("vault.example.com:444"),
                 Some("https"),
+                Some("192.0.2.1"),
                 StatusCode::MISDIRECTED_REQUEST,
             ),
             (
                 "missing proto",
                 Some("vault.example.com"),
                 None,
+                Some("192.0.2.1"),
                 StatusCode::BAD_REQUEST,
             ),
             (
                 "plaintext proto",
                 Some("vault.example.com"),
                 Some("http"),
+                Some("192.0.2.1"),
                 StatusCode::BAD_REQUEST,
             ),
             (
-                "forwarded list",
+                "proto forwarding chain",
                 Some("vault.example.com"),
                 Some("https,http"),
+                Some("192.0.2.1"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "missing client source",
+                Some("vault.example.com"),
+                Some("https"),
+                None,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "client forwarding chain",
+                Some("vault.example.com"),
+                Some("https"),
+                Some("192.0.2.1, 198.51.100.2"),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "malformed client source",
+                Some("vault.example.com"),
+                Some("https"),
+                Some("not-an-ip"),
                 StatusCode::BAD_REQUEST,
             ),
             (
                 "valid ingress",
                 Some("VAULT.EXAMPLE.COM"),
                 Some("https"),
+                Some("192.0.2.1"),
                 // Unknown accounts now answer 200 with an enumeration decoy.
                 StatusCode::OK,
             ),
@@ -4760,6 +4992,9 @@ mod tests {
             }
             if let Some(proto) = proto {
                 request = request.header(FORWARDED_PROTO_HEADER, proto);
+            }
+            if let Some(source) = source {
+                request = request.header(FORWARDED_FOR_HEADER, source);
             }
             let response = app
                 .clone()
@@ -4781,7 +5016,11 @@ mod tests {
             );
         }
 
-        for duplicate in [header::HOST.as_str(), FORWARDED_PROTO_HEADER] {
+        for duplicate in [
+            header::HOST.as_str(),
+            FORWARDED_PROTO_HEADER,
+            FORWARDED_FOR_HEADER,
+        ] {
             let response = app
                 .clone()
                 .oneshot(
@@ -4789,6 +5028,7 @@ mod tests {
                         .uri("/v1/accounts/nobody@example.com/prelogin")
                         .header(header::HOST, "vault.example.com")
                         .header(FORWARDED_PROTO_HEADER, "https")
+                        .header(FORWARDED_FOR_HEADER, "192.0.2.1")
                         .header(duplicate, "https")
                         .body(Body::empty())
                         .unwrap(),
@@ -4809,6 +5049,53 @@ mod tests {
                     .body(Body::empty())
                     .unwrap(),
             )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn trusted_source_limit_survives_account_identifier_rotation() {
+        let app = build_with_transport(
+            DEFAULT_TOKEN_TTL,
+            ":memory:",
+            MAX_CONCURRENT_AUTH,
+            Some(TransportPolicy::parse("https://vault.example.com").unwrap()),
+            None,
+        );
+
+        let request = |email: &str, source: &str| {
+            Request::builder()
+                .uri(format!("/v1/accounts/{email}/prelogin"))
+                .header(header::HOST, "vault.example.com")
+                .header(FORWARDED_PROTO_HEADER, "https")
+                .header(FORWARDED_FOR_HEADER, source)
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        for attempt in 0..MAX_PRELOGINS_PER_SOURCE_PER_MIN {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    &format!("rotating-{attempt}@example.com"),
+                    "192.0.2.10",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "attempt {attempt}");
+        }
+        let response = app
+            .clone()
+            .oneshot(request("blocked@example.com", "192.0.2.10"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // The source bucket prevents one address from consuming the global
+        // allowance. A distinct trusted source can still use that allowance.
+        let response = app
+            .oneshot(request("independent@example.com", "198.51.100.20"))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -4838,6 +5125,7 @@ mod tests {
                         .uri(path)
                         .header(header::HOST, "vault.example.com")
                         .header(FORWARDED_PROTO_HEADER, "https")
+                        .header(FORWARDED_FOR_HEADER, "192.0.2.1")
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -4857,6 +5145,7 @@ mod tests {
                     .uri("/v1/vault/transaction")
                     .header(header::HOST, "vault.example.com")
                     .header(FORWARDED_PROTO_HEADER, "https")
+                    .header(FORWARDED_FOR_HEADER, "192.0.2.1")
                     .body(Body::empty())
                     .unwrap(),
             )

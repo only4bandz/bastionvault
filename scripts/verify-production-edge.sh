@@ -117,12 +117,13 @@ if [[ "$redirect_target" != "$https_origin/api/v1/livez" ]]; then
 fi
 
 echo "Checking forwarding-header overwrite"
-spoofed_proto_status=$(curl --silent --show-error --max-time 15 \
+spoofed_forwarding_status=$(curl --silent --show-error --max-time 15 \
   --header 'X-Forwarded-Proto: http' \
+  --header 'X-Forwarded-For: not-an-ip, 198.51.100.9' \
   --output /dev/null --write-out '%{http_code}' \
   "$https_origin/api/v1/vault")
-if [[ "$spoofed_proto_status" != "401" ]]; then
-  echo "ingress did not overwrite spoofed forwarding metadata (HTTP $spoofed_proto_status)" >&2
+if [[ "$spoofed_forwarding_status" != "401" ]]; then
+  echo "ingress did not overwrite spoofed proto/client forwarding metadata (HTTP $spoofed_forwarding_status)" >&2
   exit 1
 fi
 

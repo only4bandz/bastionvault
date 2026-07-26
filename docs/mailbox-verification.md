@@ -43,9 +43,10 @@ registration. It is not placed in an HTTP request target.
 
 ## Abuse and lifecycle controls
 
-- Challenge requests: 30 globally and 2 per mailbox per process/minute.
-- Verification attempts: 120 globally and 5 per token prefix per
+- Challenge requests: 30 globally, 10 per trusted source, and 2 per mailbox per
   process/minute.
+- Verification attempts: 120 globally, 30 per trusted source, and 5 per token
+  prefix per process/minute.
 - Durable resend cooldown: two minutes, enforced in SQLite across restarts.
 - Challenge expiry: 30 minutes.
 - Active outbox capacity: 10,000 globally and 3 per challenge owner.
@@ -55,9 +56,10 @@ registration. It is not placed in an HTTP request target.
   not intentionally send already-expired links.
 - Existing accounts produce the same accepted challenge response but no mail.
 
-Process-local rate limits are a first-instance abuse boundary, not a distributed
-anti-abuse system. The selected ingress/provider must add source-aware controls
-and provider quotas during the production operations phase.
+Process-local account, token, and trusted-source rate limits are a
+first-instance abuse boundary, not a distributed anti-abuse system. The
+selected ingress/provider must still add its own source-aware controls and
+provider quotas during the production operations phase.
 
 ## Deployment requirements
 

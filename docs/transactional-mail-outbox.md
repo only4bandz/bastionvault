@@ -92,7 +92,8 @@ Every producer added after this foundation must:
 1. generate a random 128-bit lowercase hexadecimal outbox id;
 2. insert the bounded plain-text message in the same SQLite transaction as the
    authoritative application state;
-3. apply global and per-account abuse limits before producing mail;
+3. apply global, trusted-source, and per-account abuse limits before producing
+   mail;
 4. make stale links harmless and independently expiring;
 5. never store a reusable vault or authentication secret in mail;
 6. treat delivery as notification only, never as account recovery authority.
