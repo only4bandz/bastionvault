@@ -77,6 +77,19 @@ only loss of the storage worker causes permanent quarantine. Vault transactions
 also have one pre-lock admission slot, preventing an authenticated client from
 pre-loading a queue behind the global cache write lock.
 
+Full vault reads return a weak opaque `ETag` derived from the authenticated
+account and committed vault revision. A matching `If-None-Match` returns an
+empty `304 Not Modified` without cloning or serializing up to 64 MiB of
+ciphertext. `Cache-Control: no-store` remains mandatory on both 200 and 304
+responses: the validator enables explicit revalidation, not shared or
+persistent HTTP caching. The validator is deliberately weak because equivalent
+item maps may serialize in a different key order after a process restart. A
+client may use 304 only to retain a snapshot it already authenticated,
+decrypted, and checked against its rollback anchor. The ETag is a freshness
+validator and must never replace manifest authentication, revision/sequence
+comparison, or the local rollback checkpoint. The existing `/vault/revision`
+probe remains supported.
+
 `bastion-ops-status` opens the live WAL database read-only and emits one JSON
 object containing only:
 

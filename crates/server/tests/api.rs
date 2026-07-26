@@ -1088,6 +1088,115 @@ async fn registered_session(app: &Router, email: &str) -> String {
 }
 
 #[tokio::test]
+async fn vault_reads_support_account_scoped_conditional_requests() {
+    let app = server::app_in_memory();
+    let (vault, alice) = registered_vault_session(&app, "etag-alice@example.com").await;
+    let bob = registered_session(&app, "etag-bob@example.com").await;
+    let request = |token: &str, if_none_match: Option<&str>| {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri("/v1/vault")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        if let Some(value) = if_none_match {
+            builder = builder.header(header::IF_NONE_MATCH, value);
+        }
+        builder.body(Body::empty()).unwrap()
+    };
+
+    let response = app.clone().oneshot(request(&alice, None)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let alice_etag = response.headers()[header::ETAG]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(alice_etag.starts_with("W/\"") && alice_etag.ends_with('"'));
+    assert_eq!(alice_etag.len(), 68);
+    let alice_strong_form = alice_etag.strip_prefix("W/").unwrap().to_string();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["revision"],
+        0
+    );
+
+    for validator in [
+        alice_etag.clone(),
+        alice_strong_form.clone(),
+        format!("\"another-tag\", {alice_strong_form}"),
+        "*".to_string(),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(&alice, Some(&validator)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED, "{validator}");
+        assert_eq!(response.headers()[header::ETAG], alice_etag);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .is_empty(),
+            "304 responses must not serialize a vault"
+        );
+    }
+
+    let response = app
+        .clone()
+        .oneshot(request(&alice, Some("\"stale\"")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::ETAG], alice_etag);
+
+    let response = app
+        .clone()
+        .oneshot(request(&alice, Some("not-an-entity-tag")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    // Both accounts are at revision zero. Reusing Alice's validator for Bob
+    // must fetch Bob's representation rather than return a false 304.
+    let response = app
+        .clone()
+        .oneshot(request(&bob, Some(&alice_etag)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_ne!(response.headers()[header::ETAG], alice_etag);
+
+    // A committed mutation changes the validator. The old tag cannot suppress
+    // the new ciphertext snapshot.
+    let blob = serde_json::to_value(vault.encrypt_item(b"secret", "item").unwrap()).unwrap();
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/items/item",
+        Some(&alice),
+        Some(json!({ "blob": blob })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let response = app
+        .clone()
+        .oneshot(request(&alice, Some(&alice_etag)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_ne!(response.headers()[header::ETAG], alice_etag);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).unwrap()["revision"],
+        1
+    );
+}
+
+#[tokio::test]
 async fn logout_revokes_token() {
     let app = server::app_in_memory();
     let token = registered_session(&app, "bob@example.com").await;
