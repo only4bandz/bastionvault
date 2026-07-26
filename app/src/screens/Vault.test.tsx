@@ -29,6 +29,7 @@ function renderVault(items: VaultItem[] = [LOGIN], syncStatus: "saved" | "saving
   const onTrash = vi.fn(async () => true);
   const onDelete = vi.fn(async () => true);
   const onDeleteMany = vi.fn(async () => true);
+  const onRevokeAllSessions = vi.fn(async () => {});
   render(
     <Vault
       email="general@example.com"
@@ -48,10 +49,11 @@ function renderVault(items: VaultItem[] = [LOGIN], syncStatus: "saved" | "saving
       }))}
       syncStatus={syncStatus}
       onLock={vi.fn()}
+      onRevokeAllSessions={onRevokeAllSessions}
       toast={vi.fn()}
     />
   );
-  return { onDelete, onDeleteMany, onTrash, onUpsert };
+  return { onDelete, onDeleteMany, onRevokeAllSessions, onTrash, onUpsert };
 }
 
 describe("Vault dashboard accessibility", () => {
@@ -61,6 +63,15 @@ describe("Vault dashboard accessibility", () => {
     expect(screen.getByRole("button", { name: "Personal" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Email Masking Requires relay" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Breach Scanner" })).toBeEnabled();
+  });
+
+  it("requires confirmation before revoking every session", async () => {
+    const user = userEvent.setup();
+    const { onRevokeAllSessions } = renderVault();
+    await user.click(screen.getByRole("button", { name: "Sign out everywhere" }));
+    expect(onRevokeAllSessions).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Revoke all sessions" }));
+    expect(onRevokeAllSessions).toHaveBeenCalledOnce();
   });
 
   it("reveals card secrets independently and conceals them after the deadline", async () => {

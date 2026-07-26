@@ -154,6 +154,36 @@ export async function readJsonBody<T>(
  */
 export const SESSION_EXPIRED_EVENT = "bastion:session-expired";
 
+const sessionTokenAliases = new Map<string, string>();
+
+function currentSessionToken(token: string): string {
+  let current = token;
+  const seen = new Set<string>();
+  while (sessionTokenAliases.has(current) && !seen.has(current)) {
+    seen.add(current);
+    current = sessionTokenAliases.get(current)!;
+  }
+  return current;
+}
+
+function rememberSessionRotation(previous: string, successor: string): void {
+  sessionTokenAliases.set(previous, successor);
+}
+
+function forgetSessionFamily(token: string): void {
+  const current = currentSessionToken(token);
+  for (const [candidate] of sessionTokenAliases) {
+    if (currentSessionToken(candidate) === current) sessionTokenAliases.delete(candidate);
+  }
+  sessionTokenAliases.delete(current);
+}
+
+export function newSessionToken(): string {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export function isJsonMediaType(value: string | null): boolean {
   return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }
@@ -432,9 +462,10 @@ async function req<T>(
   responseKind: "json" | "empty" = "json",
   expectedStatus: number = responseKind === "json" ? 200 : 204
 ): Promise<T> {
+  const authorizationToken = token ? currentSessionToken(token) : undefined;
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (authorizationToken) headers["Authorization"] = `Bearer ${authorizationToken}`;
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -522,7 +553,32 @@ export const api = {
     req<unknown>("POST", "/sessions", undefined, { email, auth_secret }).then(
       requireSessionTokenResponse
     ),
-  logout: (token: string) => req<void>("DELETE", "/sessions", token, undefined, "empty"),
+  rotateSession: async (token: string): Promise<string> => {
+    const predecessor = currentSessionToken(token);
+    const successor = newSessionToken();
+    const attempt = () =>
+      req<void>("PUT", "/sessions", predecessor, { token: successor }, "empty");
+    try {
+      await attempt();
+    } catch (error) {
+      // The server operation is idempotent for the same predecessor/successor
+      // pair. Retry one ambiguous transport failure so a lost 204 cannot leave
+      // the client using a predecessor that will expire after the grace window.
+      if (!(error instanceof ApiError) || error.status !== 0) throw error;
+      await attempt();
+    }
+    rememberSessionRotation(predecessor, successor);
+    rememberSessionRotation(token, successor);
+    return successor;
+  },
+  logout: async (token: string) => {
+    await req<void>("DELETE", "/sessions", token, undefined, "empty");
+    forgetSessionFamily(token);
+  },
+  revokeAllSessions: async (token: string) => {
+    await req<void>("DELETE", "/sessions/all", token, undefined, "empty");
+    forgetSessionFamily(token);
+  },
   deleteAccount: (token: string, auth_secret: string) =>
     req<void>("DELETE", "/accounts", token, { auth_secret }, "empty"),
   getVault: (token: string) =>

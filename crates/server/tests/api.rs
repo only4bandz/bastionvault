@@ -1313,6 +1313,148 @@ async fn logout_revokes_token() {
 }
 
 #[tokio::test]
+async fn session_rotation_is_idempotent_and_bounds_predecessor_grace() {
+    let app = server::app_in_memory_with_session_lifetimes(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(50),
+    );
+    let token = registered_session(&app, "rotate@example.com").await;
+    let successor = "ab".repeat(32);
+
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/sessions",
+        Some(&token),
+        Some(json!({ "token": successor })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A request already dispatched with the predecessor survives the bounded
+    // grace, and a lost 204 can be retried with the same replacement.
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/sessions",
+        Some(&token),
+        Some(json!({ "token": successor })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // The predecessor cannot fork one family onto a second successor.
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/sessions",
+        Some(&token),
+        Some(json!({ "token": "cd".repeat(32) })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
+    assert_eq!(status, StatusCode::OK);
+    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn logout_through_a_rotation_predecessor_revokes_its_successor() {
+    let app = server::app_in_memory();
+    let token = registered_session(&app, "rotated-logout@example.com").await;
+    let successor = "12".repeat(32);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/sessions",
+        Some(&token),
+        Some(json!({ "token": successor })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, _) = send(&app, "DELETE", "/sessions", Some(&token), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn rotation_never_extends_the_absolute_session_ceiling() {
+    let app = server::app_in_memory_with_session_lifetimes(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_millis(50),
+    );
+    let token = registered_session(&app, "absolute-session@example.com").await;
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let successor = "34".repeat(32);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/sessions",
+        Some(&token),
+        Some(json!({ "token": successor })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    tokio::time::sleep(std::time::Duration::from_millis(110)).await;
+    let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn global_revocation_is_account_scoped_and_includes_the_caller() {
+    let app = server::app_in_memory();
+    let (_, registration, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    let auth_secret = registration.auth_secret.expose_b64().to_string();
+    let email = "revoke-all@example.com";
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/accounts",
+        None,
+        Some(json!({
+            "email": email,
+            "registration": serde_json::to_value(registration).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/sessions",
+            None,
+            Some(json!({ "email": email, "auth_secret": auth_secret })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        tokens.push(body["token"].as_str().unwrap().to_string());
+    }
+    let other = registered_session(&app, "revoke-other@example.com").await;
+
+    let (status, _) = send(&app, "DELETE", "/sessions/all", Some(&tokens[0]), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    for token in tokens {
+        let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, _) = send(&app, "GET", "/vault", Some(&other), None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn expired_token_is_rejected() {
     // Zero TTL -> the token is expired by the next request.
     let app = server::app_in_memory_with_ttl(std::time::Duration::ZERO);
@@ -3284,6 +3426,19 @@ async fn request_bodies_reject_unknown_fields() {
             "message_id": "m1",
             "blob": { "v": 1, "payload": "AAAA" },
             "expire_at": 123
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/sessions",
+        Some(&token),
+        Some(json!({
+            "token": "ab".repeat(32),
+            "remember_me": true
         })),
     )
     .await;

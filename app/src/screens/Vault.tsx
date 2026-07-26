@@ -137,6 +137,7 @@ export function Vault({
   onImport,
   syncStatus,
   onLock,
+  onRevokeAllSessions,
   toast,
 }: {
   email: string;
@@ -153,6 +154,7 @@ export function Vault({
   onImport: (r: ImportResult, onProgress: ImportProgress) => Promise<ImportOutcome>;
   syncStatus: VaultSyncStatus;
   onLock: () => void;
+  onRevokeAllSessions: () => Promise<void>;
   toast: (m: string) => void;
 }): JSX.Element {
   const [nav, setNav] = useState<Nav>("vault");
@@ -169,6 +171,7 @@ export function Vault({
   const [exporting, setExporting] = useState(false);
   const [permanentDelete, setPermanentDelete] = useState<VaultItem | null>(null);
   const [emptyingTrash, setEmptyingTrash] = useState(false);
+  const [revokingSessions, setRevokingSessions] = useState(false);
   const [page, setPage] = useState(1);
   const [trashPage, setTrashPage] = useState(1);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
@@ -429,6 +432,9 @@ export function Vault({
 
         <div className="sidebar-foot">
           <div className="nav-sep" />
+          <button className="nav-item" onClick={() => setRevokingSessions(true)}>
+            <span className="ico"><IcLock /></span> Sign out everywhere
+          </button>
           <button className="nav-item" onClick={onLock}>
             <span className="ico"><IcLock /></span> Lock vault
           </button>
@@ -851,6 +857,23 @@ export function Vault({
           }}
         >
           Every item in trash will be permanently removed. This action cannot be undone.
+        </ConfirmDialog>
+      )}
+
+      {revokingSessions && (
+        <ConfirmDialog
+          title="Sign out everywhere?"
+          confirmLabel="Revoke all sessions"
+          pendingLabel="Revoking…"
+          onClose={() => setRevokingSessions(false)}
+          onConfirm={async () => {
+            await onRevokeAllSessions();
+            return true;
+          }}
+        >
+          Every active Bastion session for this account, including this one,
+          will be revoked immediately. You will need your master password and
+          Secret Key to unlock again.
         </ConfirmDialog>
       )}
     </div>

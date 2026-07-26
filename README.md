@@ -234,7 +234,8 @@ bash scripts/verify-production-edge.sh https://vault.example.com
 | `POST` | `/v1/accounts` | Consumes production mailbox proof and creates an account (stores `salt`, `kdf`, wrapped key, secret hash) |
 | `DELETE` | `/v1/accounts` | Permanently deletes owned state; requires a session plus fresh `auth_secret` proof |
 | `GET` | `/v1/accounts/:email/prelogin` | Returns `salt`+`kdf`+wrapped key (to derive client-side) |
-| `POST` / `DELETE` | `/v1/sessions` | Login (Argon2id) → bearer token (TTL 30 min) / logout |
+| `POST` / `PUT` / `DELETE` | `/v1/sessions` | Login / idempotent bearer rotation / revoke current session family |
+| `DELETE` | `/v1/sessions/all` | Revoke every active session for the authenticated account |
 | `GET` | `/v1/vault` | Encrypted items + manifest + CAS revision (auth); supports opaque account-scoped `ETag` / `If-None-Match` revalidation |
 | `GET` | `/v1/vault/revision` | Cheap authenticated freshness probe; changed revisions still require a full verified fetch |
 | `PUT` | `/v1/vault/transaction` | Atomically apply item operations + sealed manifest at an expected revision |

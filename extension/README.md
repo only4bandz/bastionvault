@@ -29,6 +29,11 @@ No bundler. The pieces are native ES modules and load unpacked as-is:
 - When Chrome evicts the service worker, the unlocked session can be rehydrated
   from extension-private, RAM-backed `chrome.storage.session` until its bounded
   expiry. It is never written to disk and is removed on lock.
+- Bearer tokens remain memory-only, rotate every 10 minutes of active server
+  use, and cannot extend one server session family past its 12-hour absolute
+  ceiling. The original unlock deadline also survives service-worker
+  rehydration and never slides beyond 12 hours. “Sign out everywhere” revokes
+  every family for the account.
 - Before decrypting any item, the worker opens the sealed integrity manifest
   and verifies it against the complete encrypted item set. Legacy vaults use a
   one-time trust-on-first-use bootstrap only after every encrypted payload
