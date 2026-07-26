@@ -19,7 +19,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -106,6 +106,10 @@ const MAX_LOOKUPS_PER_MIN: u32 = 120;
 const MAX_VAULT_READS_PER_MIN: u32 = 60;
 const MAX_VAULT_REVISION_READS_PER_MIN: u32 = 300;
 const MAX_VAULT_MUTATIONS_PER_MIN: u32 = 120;
+/// SQLite has one owner and vault transactions hold the cache write lock until
+/// their durable commit is known. Admit only one such transaction at a time so
+/// a hostile account cannot pre-load a long queue behind a slow commit.
+const MAX_CONCURRENT_VAULT_TRANSACTIONS: usize = 1;
 const MAX_INBOX_READS_PER_MIN: u32 = 60;
 const MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN: u32 = 5;
 const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
@@ -578,7 +582,7 @@ async fn storage_availability_gate(
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if !st.db.is_available() {
+    if !st.db.is_accepting_work() {
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "storage unavailable",
@@ -682,14 +686,17 @@ static SECURITY_COUNTERS: LazyLock<SecurityCounters> = LazyLock::new(SecurityCou
 /// Returns the event label and its running total.
 fn security_event(status: StatusCode, path: &str) -> Option<(&'static str, u64)> {
     let counters = &*SECURITY_COUNTERS;
-    let (label, counter) = if is_honeypot_path(path) {
+    let (label, counter) = if status == StatusCode::MISDIRECTED_REQUEST {
+        // Preserve the transport-boundary signal even when the requested path
+        // also happens to be a lure.
+        ("wrong_public_host", &counters.wrong_public_host)
+    } else if is_honeypot_path(path) {
         ("honeypot", &counters.honeypot)
     } else {
         match status {
             StatusCode::UNAUTHORIZED => ("auth_rejected", &counters.auth_rejected),
             StatusCode::FORBIDDEN => ("forbidden", &counters.forbidden),
             StatusCode::TOO_MANY_REQUESTS => ("rate_limited", &counters.rate_limited),
-            StatusCode::MISDIRECTED_REQUEST => ("wrong_public_host", &counters.wrong_public_host),
             StatusCode::NOT_FOUND if path.ends_with("{unmatched}") => {
                 ("unmatched_path", &counters.unmatched_path)
             }
@@ -755,12 +762,7 @@ const HONEYPOT_PATHS: [&str; 14] = [
 const HONEYPOT_BODY: &str = concat!(
     "{\"error\":\"not_found\",",
     "\"note\":\"good try — but not this time\",",
-    "\"detail\":\"There is nothing behind this path. There is nothing behind any path: ",
-    "the vault is sealed on the client and the server only ever holds opaque ciphertext, ",
-    "so even owning this process would not spend well. Yes, we thought about it.\",",
-    "\"but_seriously\":\"If you did find something real, we want it: ",
-    "see /.well-known/security.txt\",",
-    "\"signed\":\"— the Bastion team\"}"
+    "\"report\":\"Found something real? See /.well-known/security.txt for responsible disclosure.\"}"
 );
 
 fn is_honeypot_path(path: &str) -> bool {
@@ -794,7 +796,10 @@ async fn security_txt() -> Response {
          Expires: {}\n\
          # Please do not degrade availability or touch data that is not yours.\n\
          # And if you got here from /.env: nice reflexes. Still nothing there.\n",
-        rfc3339_utc(now_secs().saturating_add(365 * 24 * 60 * 60))
+        // Keep the rolling horizon comfortably below RFC 9116's one-year
+        // recommendation. The deployment acceptance probe verifies the public
+        // well-known URI rather than an API-prefixed alias.
+        rfc3339_utc(now_secs().saturating_add(180 * 24 * 60 * 60))
     );
     (
         StatusCode::OK,
@@ -972,6 +977,7 @@ struct AppState {
     db: Db,
     token_ttl: Duration,
     auth_slots: Arc<Semaphore>,
+    vault_transaction_slots: Arc<Semaphore>,
     max_rate_entries: usize,
     rate_window: Duration,
     auth_rate_limits: AuthRateLimits,
@@ -1040,6 +1046,7 @@ impl AppState {
             db,
             token_ttl,
             auth_slots: Arc::new(Semaphore::new(auth_limit)),
+            vault_transaction_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_VAULT_TRANSACTIONS)),
             max_rate_entries,
             rate_window,
             auth_rate_limits,
@@ -1075,11 +1082,17 @@ struct Db {
     sender: mpsc::Sender<DbJob>,
     _worker: Arc<DbWorker>,
     available: Arc<AtomicBool>,
+    /// Number of accepted mutations that exceeded their response deadline and
+    /// are still running. While non-zero, new storage work fails fast instead
+    /// of piling up behind the single SQLite owner.
+    timed_out_mutations: Arc<AtomicUsize>,
     response_timeout: Duration,
     /// Instant of the last storage probe that answered healthy. Readiness is
     /// served from it for `READINESS_CACHE_TTL` so unauthenticated probes cost
     /// at most one storage command per window.
     readiness_checked_at: Arc<Mutex<Option<Instant>>>,
+    /// Single-flight admission for the unauthenticated readiness probe.
+    readiness_probe: Arc<Semaphore>,
 }
 
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
@@ -1103,7 +1116,7 @@ impl Drop for DbWorker {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum DbError {
     Sqlite,
     QueueFull,
@@ -1892,8 +1905,10 @@ impl Db {
                     join: Mutex::new(Some(worker)),
                 }),
                 available,
+                timed_out_mutations: Arc::new(AtomicUsize::new(0)),
                 response_timeout,
                 readiness_checked_at: Arc::new(Mutex::new(None)),
+                readiness_probe: Arc::new(Semaphore::new(1)),
             },
             accounts,
             decoy_seed,
@@ -2002,6 +2017,9 @@ impl Db {
         if !self.is_available() {
             return Err(DbError::Quarantined);
         }
+        if self.timed_out_mutations.load(Ordering::Acquire) != 0 {
+            return Err(DbError::ResponseTimeout);
+        }
         let (result_sender, result_receiver) = oneshot::channel();
         let mut result_receiver = result_receiver;
         let job = Box::new(move |conn: &mut Connection| {
@@ -2028,11 +2046,12 @@ impl Db {
                 // lock is held — that await, not the quarantine, is what keeps
                 // a late commit from diverging the cache. So a slow mutation
                 // that ultimately succeeds leaves storage perfectly consistent
-                // and the instance stays in service; only a mutation that
-                // failed or lost its worker quarantines. Quarantining on
-                // slowness alone handed any client that could make one command
-                // exceed the timeout (a maximum-size vault transaction, a flood
-                // of unauthenticated readiness probes) a permanent,
+                // and the instance stays in service. A completed SQLite error
+                // is also unambiguous: its transaction did not commit and the
+                // cache has not advanced. Only losing the worker makes the
+                // durable outcome unknowable and quarantines the process.
+                // Quarantining on slowness alone handed any client that could
+                // make one command exceed the timeout a permanent,
                 // restart-only outage for every account on the instance.
                 //
                 // Reads mutate nothing: a timed-out read is a load signal, and
@@ -2042,14 +2061,28 @@ impl Db {
                         timeout_ms = self.response_timeout.as_millis() as u64,
                         "storage mutation exceeded its response deadline; awaiting completion"
                     );
-                    let result = result_receiver.await.map_err(|_| {
+                    self.timed_out_mutations.fetch_add(1, Ordering::AcqRel);
+                    let timed_out_mutations = self.timed_out_mutations.clone();
+                    let available = self.available.clone();
+                    // The detached monitor is deliberate: if the HTTP request
+                    // is cancelled after the deadline, it still observes the
+                    // accepted command to completion and re-opens admission.
+                    // Dropping the caller must never leave the process stuck in
+                    // a synthetic overload state or accept work while the
+                    // abandoned mutation is still running.
+                    tokio::spawn(async move {
+                        let result = result_receiver.await.map_err(|_| {
+                            available.store(false, Ordering::Release);
+                            DbError::WorkerClosed
+                        });
+                        timed_out_mutations.fetch_sub(1, Ordering::AcqRel);
+                        result
+                    })
+                    .await
+                    .map_err(|_| {
                         self.available.store(false, Ordering::Release);
                         DbError::WorkerClosed
-                    })?;
-                    if result.is_err() {
-                        self.available.store(false, Ordering::Release);
-                    }
-                    result
+                    })??
                 } else {
                     Err(DbError::ResponseTimeout)
                 }
@@ -2061,12 +2094,38 @@ impl Db {
         self.available.load(Ordering::Acquire)
     }
 
+    fn is_accepting_work(&self) -> bool {
+        self.is_available() && self.timed_out_mutations.load(Ordering::Acquire) == 0
+    }
+
     async fn ready(&self) -> Result<(), DbError> {
         if !self.is_available() {
             return Err(DbError::Quarantined);
         }
+        if !self.is_accepting_work() {
+            return Err(DbError::ResponseTimeout);
+        }
         // Serve a recent healthy answer without touching storage. Only success
         // is cached: a failure must be re-observed, and it quarantines anyway.
+        {
+            let checked_at = self
+                .readiness_checked_at
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if checked_at.is_some_and(|at| at.elapsed() < READINESS_CACHE_TTL) {
+                return Ok(());
+            }
+        }
+        // Do not let a cache-expiry stampede enqueue one SQLite command per
+        // unauthenticated probe. One caller refreshes; concurrent callers fail
+        // fast and the ingress retries on its next normal probe interval.
+        let _probe = self
+            .readiness_probe
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| DbError::QueueFull)?;
+        // Another caller may have refreshed between the first cache check and
+        // this permit acquisition.
         {
             let checked_at = self
                 .readiness_checked_at
@@ -3178,7 +3237,6 @@ async fn apply_vault_transaction(
             "manifest too large",
         ));
     }
-
     let mut ids = HashSet::with_capacity(body.operations.len());
     let mut operations = Vec::with_capacity(body.operations.len());
     for operation in body.operations {
@@ -3215,6 +3273,16 @@ async fn apply_vault_transaction(
         };
         operations.push(prepared);
     }
+
+    // Acquire after extraction and validation but before the global cache lock.
+    // This prevents a slow uploader from reserving the slot and prevents valid
+    // requests from accumulating behind a transaction whose SQLite commit is
+    // slow. The client can safely retry a 503 with its expected revision.
+    let _transaction_slot = st
+        .vault_transaction_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "storage busy"))?;
 
     let mut inner = st.write().await;
     let acc = inner
@@ -4830,36 +4898,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn delayed_accepted_mutation_finishes_and_keeps_the_instance_in_service() {
+    async fn delayed_mutation_sheds_new_storage_work_then_recovers() {
         let (db, _, _) = Db::open_with_limits(":memory:", 1, Duration::from_millis(10));
         let completed = Arc::new(AtomicBool::new(false));
         let worker_completed = completed.clone();
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
 
         // The mutation overruns its response deadline, then commits. Awaiting
-        // it under its logical cache lock is what keeps storage consistent, so
-        // slowness alone must not take the instance out of service: doing that
-        // let any client who could make one command run long (a maximum-size
-        // vault transaction) inflict a restart-only outage on every account.
-        db.call_mutation(move |conn| {
-            thread::sleep(Duration::from_millis(50));
-            conn.execute("CREATE TABLE delayed(value INTEGER)", [])?;
-            worker_completed.store(true, Ordering::Release);
-            Ok(())
+        // it keeps cache/storage ordering intact, while the transient overload
+        // state rejects new work instead of building a queue behind it.
+        let slow_db = db.clone();
+        let mutation = tokio::spawn(async move {
+            slow_db
+                .call_mutation(move |conn| {
+                    entered_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                    conn.execute("CREATE TABLE delayed(value INTEGER)", [])?;
+                    worker_completed.store(true, Ordering::Release);
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
         })
         .await
         .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while db.is_accepting_work() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("slow mutation never withdrew storage admission");
 
+        assert!(matches!(
+            db.call(|_| Ok(())).await,
+            Err(DbError::ResponseTimeout)
+        ));
+        assert!(matches!(db.ready().await, Err(DbError::ResponseTimeout)));
+
+        release_sender.send(()).unwrap();
+        mutation.await.unwrap().unwrap();
         assert!(completed.load(Ordering::Acquire));
         assert!(db.is_available());
+        assert!(db.is_accepting_work());
         assert!(db.ready().await.is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_failed_slow_mutation_still_quarantines_the_instance() {
+    async fn a_failed_slow_mutation_recovers_without_false_quarantine() {
         let (db, _, _) = Db::open_with_limits(":memory:", 1, Duration::from_millis(10));
 
-        // Same overrun, but the command itself fails: the cache can no longer
-        // be trusted against durable state, so this one does fail closed.
+        // The final SQLite error is an unambiguous rollback: the cache never
+        // advances, so permanent quarantine would create a client-triggerable
+        // restart-only outage without protecting consistency.
         assert!(db
             .call_mutation(move |conn| {
                 thread::sleep(Duration::from_millis(50));
@@ -4868,8 +4964,9 @@ mod tests {
             })
             .await
             .is_err());
-        assert!(!db.is_available());
-        assert!(matches!(db.ready().await, Err(DbError::Quarantined)));
+        assert!(db.is_available());
+        assert!(db.is_accepting_work());
+        assert!(db.ready().await.is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4934,6 +5031,54 @@ mod tests {
 
         release_sender.send(()).unwrap();
         parked.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_uncached_readiness_has_one_storage_probe_in_flight() {
+        let (db, _, _) = Db::open_with_limits(":memory:", 8, Duration::from_secs(5));
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+        let parked_db = db.clone();
+        let parked = tokio::spawn(async move {
+            parked_db
+                .call(move |_| {
+                    entered_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        let probing_db = db.clone();
+        let first_probe = tokio::spawn(async move { probing_db.ready().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while db.sender.capacity() != 7 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first readiness probe was not queued");
+
+        for _ in 0..32 {
+            assert!(matches!(db.ready().await, Err(DbError::QueueFull)));
+            assert_eq!(
+                db.sender.capacity(),
+                7,
+                "concurrent readiness probe reached the SQLite queue"
+            );
+        }
+
+        release_sender.send(()).unwrap();
+        parked.await.unwrap().unwrap();
+        first_probe.await.unwrap().unwrap();
+        assert!(db.ready().await.is_ok());
     }
 
     #[test]
@@ -5012,14 +5157,21 @@ mod tests {
 
     #[test]
     fn security_events_are_counted_by_class() {
-        let before = SECURITY_COUNTERS.auth_rejected.load(Ordering::Relaxed);
         let (event, total) = security_event(StatusCode::UNAUTHORIZED, "/vault").unwrap();
         assert_eq!(event, "auth_rejected");
-        assert_eq!(total, before + 1);
+        // Other request tests run in parallel and share the process-level
+        // counters, so assert monotonic progress without an exact racy delta.
+        assert!(total > 0);
 
         assert_eq!(
             security_event(StatusCode::NOT_FOUND, "/.env").unwrap().0,
             "honeypot"
+        );
+        assert_eq!(
+            security_event(StatusCode::MISDIRECTED_REQUEST, "/.env")
+                .unwrap()
+                .0,
+            "wrong_public_host"
         );
         assert_eq!(
             security_event(StatusCode::TOO_MANY_REQUESTS, "/sessions")

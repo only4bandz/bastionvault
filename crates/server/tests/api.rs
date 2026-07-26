@@ -463,10 +463,18 @@ async fn concurrent_vault_transactions_have_one_cas_winner() {
             .count(),
         1
     );
+    // The loser either reaches CAS after the winner (409) or is rejected by
+    // the pre-lock transaction admission slot (503). Both preserve one commit
+    // and tell the client to refresh/retry from the authoritative revision.
     assert_eq!(
         statuses
             .iter()
-            .filter(|status| **status == StatusCode::CONFLICT)
+            .filter(|status| {
+                matches!(
+                    **status,
+                    StatusCode::CONFLICT | StatusCode::SERVICE_UNAVAILABLE
+                )
+            })
             .count(),
         1
     );
@@ -1488,6 +1496,65 @@ async fn registration_does_not_reveal_whether_a_mailbox_is_already_registered() 
         answers.push((status, body));
     }
     assert_eq!(answers[0], answers[1], "registration answers differ");
+}
+
+#[tokio::test]
+async fn login_does_not_reveal_an_unverified_account() {
+    let path = test_db_path("unverified-login-enumeration");
+    let known = "legacy-unverified@example.com";
+    let unknown = "unknown@example.com";
+    let (_, registration, _) = Vault::register_with(b"known-password", fast_kdf()).unwrap();
+    let auth_secret = registration.auth_secret.expose_b64().to_string();
+
+    {
+        let app = server::app_with_db(&path);
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/v1/accounts",
+            None,
+            Some(json!({
+                "email": known,
+                "registration": serde_json::to_value(registration).unwrap()
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    // Production cannot create this state, but older/development databases can
+    // contain it. Reopen after changing the durable record so the in-memory
+    // cache observes the same legacy state as startup would.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE accounts SET email_verified_at=NULL WHERE email=?1",
+        [known],
+    )
+    .unwrap();
+    drop(conn);
+    let app = server::app_with_db(&path);
+
+    let mut answers = Vec::new();
+    for email in [known, unknown] {
+        let (status, body) = send(
+            &app,
+            "POST",
+            "/v1/sessions",
+            None,
+            Some(json!({
+                "email": email,
+                "auth_secret": auth_secret.clone()
+            })),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{email} leaked its status"
+        );
+        answers.push((status, body));
+    }
+    assert_eq!(answers[0], answers[1], "login answers differ");
 }
 
 #[tokio::test]

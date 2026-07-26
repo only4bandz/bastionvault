@@ -55,6 +55,51 @@ if ! grep -Eiq '^strict-transport-security:[[:space:]]*max-age=31536000([[:space
   exit 1
 fi
 
+echo "Checking public security.txt"
+curl --silent --show-error --fail --max-time 15 \
+  --output "$work_dir/security.txt" \
+  "$https_origin/.well-known/security.txt"
+python3 - "$work_dir/security.txt" <<'PY'
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+fields = {}
+for line in lines:
+    if not line or line.startswith("#") or ":" not in line:
+        continue
+    name, value = line.split(":", 1)
+    fields.setdefault(name, []).append(value.strip())
+for required in ("Contact", "Expires"):
+    if required not in fields:
+        raise SystemExit(f"security.txt is missing {required}")
+expires = datetime.fromisoformat(fields["Expires"][0].replace("Z", "+00:00"))
+now = datetime.now(timezone.utc)
+if not now < expires:
+    raise SystemExit("security.txt is expired")
+if (expires - now).days >= 365:
+    raise SystemExit("security.txt expiry is not less than one year")
+PY
+
+echo "Checking public honeypot routing"
+honeypot_status=$(curl --silent --show-error --max-time 15 \
+  --output "$work_dir/honeypot.json" --write-out '%{http_code}' \
+  "$https_origin/.env")
+if [[ "$honeypot_status" != "404" ]]; then
+  echo "public honeypot returned HTTP $honeypot_status instead of 404" >&2
+  exit 1
+fi
+python3 - "$work_dir/honeypot.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+body = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if body.get("error") != "not_found" or body.get("note") != "good try — but not this time":
+    raise SystemExit("public honeypot body is not the reviewed constant response")
+PY
+
 echo "Checking plaintext redirect"
 redirect_status=$(curl --silent --show-error --max-time 15 \
   --output /dev/null --write-out '%{http_code}' \

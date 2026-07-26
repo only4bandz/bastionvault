@@ -31,7 +31,10 @@ authenticated private-hop design and a new reviewed configuration contract.
 The ingress and Axum process run on the same host. The ingress must:
 
 1. serve the immutable web application and proxy `/api/*` to the loopback
-   listener; `/verify-email` must resolve to the SPA entry point, never Axum;
+   listener; it must also proxy the exact public disclosure path
+   `/.well-known/security.txt` and the closed honeypot path set declared in
+   `HONEYPOT_PATHS` without introducing a catch-all proxy; `/verify-email` must
+   resolve to the SPA entry point, never Axum;
 2. redirect plaintext HTTP to the exact HTTPS URL before any application
    request reaches Axum;
 3. preserve the original public `Host` header;
@@ -50,6 +53,12 @@ Mailbox verification proofs are encoded in the URL fragment of
 `/verify-email#token=...`; fragments never reach HTTP servers. Ingress request
 logs must still exclude query strings by policy so future application URLs
 cannot accidentally turn secrets into telemetry.
+
+`/.well-known/security.txt` must be reachable at that exact public URI, not
+only below `/api`. The lure paths are exact exceptions for fixed scanner probes
+such as `/.env` and `/wp-login.php`; all other non-API paths remain static-app
+routes. This preserves the narrow Axum trust boundary and prevents a generic
+reverse-proxy fallback from shadowing the web application.
 
 Axum rejects non-health application requests unless `Host` exactly matches the
 configured public authority and the trusted proto value is exactly `https`.

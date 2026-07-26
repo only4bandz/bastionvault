@@ -16,7 +16,9 @@ retained with the release record.
 - SQLite, its WAL/SHM files, and the server lock stay on one local filesystem
   that honors file locks and fsync. Shared or network SQLite is rejected.
 - Axum listens on numeric loopback only. The public ingress serves immutable
-  assets and proxies `/api/*`; it must not proxy the operational status CLI.
+  assets and proxies `/api/*` plus the exact `security.txt` and closed honeypot
+  exceptions documented by the edge contract; it must not add a catch-all
+  proxy or proxy the operational status CLI.
 - Backups are SQLite-aware, encrypted before off-host transfer, and treated as
   sensitive metadata and verifier material.
 - Destructive disk, network, and process drills run only on an isolated staging
@@ -48,10 +50,18 @@ authentication, authorization, quota, or rate-limit decision. Decoys of this
 kind — including the prelogin decoy for unknown accounts — are additions on top
 of the real controls and must never be introduced as a substitute for one.
 
-Readiness is answered from a 500 ms cache so an unauthenticated probe flood
-cannot enqueue one storage command each. Detection of a storage fault is
-therefore delayed by up to that window, never suppressed: the fault is observed
-on the next uncached probe, and the instance then stays failed closed.
+Readiness is answered from a 500 ms cache with one single-flight refresh.
+Concurrent callers at cache expiry fail fast with 503 instead of entering the
+SQLite queue. Detection of a storage fault is therefore delayed by up to that
+window, never suppressed: the fault is observed on the next admitted uncached
+probe, and the instance then stays failed closed.
+
+An accepted mutation that exceeds the storage response deadline temporarily
+withdraws readiness and rejects new storage work until that exact command
+finishes. A successful commit or explicit SQLite rollback re-opens admission;
+only loss of the storage worker causes permanent quarantine. Vault transactions
+also have one pre-lock admission slot, preventing an authenticated client from
+pre-loading a queue behind the global cache write lock.
 
 `bastion-ops-status` opens the live WAL database read-only and emits one JSON
 object containing only:
