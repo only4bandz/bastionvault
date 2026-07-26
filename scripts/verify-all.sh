@@ -36,6 +36,7 @@ run bash extension/build.sh
 run python3 scripts/check-release.py
 run python3 scripts/build-audit-bundle.py --self-test
 run python3 scripts/verify-independent-audit.py --self-test
+run python3 scripts/check-account-id-migration.py --self-test
 run bash web/build.sh
 
 run bash scripts/check-no-browser-secret-storage.sh

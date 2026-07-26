@@ -24,6 +24,7 @@ import {
   frameAutofillError,
 } from "./lib/autofill-policy.js";
 import { makeApi, ApiError } from "./lib/api.js";
+import { canonicalAccountId } from "./lib/account-id.js";
 import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.js";
 import { assertUnlockKdfPolicy } from "./lib/kdf-policy.js";
 import { revealFieldValue } from "./lib/reveal-policy.js";
@@ -52,6 +53,7 @@ import {
   VaultRollbackError,
   assertVaultRollbackProgress,
   createVaultRollbackAnchor,
+  migrateVaultRollbackAnchorScope,
   readVaultRollbackAnchor,
   vaultRollbackAnchorKey,
   withVaultRollbackLock,
@@ -213,11 +215,12 @@ async function loadSessionVaultAnchored(
   vault,
   email,
   server,
-  legacyCheckpoint = null
+  legacyCheckpoint = null,
+  legacyEmail = email
 ) {
-  const key = vaultRollbackAnchorKey(server, email);
+  const area = await trustedAnchorArea();
+  const key = await migrateVaultRollbackAnchorScope(area, server, legacyEmail, email);
   return withVaultRollbackLock(key, async () => {
-    const area = await trustedAnchorArea();
     const trusted = await readVaultRollbackAnchor(area, key);
     const checkpoint = combineCheckpointFloors(trusted, legacyCheckpoint);
     const loaded = await loadSessionVault(account, api, token, vault, checkpoint, trusted);
@@ -513,8 +516,10 @@ async function ensureSession() {
   }
 
   let server;
+  let email;
   try {
     server = normalizeServerUrl(stored.server).url;
+    email = canonicalAccountId(stored.email);
   } catch {
     await area.remove(SESSION_KEY);
     return null;
@@ -527,7 +532,7 @@ async function ensureSession() {
     await ensureWasm();
     account = rehydrate(stored.crypto); // no Argon2id; just the vault key
     api = makeApi(server);
-    token = await api.login(stored.email, account.auth_secret);
+    token = await api.login(email, account.auth_secret);
     const vault = await api.getVault(token);
     const checkpoint = legacyCheckpointFromStored(stored);
     const { items, contacts, lockedRecords, integrity } = await loadSessionVaultAnchored(
@@ -535,14 +540,15 @@ async function ensureSession() {
       api,
       token,
       vault,
-      stored.email,
+      email,
       server,
-      checkpoint
+      checkpoint,
+      stored.email
     );
     session = {
       account,
       token,
-      email: stored.email,
+      email,
       server,
       items,
       contacts,
@@ -581,6 +587,8 @@ chrome.idle.onStateChanged.addListener((state) => {
 });
 
 async function doUnlock(email, password, secretKey) {
+  const legacyEmail = email;
+  email = canonicalAccountId(email);
   await ensureWasm();
   const server = await getServerUrl();
   const api = makeApi(server);
@@ -616,7 +624,16 @@ async function doUnlock(email, password, secretKey) {
   try {
     token = await api.login(email, account.auth_secret);
     const vault = await api.getVault(token);
-    loaded = await loadSessionVaultAnchored(account, api, token, vault, email, server);
+    loaded = await loadSessionVaultAnchored(
+      account,
+      api,
+      token,
+      vault,
+      email,
+      server,
+      null,
+      legacyEmail
+    );
   } catch (error) {
     if (token) api.logout(token).catch(() => {});
     account.lock();

@@ -35,6 +35,11 @@ no email recovery path.
    transaction that creates the account, then consumes the challenge. Its
    outbox history cascades away.
 
+Account identifiers are canonical lowercase ASCII before challenge storage,
+mail delivery, proof lookup, account creation, authentication, and rate-limit
+account bucketing. Case variants therefore refer to one mailbox proof and one
+vault; they cannot reserve parallel accounts or obtain independent quotas.
+
 The server stores only SHA-256 of the 256-bit proof token in the challenge
 table. A fast hash is correct here because the token has full cryptographic
 entropy; this is not a password. The raw token exists temporarily in the

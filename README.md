@@ -127,7 +127,7 @@ the host filesystem and storage honor SQLite's sync requests. This is a local
 durability guarantee, not a substitute for tested backups or replication.
 
 The schema is migrated transactionally through SQLite `user_version`; this
-binary supports schema version 4 and refuses newer databases. Foreign keys are
+binary supports schema version 5 and refuses newer databases. Foreign keys are
 enabled and checked at startup. Create a coherent snapshot of a live database
 without replacing any existing file with:
 
@@ -188,6 +188,19 @@ in [`docs/transactional-mail-outbox.md`](docs/transactional-mail-outbox.md).
 Schema version 4 adds pre-registration mailbox challenges without reserving an
 account identifier; the complete protocol and threat boundary are documented
 in [`docs/mailbox-verification.md`](docs/mailbox-verification.md).
+Schema version 5 canonicalizes every ASCII account identifier to lowercase
+across accounts, mailbox proofs, vault rows, Send ownership, mail ownership,
+sessions, rate-limit buckets, ETags, and browser rollback-checkpoint scopes.
+The migration is atomic and refuses to merge case-colliding historical vaults.
+Run the read-only aggregate preflight before deployment:
+
+```bash
+python3 scripts/check-account-id-migration.py /var/lib/bastion/bastion.db
+```
+
+The command never prints account identifiers. Any non-zero collision count
+blocks rollout and requires explicit private-data remediation; do not delete,
+rename, or merge a vault automatically.
 
 Production mode fails closed unless Axum is loopback-only, SQLite uses an
 absolute path, and one canonical HTTPS public origin is declared. Proxied API

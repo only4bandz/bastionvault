@@ -5,6 +5,7 @@ import {
   VaultRollbackError,
   assertVaultRollbackProgress,
   createVaultRollbackAnchor,
+  migrateVaultRollbackAnchorScope,
   readVaultRollbackAnchor,
   vaultRollbackAnchorKey,
   withVaultRollbackLock,
@@ -22,6 +23,9 @@ function memoryArea() {
       for (const [key, value] of Object.entries(entries)) {
         values.set(key, structuredClone(value));
       }
+    },
+    async remove(key) {
+      values.delete(key);
     },
   };
 }
@@ -107,4 +111,64 @@ test("serializes checkpoint work inside the service worker", async () => {
   });
   await Promise.all([first, second]);
   assert.deepEqual(order, ["first-start", "first-end", "second"]);
+});
+
+test("migrates a case-variant checkpoint without weakening its floor", async () => {
+  const area = memoryArea();
+  const server = "https://vault.example";
+  const legacyKey = vaultRollbackAnchorKey(server, "Alice@Example.COM");
+  const canonicalKey = vaultRollbackAnchorKey(server, "alice@example.com");
+  const legacy = await createVaultRollbackAnchor(integrity(8, 12n, '{"seq":12}'));
+  await writeVaultRollbackAnchor(area, legacyKey, legacy);
+
+  assert.equal(
+    await migrateVaultRollbackAnchorScope(
+      area,
+      server,
+      "Alice@Example.COM",
+      "alice@example.com"
+    ),
+    canonicalKey
+  );
+  assert.deepEqual(await readVaultRollbackAnchor(area, canonicalKey), legacy);
+  assert.equal(await readVaultRollbackAnchor(area, legacyKey), null);
+});
+
+test("keeps the dominant case-variant checkpoint and rejects split histories", async () => {
+  const area = memoryArea();
+  const server = "https://vault.example";
+  const legacyKey = vaultRollbackAnchorKey(server, "Alice@Example.COM");
+  const canonicalKey = vaultRollbackAnchorKey(server, "alice@example.com");
+  const older = await createVaultRollbackAnchor(integrity(8, 12n, '{"seq":12}'));
+  const newer = await createVaultRollbackAnchor(integrity(9, 13n, '{"seq":13}'));
+  await writeVaultRollbackAnchor(area, legacyKey, older);
+  await writeVaultRollbackAnchor(area, canonicalKey, newer);
+  await migrateVaultRollbackAnchorScope(
+    area,
+    server,
+    "Alice@Example.COM",
+    "alice@example.com"
+  );
+  assert.deepEqual(await readVaultRollbackAnchor(area, canonicalKey), newer);
+
+  await writeVaultRollbackAnchor(area, legacyKey, newer);
+  const conflicting = await createVaultRollbackAnchor(
+    integrity(10, 13n, '{"seq":13,"substitute":true}')
+  );
+  area.values.set(canonicalKey, {
+    version: 1,
+    revision: conflicting.revision,
+    manifest_seq: conflicting.manifestSeq.toString(),
+    manifest_digest: conflicting.manifestDigest,
+  });
+  await assert.rejects(
+    () =>
+      migrateVaultRollbackAnchorScope(
+        area,
+        server,
+        "Alice@Example.COM",
+        "alice@example.com"
+      ),
+    /checkpoints conflict/i
+  );
 });

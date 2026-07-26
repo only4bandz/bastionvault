@@ -133,7 +133,7 @@ const DB_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 const READINESS_CACHE_TTL: Duration = Duration::from_millis(500);
 /// Latest schema understood by this binary. Startup refuses newer databases
 /// instead of silently running code against an incompatible layout.
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 const VERIFICATION_TOKEN_BYTES: usize = 32;
 const VERIFICATION_TTL_SECONDS: i64 = 30 * 60;
 const VERIFICATION_RESEND_SECONDS: i64 = 2 * 60;
@@ -1869,6 +1869,199 @@ fn migrate_v3_to_v4(conn: &mut Connection) -> rusqlite::Result<()> {
     foreign_keys
 }
 
+fn migrate_v4_to_v5(conn: &mut Connection) -> rusqlite::Result<()> {
+    // Account identifiers become canonical lowercase ASCII in v5. Rebuild all
+    // related tables so the invariant is enforced by SQLite as well as the API
+    // boundary. Foreign-key enforcement must be disabled outside the
+    // transaction while the referenced tables are replaced.
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let migration = (|| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let account_collision: bool = tx.query_row(
+            "SELECT EXISTS(
+               SELECT lower(email) AS canonical
+                 FROM accounts
+                GROUP BY canonical
+               HAVING COUNT(*)>1
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        let challenge_collision: bool = tx.query_row(
+            "SELECT EXISTS(
+               SELECT lower(c.email) AS canonical
+                 FROM registration_challenges c
+                WHERE NOT EXISTS(
+                  SELECT 1 FROM accounts a WHERE lower(a.email)=lower(c.email)
+                )
+                GROUP BY canonical
+               HAVING COUNT(*)>1
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if account_collision || challenge_collision {
+            // Two independent vaults or proofs must never be merged by an
+            // automatic case fold. The transaction leaves schema v4 untouched
+            // so an operator can resolve the private records explicitly.
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+
+        tx.execute_batch(
+            "CREATE TABLE accounts_v5(
+               email TEXT PRIMARY KEY,
+               salt TEXT NOT NULL,
+               kdf TEXT NOT NULL,
+               wrapped_vault_key TEXT NOT NULL,
+               auth_hash TEXT NOT NULL,
+               vault_revision INTEGER NOT NULL DEFAULT 0,
+               email_verified_at INTEGER,
+               CHECK(email=lower(email)));
+             INSERT INTO accounts_v5
+               SELECT lower(email),salt,kdf,wrapped_vault_key,auth_hash,
+                      vault_revision,email_verified_at
+                 FROM accounts;
+
+             CREATE TABLE items_v5(
+               email TEXT NOT NULL,
+               id TEXT NOT NULL,
+               blob TEXT NOT NULL,
+               PRIMARY KEY(email,id),
+               FOREIGN KEY(email) REFERENCES accounts_v5(email) ON DELETE CASCADE,
+               CHECK(email=lower(email)));
+             INSERT INTO items_v5
+               SELECT lower(email),id,blob FROM items;
+
+             CREATE TABLE manifests_v5(
+               email TEXT PRIMARY KEY,
+               blob TEXT NOT NULL,
+               FOREIGN KEY(email) REFERENCES accounts_v5(email) ON DELETE CASCADE,
+               CHECK(email=lower(email)));
+             INSERT INTO manifests_v5
+               SELECT lower(email),blob FROM manifests;
+
+             CREATE TABLE send_directory_v5(
+               email TEXT PRIMARY KEY,
+               bastion_id TEXT UNIQUE NOT NULL,
+               public TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               FOREIGN KEY(email) REFERENCES accounts_v5(email) ON DELETE CASCADE,
+               CHECK(email=lower(email)));
+             INSERT INTO send_directory_v5
+               SELECT lower(email),bastion_id,public,created_at FROM send_directory;
+
+             CREATE TABLE send_inbox_v5(
+               recipient_id TEXT NOT NULL,
+               message_id TEXT NOT NULL,
+               blob TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               expires_at INTEGER,
+               PRIMARY KEY(recipient_id,message_id),
+               FOREIGN KEY(recipient_id) REFERENCES send_directory_v5(bastion_id)
+                 ON DELETE CASCADE);
+             INSERT INTO send_inbox_v5
+               SELECT recipient_id,message_id,blob,created_at,expires_at FROM send_inbox;
+
+             CREATE TABLE registration_challenges_v5(
+               email TEXT PRIMARY KEY,
+               token_hash BLOB UNIQUE NOT NULL,
+               expires_at INTEGER NOT NULL,
+               resend_after INTEGER NOT NULL,
+               verified_at INTEGER,
+               created_at INTEGER NOT NULL,
+               CHECK(email=lower(email)),
+               CHECK(length(token_hash)=32),
+               CHECK(expires_at>=created_at),
+               CHECK(resend_after>=created_at),
+               CHECK(verified_at IS NULL OR verified_at>=created_at));
+             INSERT INTO registration_challenges_v5
+               SELECT lower(c.email),c.token_hash,c.expires_at,c.resend_after,
+                      c.verified_at,c.created_at
+                 FROM registration_challenges c
+                WHERE NOT EXISTS(
+                  SELECT 1 FROM accounts a WHERE lower(a.email)=lower(c.email)
+                );
+
+             CREATE TABLE mail_outbox_v5(
+               id TEXT PRIMARY KEY,
+               account_email TEXT,
+               challenge_email TEXT,
+               recipient TEXT NOT NULL,
+               subject TEXT NOT NULL,
+               text_body TEXT NOT NULL,
+               state TEXT NOT NULL,
+               attempts INTEGER NOT NULL DEFAULT 0,
+               available_at INTEGER NOT NULL,
+               lease_until INTEGER,
+               created_at INTEGER NOT NULL,
+               delivered_at INTEGER,
+               last_error_code TEXT,
+               FOREIGN KEY(account_email) REFERENCES accounts_v5(email) ON DELETE CASCADE,
+               FOREIGN KEY(challenge_email) REFERENCES registration_challenges_v5(email)
+                 ON DELETE CASCADE,
+               CHECK((account_email IS NOT NULL)+(challenge_email IS NOT NULL)=1),
+               CHECK(account_email IS NULL OR account_email=lower(account_email)),
+               CHECK(challenge_email IS NULL OR challenge_email=lower(challenge_email)),
+               CHECK(length(id)=32 AND id=lower(id)),
+               CHECK(state IN ('pending','in_flight','delivered','dead')),
+               CHECK(attempts BETWEEN 0 AND 8),
+               CHECK(available_at>=0 AND created_at>=0),
+               CHECK((state='in_flight')=(lease_until IS NOT NULL)),
+               CHECK((state='delivered')=(delivered_at IS NOT NULL)),
+               CHECK(last_error_code IS NULL OR length(last_error_code)<=64),
+               CHECK(
+                 (state IN ('pending','in_flight')
+                   AND length(recipient) BETWEEN 1 AND 254
+                   AND length(subject) BETWEEN 1 AND 160
+                   AND length(text_body) BETWEEN 1 AND 16384)
+                 OR
+                 (state IN ('delivered','dead')
+                   AND recipient='' AND subject='' AND text_body='')
+               ));
+             INSERT INTO mail_outbox_v5(
+               id,account_email,challenge_email,recipient,subject,text_body,state,
+               attempts,available_at,lease_until,created_at,delivered_at,last_error_code
+             ) SELECT
+               o.id,
+               CASE WHEN o.account_email IS NULL THEN NULL ELSE lower(o.account_email) END,
+               CASE WHEN o.challenge_email IS NULL THEN NULL ELSE lower(o.challenge_email) END,
+               CASE WHEN o.recipient='' THEN '' ELSE lower(o.recipient) END,
+               o.subject,o.text_body,o.state,o.attempts,o.available_at,o.lease_until,
+               o.created_at,o.delivered_at,o.last_error_code
+             FROM mail_outbox o
+             WHERE o.account_email IS NOT NULL
+                OR EXISTS(
+                  SELECT 1 FROM registration_challenges_v5 c
+                   WHERE c.email=lower(o.challenge_email)
+                );
+
+             DROP TABLE mail_outbox;
+             DROP TABLE registration_challenges;
+             DROP TABLE send_inbox;
+             DROP TABLE send_directory;
+             DROP TABLE items;
+             DROP TABLE manifests;
+             DROP TABLE accounts;
+
+             ALTER TABLE accounts_v5 RENAME TO accounts;
+             ALTER TABLE items_v5 RENAME TO items;
+             ALTER TABLE manifests_v5 RENAME TO manifests;
+             ALTER TABLE send_directory_v5 RENAME TO send_directory;
+             ALTER TABLE send_inbox_v5 RENAME TO send_inbox;
+             ALTER TABLE registration_challenges_v5 RENAME TO registration_challenges;
+             ALTER TABLE mail_outbox_v5 RENAME TO mail_outbox;
+             CREATE INDEX idx_inbox_recipient ON send_inbox(recipient_id);
+             CREATE INDEX idx_mail_outbox_due
+               ON mail_outbox(state,available_at,lease_until,created_at);
+             PRAGMA user_version=5;",
+        )?;
+        tx.commit()
+    })();
+    let foreign_keys = conn.pragma_update(None, "foreign_keys", "ON");
+    migration?;
+    foreign_keys
+}
+
 fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
     let mut version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     assert!(
@@ -1881,6 +2074,7 @@ fn migrate_schema(conn: &mut Connection) -> rusqlite::Result<()> {
             1 => migrate_v1_to_v2(conn)?,
             2 => migrate_v2_to_v3(conn)?,
             3 => migrate_v3_to_v4(conn)?,
+            4 => migrate_v4_to_v5(conn)?,
             _ => unreachable!("all schema migrations are explicit"),
         }
         version = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -2796,8 +2990,8 @@ async fn request_registration_challenge(
         StatusCode::NOT_FOUND,
         "mailbox verification disabled",
     ))?;
-    validate_account_id(&req.email)?;
-    if !mail_outbox::valid_recipient(&req.email) {
+    let email = canonical_account_id(&req.email)?;
+    if !mail_outbox::valid_recipient(&email) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid mailbox"));
     }
     source_auth_rate_limit(
@@ -2814,11 +3008,11 @@ async fn request_registration_challenge(
     )?;
     auth_rate_limit(
         &st,
-        &req.email,
+        &email,
         "challenge-email",
         MAX_CHALLENGES_PER_EMAIL_PER_MIN,
     )?;
-    let mail = new_registration_mail(&req.email, origin, now_secs());
+    let mail = new_registration_mail(&email, origin, now_secs());
     match st
         .db
         .request_registration_challenge(mail)
@@ -2886,7 +3080,7 @@ async fn create_account(
     Extension(source): Extension<ClientSource>,
     Json(mut req): Json<CreateAccount>,
 ) -> Result<StatusCode, ApiError> {
-    validate_account_id(&req.email)?;
+    req.email = canonical_account_id(&req.email)?;
     validate_registration(&req.registration)?;
     let now = now_secs();
     let mailbox_proof = if st.verification_origin.is_some() {
@@ -3063,7 +3257,7 @@ async fn prelogin(
     Extension(source): Extension<ClientSource>,
     Path(email): Path<String>,
 ) -> Result<Json<Prelogin>, ApiError> {
-    validate_account_id(&email)?;
+    let email = canonical_account_id(&email)?;
     // Unauthenticated existence oracle: throttle before the account lookup so
     // bulk enumeration (and KDF-parameter harvesting) is rate-bound.
     source_auth_rate_limit(
@@ -3140,9 +3334,9 @@ fn prelogin_decoy(seed: &[u8; 32], email: &str) -> Prelogin {
 async fn create_session(
     State(st): State<AppState>,
     Extension(source): Extension<ClientSource>,
-    Json(req): Json<LoginRequest>,
+    Json(mut req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    validate_account_id(&req.email)?;
+    req.email = canonical_account_id(&req.email)?;
     if !is_exact_b64(req.auth_secret.expose_b64(), AUTH_SECRET_BYTES) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
@@ -3747,6 +3941,15 @@ fn validate_account_id(email: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Canonical account identity used by storage, authentication, rate limits,
+/// ETags, mailbox proofs, sessions, and client rollback scopes. Account ids are
+/// already restricted to ASCII, so this fold is deterministic across Rust,
+/// SQLite, JavaScript, SMTP providers, and process restarts.
+fn canonical_account_id(email: &str) -> Result<String, ApiError> {
+    validate_account_id(email)?;
+    Ok(email.to_ascii_lowercase())
+}
+
 fn auth_permit(st: &AppState) -> Result<OwnedSemaphorePermit, ApiError> {
     st.auth_slots
         .clone()
@@ -3829,7 +4032,7 @@ fn validate_persisted_credentials(
             Some(AUTH_HASH_OUTPUT_BYTES),
         )
         .is_ok();
-    let valid = validate_account_id(email).is_ok()
+    let valid = canonical_account_id(email).is_ok_and(|canonical| canonical == email)
         && is_exact_b64(salt, REGISTRATION_SALT_BYTES)
         && kdf_is_valid
         && wrapped.v == crypto_core::aead::FORMAT_VERSION
@@ -4842,6 +5045,224 @@ mod tests {
         assert_ne!(first, vault_etag(&seed, "bob@example.com", 4));
         assert_ne!(first, vault_etag(&[8u8; 32], "alice@example.com", 4));
         assert_eq!(first.len(), 68);
+    }
+
+    #[test]
+    fn account_ids_fold_ascii_case_only_after_structural_validation() {
+        assert_eq!(
+            canonical_account_id("Alice+Vault@Example.COM")
+                .ok()
+                .unwrap()
+                .as_str(),
+            "alice+vault@example.com"
+        );
+        for invalid in [
+            " alice@example.com",
+            "alice @example.com",
+            "álîçé@example.com",
+        ] {
+            assert!(
+                canonical_account_id(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_v5_canonicalizes_every_account_reference() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_v0_to_v1(&mut conn).unwrap();
+        migrate_v1_to_v2(&mut conn).unwrap();
+        migrate_v2_to_v3(&mut conn).unwrap();
+        migrate_v3_to_v4(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO accounts(
+               email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision,email_verified_at
+             ) VALUES('Alice@Example.COM','salt','{}','{}','hash',7,1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO items(email,id,blob)
+             VALUES('Alice@Example.COM','item','{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO manifests(email,blob) VALUES('Alice@Example.COM','{}')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO send_directory(email,bastion_id,public,created_at)
+             VALUES('Alice@Example.COM','recipient','{}',1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO send_inbox(recipient_id,message_id,blob,created_at,expires_at)
+             VALUES('recipient','message','{}',1,NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO registration_challenges(
+               email,token_hash,expires_at,resend_after,verified_at,created_at
+             ) VALUES('Proof@Example.COM',?1,100,50,60,1)",
+            params![[9u8; 32].as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO registration_challenges(
+               email,token_hash,expires_at,resend_after,verified_at,created_at
+             ) VALUES('ALICE@EXAMPLE.COM',?1,100,50,60,1)",
+            params![[8u8; 32].as_slice()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mail_outbox(
+               id,account_email,challenge_email,recipient,subject,text_body,state,
+               attempts,available_at,created_at
+             ) VALUES(
+               '00112233445566778899aabbccddeeff','Alice@Example.COM',NULL,
+               'Alice@Example.COM','Subject','Body','pending',0,1,1
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mail_outbox(
+               id,account_email,challenge_email,recipient,subject,text_body,state,
+               attempts,available_at,created_at
+             ) VALUES(
+               'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',NULL,'ALICE@EXAMPLE.COM',
+               'ALICE@EXAMPLE.COM','Obsolete','Body','pending',0,1,1
+             )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO mail_outbox(
+               id,account_email,challenge_email,recipient,subject,text_body,state,
+               attempts,available_at,created_at
+             ) VALUES(
+               'ffeeddccbbaa99887766554433221100',NULL,'Proof@Example.COM',
+               'Proof@Example.COM','Subject','Body','pending',0,1,1
+             )",
+            [],
+        )
+        .unwrap();
+
+        migrate_v4_to_v5(&mut conn).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
+        for (table, column, expected) in [
+            ("accounts", "email", "alice@example.com"),
+            ("items", "email", "alice@example.com"),
+            ("manifests", "email", "alice@example.com"),
+            ("send_directory", "email", "alice@example.com"),
+            ("registration_challenges", "email", "proof@example.com"),
+        ] {
+            let actual: String = conn
+                .query_row(&format!("SELECT {column} FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(actual, expected, "{table}.{column}");
+        }
+        let outbox: Vec<(Option<String>, Option<String>, String)> = conn
+            .prepare(
+                "SELECT account_email,challenge_email,recipient
+                   FROM mail_outbox ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            outbox,
+            vec![
+                (
+                    Some("alice@example.com".to_string()),
+                    None,
+                    "alice@example.com".to_string()
+                ),
+                (
+                    None,
+                    Some("proof@example.com".to_string()),
+                    "proof@example.com".to_string()
+                ),
+            ]
+        );
+        let has_violation = {
+            let mut statement = conn.prepare("PRAGMA foreign_key_check").unwrap();
+            let has_violation = statement.query([]).unwrap().next().unwrap().is_some();
+            has_violation
+        };
+        assert!(!has_violation);
+        assert!(conn
+            .execute(
+                "INSERT INTO accounts(
+                   email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision,email_verified_at
+                 ) VALUES('Upper@Example.COM','salt','{}','{}','hash',0,1)",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn schema_v5_refuses_case_collisions_without_modifying_v4() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_v0_to_v1(&mut conn).unwrap();
+        migrate_v1_to_v2(&mut conn).unwrap();
+        migrate_v2_to_v3(&mut conn).unwrap();
+        migrate_v3_to_v4(&mut conn).unwrap();
+        for email in ["Alice@Example.COM", "alice@example.com"] {
+            conn.execute(
+                "INSERT INTO accounts(
+                   email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision,email_verified_at
+                 ) VALUES(?1,'salt','{}','{}','hash',0,1)",
+                [email],
+            )
+            .unwrap();
+        }
+
+        assert!(migrate_v4_to_v5(&mut conn).is_err());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let accounts: i64 = conn
+            .query_row("SELECT COUNT(*) FROM accounts", [], |row| row.get(0))
+            .unwrap();
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        assert_eq!(accounts, 2);
+        assert_eq!(foreign_keys, 1);
+
+        conn.execute("DELETE FROM accounts WHERE email='Alice@Example.COM'", [])
+            .unwrap();
+        for (email, token) in [
+            ("Proof@Example.COM", [1u8; 32]),
+            ("proof@example.com", [2u8; 32]),
+        ] {
+            conn.execute(
+                "INSERT INTO registration_challenges(
+                   email,token_hash,expires_at,resend_after,verified_at,created_at
+                 ) VALUES(?1,?2,100,50,NULL,1)",
+                params![email, token.as_slice()],
+            )
+            .unwrap();
+        }
+        assert!(migrate_v4_to_v5(&mut conn).is_err());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
     }
 
     #[test]
