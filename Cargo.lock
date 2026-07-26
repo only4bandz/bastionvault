@@ -1197,6 +1197,7 @@ dependencies = [
  "base64",
  "crypto-core",
  "data-encoding",
+ "hmac",
  "http-body-util",
  "lettre",
  "rusqlite",

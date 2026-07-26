@@ -40,6 +40,7 @@ use base64::{
     engine::general_purpose::{STANDARD as B64, URL_SAFE_NO_PAD},
     Engine,
 };
+use hmac::{Hmac, Mac};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -3248,10 +3249,78 @@ async fn authenticate_vault_transaction(
     Ok(next.run(request).await)
 }
 
-async fn get_vault(
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<VaultResponse>, ApiError> {
+/// An opaque, deployment-stable weak validator for one account revision.
+///
+/// The account is part of the authenticated representation even though every
+/// caller uses the same `/vault` URI. A plain revision tag could therefore
+/// produce a false 304 when a client switches accounts at the same revision.
+/// HMAC keeps the account identifier out of the header while the persisted
+/// deployment seed keeps validators stable across process restarts. The tag is
+/// weak because equivalent `HashMap` content may serialize in a different key
+/// order after restart; it intentionally asserts semantic, not byte identity.
+fn vault_etag(seed: &[u8; 32], email: &str, revision: u64) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(seed).expect("SHA-256 HMAC accepts every key length");
+    mac.update(b"bastion:v1:vault-etag\0");
+    mac.update(
+        &u64::try_from(email.len())
+            .expect("validated account identifiers fit in u64")
+            .to_be_bytes(),
+    );
+    mac.update(email.as_bytes());
+    mac.update(&revision.to_be_bytes());
+    format!(
+        "W/\"{}\"",
+        data_encoding::HEXLOWER.encode(mac.finalize().into_bytes().as_ref())
+    )
+}
+
+/// Parse `If-None-Match` strictly enough to avoid treating malformed input as
+/// an unconditional request. GET uses weak comparison, so `W/"tag"` matches
+/// the equivalent `"tag"` form. Multiple field lines and comma-separated lists
+/// are accepted; the wildcard may not be mixed with entity tags.
+fn if_none_match_matches(headers: &HeaderMap, current: &str) -> Result<bool, ApiError> {
+    let invalid = || ApiError(StatusCode::BAD_REQUEST, "invalid If-None-Match");
+    let current_entity_tag = current.strip_prefix("W/").unwrap_or(current);
+    let mut matched = false;
+    let mut wildcard = false;
+    let mut tag_count = 0usize;
+
+    for value in headers.get_all(header::IF_NONE_MATCH).iter() {
+        let raw = value.to_str().map_err(|_| invalid())?;
+        for part in raw.split(',') {
+            let candidate = part.trim_matches(|character| character == ' ' || character == '\t');
+            if candidate.is_empty() {
+                return Err(invalid());
+            }
+            if candidate == "*" {
+                wildcard = true;
+                continue;
+            }
+
+            tag_count = tag_count.saturating_add(1);
+            let entity_tag = candidate.strip_prefix("W/").unwrap_or(candidate);
+            let bytes = entity_tag.as_bytes();
+            if bytes.len() < 2
+                || bytes.first() != Some(&b'"')
+                || bytes.last() != Some(&b'"')
+                || !bytes[1..bytes.len() - 1]
+                    .iter()
+                    .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte))
+            {
+                return Err(invalid());
+            }
+            matched |= entity_tag == current_entity_tag;
+        }
+    }
+
+    if wildcard && tag_count != 0 {
+        return Err(invalid());
+    }
+    Ok(wildcard || matched)
+}
+
+async fn get_vault(State(st): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
     let email = require_auth(&st, &headers).await?;
     rate_limit(&st, &email, "vault-read", MAX_VAULT_READS_PER_MIN)?;
     let inner = st.read().await;
@@ -3259,11 +3328,24 @@ async fn get_vault(
         .accounts
         .get(&email)
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    Ok(Json(VaultResponse {
+    let etag = vault_etag(&st.prelogin_decoy_seed, &email, acc.vault_revision);
+    let etag_header = HeaderValue::from_str(&etag)
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "etag error"))?;
+    if if_none_match_matches(&headers, &etag)? {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        response.headers_mut().insert(header::ETAG, etag_header);
+        return Ok(response);
+    }
+
+    let payload = VaultResponse {
         items: acc.items.clone(),
         manifest: acc.manifest.clone(),
         revision: acc.vault_revision,
-    }))
+    };
+    drop(inner);
+    let mut response = Json(payload).into_response();
+    response.headers_mut().insert(header::ETAG, etag_header);
+    Ok(response)
 }
 
 /// Cheap authenticated freshness probe. Clients may retain only a snapshot
@@ -4749,6 +4831,48 @@ mod tests {
             HeaderValue::from_static("192.0.2.44, 198.51.100.8"),
         );
         assert_eq!(canonical_client_ip(&chained), None);
+    }
+
+    #[test]
+    fn vault_etags_are_stable_and_scoped_to_account_and_revision() {
+        let seed = [7u8; 32];
+        let first = vault_etag(&seed, "alice@example.com", 4);
+        assert_eq!(first, vault_etag(&seed, "alice@example.com", 4));
+        assert_ne!(first, vault_etag(&seed, "alice@example.com", 5));
+        assert_ne!(first, vault_etag(&seed, "bob@example.com", 4));
+        assert_ne!(first, vault_etag(&[8u8; 32], "alice@example.com", 4));
+        assert_eq!(first.len(), 68);
+    }
+
+    #[test]
+    fn if_none_match_parser_rejects_ambiguous_or_malformed_values() {
+        let current = "\"current\"";
+        let mut headers = HeaderMap::new();
+        headers.append(header::IF_NONE_MATCH, HeaderValue::from_static("\"stale\""));
+        headers.append(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("W/\"current\""),
+        );
+        assert!(matches!(if_none_match_matches(&headers, current), Ok(true)));
+
+        for value in [
+            "",
+            "current",
+            "\"unterminated",
+            "*, \"current\"",
+            "\"valid\",",
+            "w/\"current\"",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::IF_NONE_MATCH,
+                HeaderValue::from_str(value).expect("test header value"),
+            );
+            assert!(
+                if_none_match_matches(&headers, current).is_err(),
+                "accepted {value:?}"
+            );
+        }
     }
 
     #[test]
