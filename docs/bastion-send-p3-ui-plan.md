@@ -67,8 +67,9 @@
   (encrypted, synced): `{ bastion_id, public (pinned), pinFp, display, verified_at,
   safety_number }`.
 - **BR8 — Surface caps + map status codes.** 256 KiB blob (compose counter),
-  inbox 500 / page 100, rate limits 60 (send) / 120 (inbound) / 120 (lookup) per
-  min; 404→"no/expired", 409→"already submitted", 413→"too large", 429→
+  inbox 500 / page 100, rate limits 60 (send) / 30 (sender-recipient pair) /
+  120 (recipient aggregate) / 120 (lookup) per min; 404→"no/expired",
+  409→"already submitted", 413→"too large", 429→
   disambiguate "sending too fast" vs "recipient inbox full". (§I.7)
 - **BR9 — Clear on lock.** Opened plaintext, drafts, inbox cache, verify modals,
   and the Send identity all drop on auto-lock (identity already cleared in WASM).
@@ -640,7 +641,8 @@ on this account; unlock the device that has it, or rotate." Only `create` when w
 
 **I.7 — Caps to surface in UI (from `crates/server/src/lib.rs`):** blob `MAX_SEND_BLOB`
 **256 KiB** (compose counter target), inbox quota `MAX_INBOX` **500**, inbox page cap **100**
-(paginate by deleting), rate limits — sender **60/min**, inbound **120/min**, lookup **120/min**.
+(paginate by deleting), rate limits — sender **60/min**, sender-recipient pair **30/min**,
+recipient aggregate **120/min**, lookup **120/min**.
 The `429` copy should disambiguate "you're sending too fast" vs "their inbox is full" (server text
 is `"recipient inbox full"`).
 

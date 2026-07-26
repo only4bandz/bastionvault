@@ -68,10 +68,13 @@ outside the application host.
 Synchronous SQLite work runs off Tokio executor threads without weakening the
 single-owner boundary. A bounded command queue feeds one dedicated storage
 owner. Queue saturation fails fast. If an accepted command exceeds its response
-deadline, the process withdraws readiness; an accepted mutation still finishes
-under its logical cache lock before the process remains quarantined for restart.
-Unbounded `spawn_blocking` tasks and pools of competing SQLite connections are
-explicitly rejected.
+deadline, the process temporarily withdraws readiness and new storage
+admission; an accepted mutation still finishes under its logical cache lock.
+Admission re-opens after a successful commit or explicit rollback. Only loss of
+the storage worker causes permanent quarantine. Rate-limit counters use
+separate bounded mutexes and never serialize account-cache or durable storage
+work. Unbounded `spawn_blocking` tasks and pools of competing SQLite
+connections are explicitly rejected.
 
 The schema is transactionally versioned and guarded by foreign keys. The
 repository also provides a no-clobber online snapshot command and an
