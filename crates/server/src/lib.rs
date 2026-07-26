@@ -118,6 +118,20 @@ const RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SENDS_PER_MIN: u32 = 60; // per sender
 const MAX_INBOUND_PER_MIN: u32 = 120; // per recipient (anti inbox-flood)
 const MAX_INBOUND_PER_SENDER_RECIPIENT_PER_MIN: u32 = 30;
+/// Standing share of a recipient's inbox any one sender may consume.
+///
+/// The per-minute pair limit only slows a flood: at 30 a minute one account
+/// fills a 500-message inbox in under twenty minutes, after which every other
+/// sender is refused until the recipient deletes messages. A long-window pair
+/// limit bounds how much of that capacity a single sender can hold at once,
+/// leaving the rest of the inbox reachable by everyone else.
+///
+/// A strict occupancy quota — "this sender currently holds N of your 500" —
+/// is deliberately not implemented: it would require storing which account
+/// sent each stored message, turning the inbox table into a durable
+/// sender/recipient social graph. See docs/bastion-send-design.md §7.
+const MAX_INBOUND_PER_SENDER_RECIPIENT_PER_DAY: u32 = 150;
+const INBOUND_PAIR_DAY: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_LOOKUPS_PER_MIN: u32 = 120;
 const MAX_IDENTITY_PUBLICATIONS_PER_MIN: u32 = 10;
 const MAX_WHOAMI_READS_PER_MIN: u32 = 120;
@@ -1134,6 +1148,11 @@ struct RateLimiters {
     /// must never be able to crowd an account or token bucket out of a shared
     /// table.
     source: Mutex<HashMap<String, RateState>>,
+    /// Long-window allowances. A table's reclamation sweep drops entries idle
+    /// for longer than the window it is called with, so buckets measured in
+    /// days cannot share a table with buckets measured in minutes: one sweep
+    /// for a per-minute limit would silently refill every standing allowance.
+    standing: Mutex<HashMap<String, RateState>>,
 }
 
 /// Deterministic integer token bucket. `refill_remainder` carries fractional
@@ -4768,6 +4787,23 @@ fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<()
     )
 }
 
+/// Authenticated limit over an explicit window, for allowances whose point is
+/// the standing total rather than the instantaneous rate.
+fn rate_limit_with_window(
+    st: &AppState,
+    subject: &str,
+    bucket: &str,
+    max: u32,
+    window: Duration,
+) -> Result<(), ApiError> {
+    let mut rate = st
+        .rate_limiters
+        .standing
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    rate_limit_map(&mut rate, st.max_rate_entries, window, subject, bucket, max)
+}
+
 fn auth_rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
     let mut rate = st
         .rate_limiters
@@ -5287,6 +5323,17 @@ async fn send_post(
         "inbound-pair",
         MAX_INBOUND_PER_SENDER_RECIPIENT_PER_MIN,
     )?;
+    // The per-minute limit slows a flood; this one bounds how much of the
+    // recipient's finite inbox a single sender can occupy, so filling it and
+    // denying delivery to everyone else is no longer a twenty-minute job for
+    // one account.
+    rate_limit_with_window(
+        &st,
+        &sender_recipient,
+        "inbound-pair-day",
+        MAX_INBOUND_PER_SENDER_RECIPIENT_PER_DAY,
+        INBOUND_PAIR_DAY,
+    )?;
     // Aggregate recipient throttle still caps coordinated/multi-account floods.
     rate_limit(&st, &body.recipient_id, "inbound", MAX_INBOUND_PER_MIN)?;
     st.db
@@ -5597,6 +5644,35 @@ mod tests {
         let v4_neighbour: IpAddr = "192.0.2.45".parse().unwrap();
         assert_eq!(source_bucket_key(v4), "192.0.2.44");
         assert_ne!(source_bucket_key(v4), source_bucket_key(v4_neighbour));
+    }
+
+    #[test]
+    fn standing_allowances_do_not_share_a_table_with_per_minute_limits() {
+        // A table's sweep drops entries idle for longer than the window it is
+        // called with. A per-minute sweep over a day-long bucket would refill
+        // every standing allowance for free, so they must not share a table.
+        let mut mixed = HashMap::new();
+        let start = Instant::now();
+        let day = Duration::from_secs(24 * 60 * 60);
+        let minute = Duration::from_secs(60);
+        assert!(rate_limit_map_at(&mut mixed, 8, day, "pair", "day", 2, start).is_ok());
+        // Two hours later a per-minute limit sweeps the same table.
+        let later = start + Duration::from_secs(2 * 60 * 60);
+        for index in 0..8 {
+            let _ = rate_limit_map_at(
+                &mut mixed,
+                8,
+                minute,
+                &format!("filler-{index}"),
+                "minute",
+                2,
+                later,
+            );
+        }
+        assert!(
+            !mixed.contains_key("day\0pair"),
+            "this test no longer demonstrates the hazard it guards against"
+        );
     }
 
     #[test]

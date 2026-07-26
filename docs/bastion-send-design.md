@@ -197,6 +197,16 @@ TOFU is the default only with that visibly-distinct unverified state.
   count, drop-oldest or reject); small **note size cap** (e.g. 64 KiB–1 MiB, far
   below the core's ~8 MiB); best-effort **read-once** delete + `expires_at`;
   recipient **contacts-only** toggle (quarantine/reject unverified senders).
+- **Inbox occupancy is bounded by rate, not by stored ownership.** A recipient's
+  inbox is finite, so a single sender that fills it denies delivery to everyone
+  else until the recipient deletes messages. Sender/recipient pairs are
+  therefore limited both per minute and over a rolling day, which bounds the
+  share of a recipient's capacity one account can hold at a time. A strict
+  occupancy quota ("this sender currently holds N of your 500") is deliberately
+  **not** implemented: the server would have to record which account sent each
+  stored message, turning the inbox table into a durable sender/recipient social
+  graph — exactly the metadata §7 keeps out of storage. These counters are
+  in-process and reset on restart, which is an accepted limit of the trade.
 - **v0.2:** optional unauthenticated `POST /send` for true anonymous sends, gated
   by proof-of-work + stricter rate limits.
 
