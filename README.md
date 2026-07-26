@@ -79,10 +79,11 @@ non-enumerable **Bastion address** (128-bit, base32). Available in both the
   so they **sync across surfaces** (verify a contact in the extension, it's
   verified in the web app too).
 - Server-side: strict public-key/envelope routing validation, per-recipient
-  inbox quotas, fixed-window rate limits with strictly bounded state, size
-  caps, message dedupe, bounded expiry, and **read-once delete** — all without
-  learning any plaintext. Account creation and login are also globally and
-  per-account rate-limited before any server-side Argon2 work begins.
+  inbox quotas, per-sender-recipient and aggregate-recipient fixed-window rate
+  limits with strictly bounded state, size caps, message dedupe, bounded expiry,
+  and **read-once delete** — all without learning any plaintext. Account
+  creation and login are also globally and per-account rate-limited before any
+  server-side Argon2 work begins.
 
 Design + threat model: [`docs/bastion-send-design.md`](docs/bastion-send-design.md).
 
@@ -150,7 +151,9 @@ The server serializes synchronous `rusqlite` operations through one dedicated
 storage thread behind a bounded command queue. Storage latency therefore does
 not block Tokio executor threads; queue saturation fails fast and a delayed
 accepted mutation is completed under its logical cache lock before the
-instance quarantines itself. `/livez` remains independent of storage, while
+instance re-opens storage admission. Only loss of the storage worker causes
+permanent quarantine. Rate counters use separate bounded locks and never share
+the account/session cache lock. `/livez` remains independent of storage, while
 `/readyz` and the legacy `/health` route fail closed on storage faults. Do not
 deploy multiple replicas or treat this backend as production-scale. The
 database must live on a local filesystem with reliable advisory locks and sync

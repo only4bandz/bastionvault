@@ -2531,6 +2531,126 @@ async fn bastion_send_directory_and_inbox_flow() {
 }
 
 #[tokio::test]
+async fn one_sender_cannot_exhaust_a_recipients_shared_inbound_budget() {
+    let app = server::app_in_memory();
+    let attacker = signup_login(&app, "inbound-attacker@example.com").await;
+    let peer = signup_login(&app, "inbound-peer@example.com").await;
+    let recipient = signup_login(&app, "inbound-recipient@example.com").await;
+
+    let recipient_identity = IdentityKeys::generate(1);
+    let recipient_public = recipient_identity.public();
+    let (status, body) = send(
+        &app,
+        "PUT",
+        "/send/identity",
+        Some(&recipient),
+        Some(serde_json::to_value(&recipient_public).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let recipient_id = body["bastion_id"].as_str().unwrap().to_string();
+
+    let post = |plaintext: &[u8]| {
+        let blob = send_seal(plaintext, &recipient_id, &recipient_public, None, None).unwrap();
+        json!({
+            "recipient_id": blob.recipient_id,
+            "message_id": blob.message_id,
+            "blob": blob,
+            "expires_at": null,
+        })
+    };
+
+    for attempt in 0..30 {
+        let payload = format!("attacker message {attempt}");
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/send",
+            Some(&attacker),
+            Some(post(payload.as_bytes())),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "attempt {attempt}");
+    }
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(&attacker),
+        Some(post(b"blocked attacker message")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // The recipient-wide allowance is still available to a different sender:
+    // the blocked pair cannot consume the remaining shared budget.
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(&peer),
+        Some(post(b"independent peer message")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn rate_limits_expensive_authenticated_send_endpoints() {
+    let app = server::app_in_memory();
+    let token = signup_login(&app, "send-operation-limits@example.com").await;
+    let identity = IdentityKeys::generate(1);
+    let public = serde_json::to_value(identity.public()).unwrap();
+
+    for attempt in 0..10 {
+        let (status, _) = send(
+            &app,
+            "PUT",
+            "/send/identity",
+            Some(&token),
+            Some(public.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "identity publish {attempt}");
+    }
+    let (status, _) = send(&app, "PUT", "/send/identity", Some(&token), Some(public)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    for attempt in 0..120 {
+        let (status, _) = send(&app, "GET", "/send/whoami", Some(&token), None).await;
+        assert_eq!(status, StatusCode::OK, "whoami {attempt}");
+    }
+    let (status, _) = send(&app, "GET", "/send/whoami", Some(&token), None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    let message_id = B64
+        .encode([7u8; 16])
+        .replace('+', "%2B")
+        .replace('/', "%2F")
+        .replace('=', "%3D");
+    for attempt in 0..120 {
+        let (status, _) = send(
+            &app,
+            "DELETE",
+            &format!("/send/inbox/{message_id}"),
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "inbox delete {attempt}");
+    }
+    let (status, _) = send(
+        &app,
+        "DELETE",
+        &format!("/send/inbox/{message_id}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn corrupted_send_persistence_fails_closed() {
     let path = test_db_path("send-corruption");
     let app = server::app_with_db(&path);

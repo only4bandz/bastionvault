@@ -50,6 +50,15 @@ authentication, authorization, quota, or rate-limit decision. Decoys of this
 kind — including the prelogin decoy for unknown accounts — are additions on top
 of the real controls and must never be introduced as a substitute for one.
 
+Authentication and authenticated-operation counters use separate bounded
+mutexes; neither shares the account/session cache lock or remains held across
+storage work. Send admission applies both a 30/minute sender-recipient limit and
+a 120/minute aggregate recipient limit, so one account cannot consume a
+recipient's entire shared budget. These counters are fixed-window and
+process-local. The selected trusted ingress must add source-aware limits; the
+application deliberately does not trust arbitrary forwarding headers as a
+client identity.
+
 Readiness is answered from a 500 ms cache with one single-flight refresh.
 Concurrent callers at cache expiry fail fast with 503 instead of entering the
 SQLite queue. Detection of a storage fault is therefore delayed by up to that
@@ -206,8 +215,9 @@ Repository-level deterministic fault tests run on every release:
 bash scripts/test-operational-failures.sh
 ```
 
-They prove bounded SQLite saturation, executor isolation, quarantine after an
-accepted-operation timeout, single-owner exclusion, live backup/restore,
+They prove bounded SQLite saturation, executor isolation, transient admission
+withdrawal and recovery after an accepted-operation timeout, permanent
+quarantine on storage-worker loss, single-owner exclusion, live backup/restore,
 outbox lease recovery, bounded retries, and terminal payload scrubbing.
 
 The selected deployment must additionally execute and retain evidence for:
@@ -216,7 +226,8 @@ The selected deployment must additionally execute and retain evidence for:
 |---|---:|---|
 | Graceful process restart | every release | SIGTERM drains, WAL checkpoints, one owner restarts, readiness passes |
 | Abrupt process loss | quarterly, isolated restore | WAL recovery succeeds, integrity/readiness pass, no second owner |
-| SQLite queue/storage fault | every release, isolated staging | liveness stays responsive, readiness fails closed, recovery requires one clean restart |
+| SQLite queue saturation or slow accepted mutation | every release, isolated staging | liveness stays responsive, readiness fails closed during saturation, admission recovers without restart after the worker drains |
+| SQLite worker loss | every release, isolated staging | readiness remains failed closed; one clean restart restores service after evidence is captured |
 | Disk/inode exhaustion | quarterly, disposable volume only | alerts fire before exhaustion; writes are withdrawn; no corruption after recovery |
 | SMTP outage and recovery | every release, staging provider | durable row retries without blocking requests; queue drains after recovery; duplicate possibility recorded |
 | SMTP permanent rejection | every release, staging provider | payload is scrubbed, dead-row alert fires, no secret appears in telemetry |

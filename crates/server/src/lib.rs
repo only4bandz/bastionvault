@@ -99,7 +99,10 @@ const MAX_INBOX_PAGE: i64 = 100; // cap a single inbox fetch (paginate by deleti
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_SENDS_PER_MIN: u32 = 60; // per sender
 const MAX_INBOUND_PER_MIN: u32 = 120; // per recipient (anti inbox-flood)
+const MAX_INBOUND_PER_SENDER_RECIPIENT_PER_MIN: u32 = 30;
 const MAX_LOOKUPS_PER_MIN: u32 = 120;
+const MAX_IDENTITY_PUBLICATIONS_PER_MIN: u32 = 10;
+const MAX_WHOAMI_READS_PER_MIN: u32 = 120;
 // Authenticated read throttles: a full vault read clones and re-serializes up
 // to MAX_VAULT_BYTES per call, and an inbox read runs a purge + list — both
 // are cheap amplification levers for a hostile-but-authenticated client.
@@ -111,6 +114,7 @@ const MAX_VAULT_MUTATIONS_PER_MIN: u32 = 120;
 /// a hostile account cannot pre-load a long queue behind a slow commit.
 const MAX_CONCURRENT_VAULT_TRANSACTIONS: usize = 1;
 const MAX_INBOX_READS_PER_MIN: u32 = 60;
+const MAX_INBOX_DELETES_PER_MIN: u32 = 120;
 const MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN: u32 = 5;
 const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
 /// Maximum accepted SQLite commands waiting behind the dedicated connection
@@ -974,6 +978,9 @@ async fn security_headers(State(st): State<AppState>, request: Request, next: Ne
 #[derive(Clone)]
 struct AppState {
     inner: Arc<RwLock<Inner>>,
+    /// Rate counters have their own short, synchronous critical sections.
+    /// They must never serialize unrelated cache reads or durable mutations.
+    rate_limiters: Arc<RateLimiters>,
     db: Db,
     token_ttl: Duration,
     auth_slots: Arc<Semaphore>,
@@ -992,8 +999,12 @@ struct Inner {
     // Domain-separated token hash -> session. Raw bearer tokens never persist
     // in server state after the login response is constructed.
     sessions: HashMap<[u8; 32], Session>,
-    rate: HashMap<String, RateState>, // "email:bucket" -> fixed-window counter
-    auth_rate: HashMap<String, RateState>, // pre-Argon2 account/global counters
+}
+
+#[derive(Default)]
+struct RateLimiters {
+    authenticated: Mutex<HashMap<String, RateState>>,
+    authentication: Mutex<HashMap<String, RateState>>,
 }
 
 /// Fixed-window rate counter.
@@ -1040,9 +1051,8 @@ impl AppState {
             inner: Arc::new(RwLock::new(Inner {
                 accounts,
                 sessions: HashMap::new(),
-                rate: HashMap::new(),
-                auth_rate: HashMap::new(),
             })),
+            rate_limiters: Arc::new(RateLimiters::default()),
             db,
             token_ttl,
             auth_slots: Arc::new(Semaphore::new(auth_limit)),
@@ -2755,15 +2765,13 @@ async fn request_registration_challenge(
         "global",
         "challenge-global",
         MAX_CHALLENGES_GLOBAL_PER_MIN,
-    )
-    .await?;
+    )?;
     auth_rate_limit(
         &st,
         &req.email,
         "challenge-email",
         MAX_CHALLENGES_PER_EMAIL_PER_MIN,
-    )
-    .await?;
+    )?;
     let mail = new_registration_mail(&req.email, origin, now_secs());
     match st
         .db
@@ -2800,16 +2808,14 @@ async fn verify_registration_challenge(
         "global",
         "verify-global",
         MAX_VERIFICATIONS_GLOBAL_PER_MIN,
-    )
-    .await?;
+    )?;
     let rate_key = data_encoding::HEXLOWER.encode(&token_hash[..8]);
     auth_rate_limit(
         &st,
         &rate_key,
         "verify-token",
         MAX_VERIFICATIONS_PER_TOKEN_PER_MIN,
-    )
-    .await?;
+    )?;
     let email = st
         .db
         .verify_registration_challenge(token_hash, now_secs())
@@ -2850,15 +2856,13 @@ async fn create_account(
         "global",
         "account-create-global",
         st.auth_rate_limits.account_creations_global,
-    )
-    .await?;
+    )?;
     auth_rate_limit(
         &st,
         &req.email,
         "account-create-account",
         st.auth_rate_limits.account_creations_per_account,
-    )
-    .await?;
+    )?;
     // Mailbox proof is checked *before* anything that can reveal whether the
     // account exists. Answering 409 first turned registration into an
     // enumeration oracle that any caller could query with a well-formed but
@@ -2956,8 +2960,7 @@ async fn delete_account(
         &email,
         "account-delete",
         MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN,
-    )
-    .await?;
+    )?;
     if !is_exact_b64(req.auth_secret.expose_b64(), AUTH_SECRET_BYTES) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
@@ -3007,15 +3010,13 @@ async fn prelogin(
         "global",
         "prelogin-global",
         st.auth_rate_limits.prelogins_global,
-    )
-    .await?;
+    )?;
     auth_rate_limit(
         &st,
         &email,
         "prelogin-account",
         st.auth_rate_limits.prelogins_per_account,
-    )
-    .await?;
+    )?;
     let inner = st.read().await;
     // Enumeration resistance: unknown accounts answer with a deterministic
     // decoy shaped exactly like a real registration (same salt length, the
@@ -3082,15 +3083,13 @@ async fn create_session(
         "global",
         "login-global",
         st.auth_rate_limits.login_attempts_global,
-    )
-    .await?;
+    )?;
     auth_rate_limit(
         &st,
         &req.email,
         "login-account",
         st.auth_rate_limits.login_attempts_per_account,
-    )
-    .await?;
+    )?;
     // We copy the hash, then release the lock before the slow verification.
     let account = st
         .read()
@@ -3171,7 +3170,7 @@ async fn authenticate_vault_transaction(
     next: Next,
 ) -> Result<Response, ApiError> {
     let email = require_auth(&st, request.headers()).await?;
-    rate_limit(&st, &email, "vault-write", MAX_VAULT_MUTATIONS_PER_MIN).await?;
+    rate_limit(&st, &email, "vault-write", MAX_VAULT_MUTATIONS_PER_MIN)?;
     request.extensions_mut().insert(AuthenticatedAccount(email));
     Ok(next.run(request).await)
 }
@@ -3181,7 +3180,7 @@ async fn get_vault(
     headers: HeaderMap,
 ) -> Result<Json<VaultResponse>, ApiError> {
     let email = require_auth(&st, &headers).await?;
-    rate_limit(&st, &email, "vault-read", MAX_VAULT_READS_PER_MIN).await?;
+    rate_limit(&st, &email, "vault-read", MAX_VAULT_READS_PER_MIN)?;
     let inner = st.read().await;
     let acc = inner
         .accounts
@@ -3207,8 +3206,7 @@ async fn get_vault_revision(
         &email,
         "vault-revision-read",
         MAX_VAULT_REVISION_READS_PER_MIN,
-    )
-    .await?;
+    )?;
     let inner = st.read().await;
     let revision = inner
         .accounts
@@ -3875,12 +3873,18 @@ fn rate_limit_map(
     Ok(())
 }
 
-/// Send abuse limits are kept separate from unauthenticated auth limits so an
-/// attacker cannot consume one subsystem's counter capacity through the other.
-async fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
-    let mut inner = st.write().await;
+/// Authenticated abuse limits are kept separate from unauthenticated auth
+/// limits so an attacker cannot consume one subsystem's counter capacity
+/// through the other. The standard mutex is intentional: this bounded map
+/// operation cannot await and must not contend on the account/session lock.
+fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
+    let mut rate = st
+        .rate_limiters
+        .authenticated
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     rate_limit_map(
-        &mut inner.rate,
+        &mut rate,
         st.max_rate_entries,
         st.rate_window,
         subject,
@@ -3889,15 +3893,14 @@ async fn rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Res
     )
 }
 
-async fn auth_rate_limit(
-    st: &AppState,
-    subject: &str,
-    bucket: &str,
-    max: u32,
-) -> Result<(), ApiError> {
-    let mut inner = st.write().await;
+fn auth_rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Result<(), ApiError> {
+    let mut rate = st
+        .rate_limiters
+        .authentication
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     rate_limit_map(
-        &mut inner.auth_rate,
+        &mut rate,
         st.auth_rate_limits.max_entries,
         st.auth_rate_limits.window,
         subject,
@@ -4221,6 +4224,12 @@ async fn publish_identity(
     Json(public): Json<PublicIdentity>,
 ) -> Result<Json<PublishResponse>, ApiError> {
     let email = require_auth(&st, &headers).await?;
+    rate_limit(
+        &st,
+        &email,
+        "identity-publish",
+        MAX_IDENTITY_PUBLICATIONS_PER_MIN,
+    )?;
     public
         .validate()
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "invalid public identity"))?;
@@ -4258,6 +4267,7 @@ async fn send_whoami(
     headers: HeaderMap,
 ) -> Result<Json<WhoAmI>, ApiError> {
     let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "whoami", MAX_WHOAMI_READS_PER_MIN)?;
     match st.db.whoami(&email).await.map_err(db_api_error)? {
         Some((bastion_id, public)) => {
             let public = serde_json::from_str::<PublicIdentity>(&public).map_err(|_| {
@@ -4280,7 +4290,7 @@ async fn send_directory(
     Path(bastion_id): Path<String>,
 ) -> Result<Json<PublicIdentity>, ApiError> {
     let email = require_auth(&st, &headers).await?;
-    rate_limit(&st, &email, "lookup", MAX_LOOKUPS_PER_MIN).await?;
+    rate_limit(&st, &email, "lookup", MAX_LOOKUPS_PER_MIN)?;
     if !valid_bastion_id(&bastion_id) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad bastion id"));
     }
@@ -4310,7 +4320,7 @@ async fn send_post(
     Json(body): Json<SendPost>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers).await?;
-    rate_limit(&st, &email, "send", MAX_SENDS_PER_MIN).await?;
+    rate_limit(&st, &email, "send", MAX_SENDS_PER_MIN)?;
 
     let blob_str = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "bad blob"))?;
@@ -4341,8 +4351,18 @@ async fn send_post(
     }) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid expiration"));
     }
-    // Per-recipient throttle (anti inbox-flood), on top of the per-sender cap.
-    rate_limit(&st, &body.recipient_id, "inbound", MAX_INBOUND_PER_MIN).await?;
+    // A single sender may consume only part of a recipient's aggregate budget.
+    // Check this first: once that pair is blocked it cannot keep burning the
+    // victim's shared inbound allowance.
+    let sender_recipient = format!("{email}\0{}", body.recipient_id);
+    rate_limit(
+        &st,
+        &sender_recipient,
+        "inbound-pair",
+        MAX_INBOUND_PER_SENDER_RECIPIENT_PER_MIN,
+    )?;
+    // Aggregate recipient throttle still caps coordinated/multi-account floods.
+    rate_limit(&st, &body.recipient_id, "inbound", MAX_INBOUND_PER_MIN)?;
     st.db
         .purge_expired(&body.recipient_id, now)
         .await
@@ -4376,7 +4396,7 @@ async fn send_inbox(
     headers: HeaderMap,
 ) -> Result<Json<Vec<InboxItem>>, ApiError> {
     let email = require_auth(&st, &headers).await?;
-    rate_limit(&st, &email, "inbox-read", MAX_INBOX_READS_PER_MIN).await?;
+    rate_limit(&st, &email, "inbox-read", MAX_INBOX_READS_PER_MIN)?;
     let mine = st
         .db
         .bastion_id_for(&email)
@@ -4399,6 +4419,7 @@ async fn send_inbox_delete(
     Path(message_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "inbox-delete", MAX_INBOX_DELETES_PER_MIN)?;
     if !valid_message_id(&message_id) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad message id"));
     }
@@ -4507,6 +4528,23 @@ mod tests {
         assert_eq!(config.bind_addr(), "127.0.0.1:7777".parse().unwrap());
         assert_eq!(config.db_path(), "bastion.db");
         assert_eq!(config.public_origin(), None);
+    }
+
+    #[tokio::test]
+    async fn rate_counters_do_not_contend_on_the_account_cache_lock() {
+        let st = AppState::new(
+            DEFAULT_TOKEN_TTL,
+            ":memory:",
+            MAX_CONCURRENT_AUTH,
+            RuntimeOptions::default(),
+        );
+        let _account_cache = st.write().await;
+
+        // These calls are synchronous and complete while the account cache
+        // write lock is held. Regressing either limiter into `Inner` would
+        // deadlock this test at the call site.
+        assert!(rate_limit(&st, "account@example.com", "vault-read", 1).is_ok());
+        assert!(auth_rate_limit(&st, "account@example.com", "login-account", 1).is_ok());
     }
 
     #[test]
