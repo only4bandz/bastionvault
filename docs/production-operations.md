@@ -16,7 +16,9 @@ retained with the release record.
 - SQLite, its WAL/SHM files, and the server lock stay on one local filesystem
   that honors file locks and fsync. Shared or network SQLite is rejected.
 - Axum listens on numeric loopback only. The public ingress serves immutable
-  assets and proxies `/api/*`; it must not proxy the operational status CLI.
+  assets and proxies `/api/*` plus the exact `security.txt` and closed honeypot
+  exceptions documented by the edge contract; it must not add a catch-all
+  proxy or proxy the operational status CLI.
 - Backups are SQLite-aware, encrypted before off-host transfer, and treated as
   sensitive metadata and verifier material.
 - Destructive disk, network, and process drills run only on an isolated staging
@@ -31,6 +33,35 @@ Every request log contains only method, redacted route shape, status, and
 `latency_ms`. Transactional-mail events contain only attempt number, a fixed
 outcome, and a fixed error code. Logs must never add headers, query strings,
 account identifiers, routing ids, tokens, bodies, or ciphertext fields.
+
+Security-relevant outcomes are logged at `warn` with the message `security`, an
+`event` label, and that label's running process-lifetime `total`. The labels are
+`auth_rejected` (401), `forbidden` (403), `rate_limited` (429),
+`wrong_public_host` (421), `unmatched_path` (a 404 on no known route), and
+`honeypot`. They carry no more data than an ordinary request line — the counters
+are one per class, never per account, token, or address, so a caller cannot grow
+this state by sending more requests.
+
+`honeypot` fires only on a closed set of paths no Bastion client ever requests
+(`/.env`, `/admin`, `/wp-login.php`, …). A hit is therefore an unambiguous
+scanner rather than a mistyped URL, which is what makes it worth alerting on;
+the lure answers a constant 404 that reflects no request data and changes no
+authentication, authorization, quota, or rate-limit decision. Decoys of this
+kind — including the prelogin decoy for unknown accounts — are additions on top
+of the real controls and must never be introduced as a substitute for one.
+
+Readiness is answered from a 500 ms cache with one single-flight refresh.
+Concurrent callers at cache expiry fail fast with 503 instead of entering the
+SQLite queue. Detection of a storage fault is therefore delayed by up to that
+window, never suppressed: the fault is observed on the next admitted uncached
+probe, and the instance then stays failed closed.
+
+An accepted mutation that exceeds the storage response deadline temporarily
+withdraws readiness and rejects new storage work until that exact command
+finishes. A successful commit or explicit SQLite rollback re-opens admission;
+only loss of the storage worker causes permanent quarantine. Vault transactions
+also have one pre-lock admission slot, preventing an authenticated client from
+pre-loading a queue behind the global cache write lock.
 
 `bastion-ops-status` opens the live WAL database read-only and emits one JSON
 object containing only:
@@ -79,6 +110,8 @@ this table says “measured”; protocol maxima are not capacity claims.
 | Expired challenges | persistent for two polls | persistent for 5 minutes; mail worker/storage incident |
 | Certificate lifetime | 45 days | 30 days; renewal owner must act |
 | Unexpected process restart | any | repeated restart or migration failure; keep traffic withdrawn |
+| `security` events `auth_rejected` / `rate_limited` | sustained rate above the reviewed baseline | sharp sustained increase; suspected credential-stuffing or enumeration campaign |
+| `security` event `honeypot` / `unmatched_path` | any hit | sustained scanning, or any honeypot hit correlated with a rise in `auth_rejected`; investigate the source |
 | Provider bounce/complaint rate | provider warning threshold | provider suspension threshold; disable external registration |
 
 Alert routes must have a named primary owner, secondary owner, and tested

@@ -19,7 +19,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -106,6 +106,10 @@ const MAX_LOOKUPS_PER_MIN: u32 = 120;
 const MAX_VAULT_READS_PER_MIN: u32 = 60;
 const MAX_VAULT_REVISION_READS_PER_MIN: u32 = 300;
 const MAX_VAULT_MUTATIONS_PER_MIN: u32 = 120;
+/// SQLite has one owner and vault transactions hold the cache write lock until
+/// their durable commit is known. Admit only one such transaction at a time so
+/// a hostile account cannot pre-load a long queue behind a slow commit.
+const MAX_CONCURRENT_VAULT_TRANSACTIONS: usize = 1;
 const MAX_INBOX_READS_PER_MIN: u32 = 60;
 const MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN: u32 = 5;
 const MAX_RATE_ENTRIES: usize = 100_000; // bound the in-memory rate map (anti memory-DoS)
@@ -115,6 +119,10 @@ const DB_QUEUE_CAPACITY: usize = 256;
 /// Upper bound for an accepted storage command to produce a response. SQLite's
 /// own busy timeout is shorter, leaving headroom for queueing and validation.
 const DB_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Readiness answers from a short-lived cache. The probe is unauthenticated, so
+/// without this every scrape (or flood) enqueues its own storage command and an
+/// outsider can saturate the single SQLite owner for free.
+const READINESS_CACHE_TTL: Duration = Duration::from_millis(500);
 /// Latest schema understood by this binary. Startup refuses newer databases
 /// instead of silently running code against an incompatible layout.
 const CURRENT_SCHEMA_VERSION: i64 = 4;
@@ -536,12 +544,20 @@ fn build_with_rate_limits(
     } else {
         protected_routes
     };
-    let routes = Router::new()
+    let mut routes = Router::new()
         .route("/config", get(public_config))
         .route("/health", get(health))
         .route("/livez", get(liveness))
         .route("/readyz", get(readiness))
+        .route("/.well-known/security.txt", get(security_txt))
         .merge(protected_routes);
+    // Registered last and only on paths no client uses, so a lure can never
+    // shadow a real route: `Router::route` panics on a duplicate path, which
+    // makes that a build-time guarantee rather than a review promise.
+    for path in HONEYPOT_PATHS {
+        routes = routes.route(path, get(honeypot).post(honeypot));
+    }
+    let routes = routes;
     let legacy = routes
         .clone()
         .layer(middleware::from_fn(legacy_api_headers));
@@ -566,7 +582,7 @@ async fn storage_availability_gate(
     request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
-    if !st.db.is_available() {
+    if !st.db.is_accepting_work() {
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "storage unavailable",
@@ -617,9 +633,16 @@ fn redacted_path(path: &str) -> String {
             return "/vault/items/{id}".to_string();
         }
     }
+    // A honeypot path is a fixed, closed set chosen by us, so keeping it
+    // verbatim adds no attacker-controlled cardinality and tells an operator
+    // which lure was tripped.
+    if is_honeypot_path(path) {
+        return path.to_string();
+    }
     if matches!(
         path,
         "/config"
+            | "/.well-known/security.txt"
             | "/health"
             | "/livez"
             | "/readyz"
@@ -641,9 +664,52 @@ fn redacted_path(path: &str) -> String {
     "/{unmatched}".to_string()
 }
 
+/// Process-lifetime tallies of security-relevant outcomes.
+///
+/// Each event carries its running total, so a log pipeline can alert on the
+/// rate of `security` lines without a metrics endpoint to expose or protect.
+/// One counter per class: no per-account, per-token or per-IP state, so an
+/// attacker cannot grow this by sending more requests.
+#[derive(Default)]
+struct SecurityCounters {
+    auth_rejected: AtomicU64,
+    forbidden: AtomicU64,
+    rate_limited: AtomicU64,
+    wrong_public_host: AtomicU64,
+    honeypot: AtomicU64,
+    unmatched_path: AtomicU64,
+}
+
+static SECURITY_COUNTERS: LazyLock<SecurityCounters> = LazyLock::new(SecurityCounters::default);
+
+/// Classifies a finished request as a named security event, if it is one.
+/// Returns the event label and its running total.
+fn security_event(status: StatusCode, path: &str) -> Option<(&'static str, u64)> {
+    let counters = &*SECURITY_COUNTERS;
+    let (label, counter) = if status == StatusCode::MISDIRECTED_REQUEST {
+        // Preserve the transport-boundary signal even when the requested path
+        // also happens to be a lure.
+        ("wrong_public_host", &counters.wrong_public_host)
+    } else if is_honeypot_path(path) {
+        ("honeypot", &counters.honeypot)
+    } else {
+        match status {
+            StatusCode::UNAUTHORIZED => ("auth_rejected", &counters.auth_rejected),
+            StatusCode::FORBIDDEN => ("forbidden", &counters.forbidden),
+            StatusCode::TOO_MANY_REQUESTS => ("rate_limited", &counters.rate_limited),
+            StatusCode::NOT_FOUND if path.ends_with("{unmatched}") => {
+                ("unmatched_path", &counters.unmatched_path)
+            }
+            _ => return None,
+        }
+    };
+    Some((label, counter.fetch_add(1, Ordering::Relaxed) + 1))
+}
+
 /// One structured line per request: method, redacted route, status. 5xx are
-/// logged at error, everything else at info. No request/response bodies, no
-/// headers — nothing secret is ever recorded.
+/// logged at error, security-relevant outcomes at warn, everything else at
+/// info. No request/response bodies, no headers — nothing secret is ever
+/// recorded, and the path is already redacted of user data.
 async fn request_log(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = redacted_path(request.uri().path());
@@ -653,10 +719,123 @@ async fn request_log(request: Request, next: Next) -> Response {
     let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     if response.status().is_server_error() {
         tracing::error!(%method, path, status, latency_ms, "request");
+    } else if let Some((event, total)) = security_event(response.status(), &path) {
+        tracing::warn!(%method, path, status, latency_ms, event, total, "security");
     } else {
         tracing::info!(%method, path, status, latency_ms, "request");
     }
     response
+}
+
+// ─── Decoy routes ───
+//
+// Everything below is decoration on top of the real controls, never a
+// substitute for one. It changes no authentication, authorization, quota or
+// rate-limit decision; it reflects no request data; it keeps no request-scoped
+// state; and it never fires on a genuine probe of a real endpoint — telling an
+// attacker which of their payloads was detected just teaches them what to
+// avoid. It exists so an unambiguous scanner hit is visible in the logs, and so
+// whoever goes looking gets a wink instead of silence.
+
+/// Paths no Bastion client ever requests: commodity config-leak, admin-panel,
+/// backup-file and framework-introspection probes. A hit is therefore a certain
+/// scanner rather than a mistyped URL, which is what makes it worth alerting on.
+const HONEYPOT_PATHS: [&str; 14] = [
+    "/.env",
+    "/.git/config",
+    "/.aws/credentials",
+    "/admin",
+    "/administrator",
+    "/wp-login.php",
+    "/phpmyadmin",
+    "/actuator/health",
+    "/debug/pprof",
+    "/api/v1/users",
+    "/backup.sql",
+    "/dump.sql",
+    "/config.json",
+    "/server-status",
+];
+
+/// Constant body. No request data is interpolated, so this cannot become a
+/// reflection primitive, and every caller sees byte-identical bytes.
+const HONEYPOT_BODY: &str = concat!(
+    "{\"error\":\"not_found\",",
+    "\"note\":\"good try — but not this time\",",
+    "\"report\":\"Found something real? See /.well-known/security.txt for responsible disclosure.\"}"
+);
+
+fn is_honeypot_path(path: &str) -> bool {
+    let path = path.strip_prefix("/v1").unwrap_or(path);
+    HONEYPOT_PATHS.contains(&path)
+}
+
+/// Answers a scanner probe with a constant 404. The status, headers and body
+/// are indistinguishable in kind from any other miss — the only difference is
+/// the wink, and the warn-level `honeypot` event this route's path produces in
+/// the request log.
+async fn honeypot() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(header::CONTENT_TYPE, "application/json")],
+        HONEYPOT_BODY,
+    )
+        .into_response()
+}
+
+/// RFC 9116 disclosure policy. Points at the real reporting channel from
+/// SECURITY.md so a researcher who pokes at the API finds the front door.
+async fn security_txt() -> Response {
+    let body = format!(
+        "# Bastion — zero-knowledge password manager.\n\
+         # The server holds only opaque ciphertext; the vault is sealed client-side.\n\
+         # Reports about that boundary are the ones we care about most.\n\
+         Contact: https://github.com/only4bandz/bastionvault/security/advisories/new\n\
+         Policy: https://github.com/only4bandz/bastionvault/blob/main/SECURITY.md\n\
+         Preferred-Languages: en, fr\n\
+         Expires: {}\n\
+         # Please do not degrade availability or touch data that is not yours.\n\
+         # And if you got here from /.env: nice reflexes. Still nothing there.\n",
+        // Keep the rolling horizon comfortably below RFC 9116's one-year
+        // recommendation. The deployment acceptance probe verifies the public
+        // well-known URI rather than an API-prefixed alias.
+        rfc3339_utc(now_secs().saturating_add(180 * 24 * 60 * 60))
+    );
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+/// Formats a Unix timestamp as an RFC 3339 UTC instant (`Expires` is mandatory
+/// in a security.txt). Civil-from-days conversion, so no date dependency.
+fn rfc3339_utc(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let time_of_day = secs.rem_euclid(86_400);
+    // Howard Hinnant's civil_from_days, shifted to a March-based year so leap
+    // days land at the end of the cycle.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        time_of_day / 3_600,
+        (time_of_day % 3_600) / 60,
+        time_of_day % 60
+    )
 }
 
 fn direct_health_path(path: &str) -> bool {
@@ -798,6 +977,7 @@ struct AppState {
     db: Db,
     token_ttl: Duration,
     auth_slots: Arc<Semaphore>,
+    vault_transaction_slots: Arc<Semaphore>,
     max_rate_entries: usize,
     rate_window: Duration,
     auth_rate_limits: AuthRateLimits,
@@ -866,6 +1046,7 @@ impl AppState {
             db,
             token_ttl,
             auth_slots: Arc::new(Semaphore::new(auth_limit)),
+            vault_transaction_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_VAULT_TRANSACTIONS)),
             max_rate_entries,
             rate_window,
             auth_rate_limits,
@@ -901,7 +1082,17 @@ struct Db {
     sender: mpsc::Sender<DbJob>,
     _worker: Arc<DbWorker>,
     available: Arc<AtomicBool>,
+    /// Number of accepted mutations that exceeded their response deadline and
+    /// are still running. While non-zero, new storage work fails fast instead
+    /// of piling up behind the single SQLite owner.
+    timed_out_mutations: Arc<AtomicUsize>,
     response_timeout: Duration,
+    /// Instant of the last storage probe that answered healthy. Readiness is
+    /// served from it for `READINESS_CACHE_TTL` so unauthenticated probes cost
+    /// at most one storage command per window.
+    readiness_checked_at: Arc<Mutex<Option<Instant>>>,
+    /// Single-flight admission for the unauthenticated readiness probe.
+    readiness_probe: Arc<Semaphore>,
 }
 
 type DbJob = Box<dyn FnOnce(&mut Connection) + Send + 'static>;
@@ -925,7 +1116,7 @@ impl Drop for DbWorker {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum DbError {
     Sqlite,
     QueueFull,
@@ -1714,7 +1905,10 @@ impl Db {
                     join: Mutex::new(Some(worker)),
                 }),
                 available,
+                timed_out_mutations: Arc::new(AtomicUsize::new(0)),
                 response_timeout,
+                readiness_checked_at: Arc::new(Mutex::new(None)),
+                readiness_probe: Arc::new(Semaphore::new(1)),
             },
             accounts,
             decoy_seed,
@@ -1823,6 +2017,9 @@ impl Db {
         if !self.is_available() {
             return Err(DbError::Quarantined);
         }
+        if self.timed_out_mutations.load(Ordering::Acquire) != 0 {
+            return Err(DbError::ResponseTimeout);
+        }
         let (result_sender, result_receiver) = oneshot::channel();
         let mut result_receiver = result_receiver;
         let job = Box::new(move |conn: &mut Connection| {
@@ -1843,12 +2040,49 @@ impl Db {
             }
             Err(_) => {
                 // The job was accepted and cannot be removed from the worker
-                // queue safely. Quarantine the instance immediately. Durable
-                // mutations must still finish while their logical cache lock
-                // is held, preventing a late commit from diverging the cache.
-                self.available.store(false, Ordering::Release);
+                // queue safely.
+                //
+                // A durable mutation must still finish while its logical cache
+                // lock is held — that await, not the quarantine, is what keeps
+                // a late commit from diverging the cache. So a slow mutation
+                // that ultimately succeeds leaves storage perfectly consistent
+                // and the instance stays in service. A completed SQLite error
+                // is also unambiguous: its transaction did not commit and the
+                // cache has not advanced. Only losing the worker makes the
+                // durable outcome unknowable and quarantines the process.
+                // Quarantining on slowness alone handed any client that could
+                // make one command exceed the timeout a permanent,
+                // restart-only outage for every account on the instance.
+                //
+                // Reads mutate nothing: a timed-out read is a load signal, and
+                // the abandoned job is harmless when it eventually runs.
                 if finish_after_timeout {
-                    result_receiver.await.map_err(|_| DbError::WorkerClosed)?
+                    tracing::warn!(
+                        timeout_ms = self.response_timeout.as_millis() as u64,
+                        "storage mutation exceeded its response deadline; awaiting completion"
+                    );
+                    self.timed_out_mutations.fetch_add(1, Ordering::AcqRel);
+                    let timed_out_mutations = self.timed_out_mutations.clone();
+                    let available = self.available.clone();
+                    // The detached monitor is deliberate: if the HTTP request
+                    // is cancelled after the deadline, it still observes the
+                    // accepted command to completion and re-opens admission.
+                    // Dropping the caller must never leave the process stuck in
+                    // a synthetic overload state or accept work while the
+                    // abandoned mutation is still running.
+                    tokio::spawn(async move {
+                        let result = result_receiver.await.map_err(|_| {
+                            available.store(false, Ordering::Release);
+                            DbError::WorkerClosed
+                        });
+                        timed_out_mutations.fetch_sub(1, Ordering::AcqRel);
+                        result
+                    })
+                    .await
+                    .map_err(|_| {
+                        self.available.store(false, Ordering::Release);
+                        DbError::WorkerClosed
+                    })??
                 } else {
                     Err(DbError::ResponseTimeout)
                 }
@@ -1860,14 +2094,71 @@ impl Db {
         self.available.load(Ordering::Acquire)
     }
 
+    fn is_accepting_work(&self) -> bool {
+        self.is_available() && self.timed_out_mutations.load(Ordering::Acquire) == 0
+    }
+
     async fn ready(&self) -> Result<(), DbError> {
+        if !self.is_available() {
+            return Err(DbError::Quarantined);
+        }
+        if !self.is_accepting_work() {
+            return Err(DbError::ResponseTimeout);
+        }
+        // Serve a recent healthy answer without touching storage. Only success
+        // is cached: a failure must be re-observed, and it quarantines anyway.
+        {
+            let checked_at = self
+                .readiness_checked_at
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if checked_at.is_some_and(|at| at.elapsed() < READINESS_CACHE_TTL) {
+                return Ok(());
+            }
+        }
+        // Do not let a cache-expiry stampede enqueue one SQLite command per
+        // unauthenticated probe. One caller refreshes; concurrent callers fail
+        // fast and the ingress retries on its next normal probe interval.
+        let _probe = self
+            .readiness_probe
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| DbError::QueueFull)?;
+        // Another caller may have refreshed between the first cache check and
+        // this permit acquisition.
+        {
+            let checked_at = self
+                .readiness_checked_at
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if checked_at.is_some_and(|at| at.elapsed() < READINESS_CACHE_TTL) {
+                return Ok(());
+            }
+        }
+        // Reads one row rather than counting the table: still fails closed on a
+        // dropped or unreadable schema, without an O(n) scan per probe.
         let result = self
-            .call(|conn| conn.query_row("SELECT COUNT(*) FROM accounts", [], |_| Ok(())))
+            .call(|conn| {
+                conn.query_row("SELECT 1 FROM accounts LIMIT 1", [], |_| Ok(()))
+                    .or_else(|error| match error {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(()),
+                        error => Err(error),
+                    })
+            })
             .await;
-        if result.is_err() && !matches!(&result, Err(DbError::QueueFull)) {
-            // A readiness failure means operators can no longer trust this
-            // process to serve its cache consistently with durable state.
-            // Recovery is a process restart after the storage fault is fixed.
+        if result.is_ok() {
+            *self
+                .readiness_checked_at
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(Instant::now());
+        }
+        // A readiness *fault* means operators can no longer trust this process
+        // to serve its cache consistently with durable state; recovery is a
+        // restart after the storage fault is fixed. Saturation and slowness are
+        // not faults: they answer 503 and withdraw traffic, then recover on
+        // their own. Quarantining on those let an outsider convert a burst of
+        // unauthenticated probes into a permanent outage.
+        if matches!(&result, Err(DbError::Sqlite) | Err(DbError::WorkerClosed)) {
             self.available.store(false, Ordering::Release);
         }
         result
@@ -2568,11 +2859,15 @@ async fn create_account(
         st.auth_rate_limits.account_creations_per_account,
     )
     .await?;
-    // Reject a known duplicate before paying the Argon2 cost. The authoritative
-    // collision check is repeated under the write lock after hashing.
-    if st.read().await.accounts.contains_key(&req.email) {
-        return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
-    }
+    // Mailbox proof is checked *before* anything that can reveal whether the
+    // account exists. Answering 409 first turned registration into an
+    // enumeration oracle that any caller could query with a well-formed but
+    // bogus token — 409 for an existing mailbox, 403 for an unknown one —
+    // which defeated the whole point of the prelogin decoy below.
+    //
+    // Behind a valid proof the disclosure is harmless: the caller has just
+    // demonstrated control of that mailbox, so "an account exists here" is not
+    // a secret being kept from them.
     if let Some(token_hash) = mailbox_proof {
         if !st
             .db
@@ -2582,6 +2877,11 @@ async fn create_account(
         {
             return Err(ApiError(StatusCode::FORBIDDEN, "mailbox proof required"));
         }
+    }
+    // Reject a known duplicate before paying the Argon2 cost. The authoritative
+    // collision check is repeated under the write lock after hashing.
+    if st.read().await.accounts.contains_key(&req.email) {
+        return Err(ApiError(StatusCode::CONFLICT, "account already exists"));
     }
     // Slow hash on a dedicated blocking thread (no starvation of the async runtime).
     let secret = req.registration.auth_secret;
@@ -2811,11 +3111,14 @@ async fn create_session(
     })
     .await
     .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "join error"))?;
-    if !ok || !known {
+    // One failure shape for every rejected login. A distinct 403 for "exists
+    // but unverified" told an unauthenticated caller that the mailbox is
+    // registered — the exact fact the identical 401 and the constant-cost dummy
+    // verification above are there to hide. Production only ever creates
+    // accounts whose mailbox is already proven, so this branch is reachable
+    // only for legacy or development records.
+    if !ok || !known || !mailbox_verified {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
-    }
-    if !mailbox_verified {
-        return Err(ApiError(StatusCode::FORBIDDEN, "mailbox proof required"));
     }
     let now = Instant::now();
     let expires_at = now + st.token_ttl;
@@ -2934,7 +3237,6 @@ async fn apply_vault_transaction(
             "manifest too large",
         ));
     }
-
     let mut ids = HashSet::with_capacity(body.operations.len());
     let mut operations = Vec::with_capacity(body.operations.len());
     for operation in body.operations {
@@ -2971,6 +3273,16 @@ async fn apply_vault_transaction(
         };
         operations.push(prepared);
     }
+
+    // Acquire after extraction and validation but before the global cache lock.
+    // This prevents a slow uploader from reserving the slot and prevents valid
+    // requests from accumulating behind a transaction whose SQLite commit is
+    // slow. The client can safely retry a 503 with its expected revision.
+    let _transaction_slot = st
+        .vault_transaction_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "storage busy"))?;
 
     let mut inner = st.write().await;
     let acc = inner
@@ -4586,23 +4898,296 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn delayed_accepted_mutation_finishes_then_quarantines_the_instance() {
+    async fn delayed_mutation_sheds_new_storage_work_then_recovers() {
         let (db, _, _) = Db::open_with_limits(":memory:", 1, Duration::from_millis(10));
         let completed = Arc::new(AtomicBool::new(false));
         let worker_completed = completed.clone();
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
 
-        db.call_mutation(move |conn| {
-            thread::sleep(Duration::from_millis(50));
-            conn.execute("CREATE TABLE delayed(value INTEGER)", [])?;
-            worker_completed.store(true, Ordering::Release);
-            Ok(())
+        // The mutation overruns its response deadline, then commits. Awaiting
+        // it keeps cache/storage ordering intact, while the transient overload
+        // state rejects new work instead of building a queue behind it.
+        let slow_db = db.clone();
+        let mutation = tokio::spawn(async move {
+            slow_db
+                .call_mutation(move |conn| {
+                    entered_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                    conn.execute("CREATE TABLE delayed(value INTEGER)", [])?;
+                    worker_completed.store(true, Ordering::Release);
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while db.is_accepting_work() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("slow mutation never withdrew storage admission");
+
+        assert!(matches!(
+            db.call(|_| Ok(())).await,
+            Err(DbError::ResponseTimeout)
+        ));
+        assert!(matches!(db.ready().await, Err(DbError::ResponseTimeout)));
+
+        release_sender.send(()).unwrap();
+        mutation.await.unwrap().unwrap();
+        assert!(completed.load(Ordering::Acquire));
+        assert!(db.is_available());
+        assert!(db.is_accepting_work());
+        assert!(db.ready().await.is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_slow_mutation_recovers_without_false_quarantine() {
+        let (db, _, _) = Db::open_with_limits(":memory:", 1, Duration::from_millis(10));
+
+        // The final SQLite error is an unambiguous rollback: the cache never
+        // advances, so permanent quarantine would create a client-triggerable
+        // restart-only outage without protecting consistency.
+        assert!(db
+            .call_mutation(move |conn| {
+                thread::sleep(Duration::from_millis(50));
+                conn.execute("INSERT INTO table_that_does_not_exist VALUES(1)", [])?;
+                Ok(())
+            })
+            .await
+            .is_err());
+        assert!(db.is_available());
+        assert!(db.is_accepting_work());
+        assert!(db.ready().await.is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_slow_read_reports_unavailable_without_quarantining_the_instance() {
+        let (db, _, _) = Db::open_with_limits(":memory:", 4, Duration::from_millis(10));
+
+        // Reads mutate nothing, so a timed-out read is a load signal. Treating
+        // it as a fault handed anyone who could saturate the storage owner —
+        // including an unauthenticated /readyz flood — a permanent outage.
+        assert!(matches!(
+            db.call(|_| {
+                thread::sleep(Duration::from_millis(50));
+                Ok(())
+            })
+            .await,
+            Err(DbError::ResponseTimeout)
+        ));
+        assert!(db.is_available());
+        // Once the storage owner drains the abandoned job, readiness recovers
+        // on its own — no restart, which is the whole point.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while db.ready().await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("readiness never recovered");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readiness_is_served_from_a_short_lived_cache() {
+        let (db, _, _) = Db::open_with_limits(":memory:", 4, Duration::from_secs(5));
+        assert!(db.ready().await.is_ok());
+
+        // With the storage owner parked, an uncached probe would have to queue
+        // behind it. Answering from the cache is what keeps an unauthenticated
+        // probe flood from costing one storage command each.
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+        let parked_db = db.clone();
+        let parked = tokio::spawn(async move {
+            parked_db
+                .call(move |_| {
+                    entered_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
         })
         .await
         .unwrap();
 
-        assert!(completed.load(Ordering::Acquire));
-        assert!(!db.is_available());
-        assert!(matches!(db.ready().await, Err(DbError::Quarantined)));
+        tokio::time::timeout(Duration::from_millis(100), db.ready())
+            .await
+            .expect("readiness waited on the parked storage owner")
+            .unwrap();
+
+        release_sender.send(()).unwrap();
+        parked.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_uncached_readiness_has_one_storage_probe_in_flight() {
+        let (db, _, _) = Db::open_with_limits(":memory:", 8, Duration::from_secs(5));
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = std::sync::mpsc::sync_channel(1);
+        let parked_db = db.clone();
+        let parked = tokio::spawn(async move {
+            parked_db
+                .call(move |_| {
+                    entered_sender.send(()).unwrap();
+                    release_receiver.recv().unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+        })
+        .await
+        .unwrap();
+
+        let probing_db = db.clone();
+        let first_probe = tokio::spawn(async move { probing_db.ready().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while db.sender.capacity() != 7 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first readiness probe was not queued");
+
+        for _ in 0..32 {
+            assert!(matches!(db.ready().await, Err(DbError::QueueFull)));
+            assert_eq!(
+                db.sender.capacity(),
+                7,
+                "concurrent readiness probe reached the SQLite queue"
+            );
+        }
+
+        release_sender.send(()).unwrap();
+        parked.await.unwrap().unwrap();
+        first_probe.await.unwrap().unwrap();
+        assert!(db.ready().await.is_ok());
+    }
+
+    #[test]
+    fn honeypot_lures_never_shadow_a_real_route() {
+        // `build` panics on a duplicate route, so constructing the router is
+        // itself the assertion that no lure sits on a path a client uses.
+        let _ = build(DEFAULT_TOKEN_TTL, ":memory:", MAX_CONCURRENT_AUTH);
+        for path in HONEYPOT_PATHS {
+            assert!(is_honeypot_path(path), "{path} not classified as a lure");
+            assert!(
+                is_honeypot_path(&format!("/v1{path}")),
+                "{path} not classified as a lure under /v1"
+            );
+            // A lure must be a fixed, closed-set path: keeping it verbatim in
+            // the log adds no attacker-controlled cardinality.
+            assert_eq!(redacted_path(path), path);
+        }
+        for real in ["/config", "/health", "/vault", "/sessions", "/accounts"] {
+            assert!(!is_honeypot_path(real), "{real} classified as a lure");
+        }
+    }
+
+    #[tokio::test]
+    async fn honeypot_answers_a_constant_body_that_reflects_nothing() {
+        let app = build(DEFAULT_TOKEN_TTL, ":memory:", MAX_CONCURRENT_AUTH);
+        let mut bodies = HashSet::new();
+        for path in ["/.env", "/v1/.env", "/admin", "/wp-login.php"] {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            bodies.insert(body.to_vec());
+        }
+        assert_eq!(bodies.len(), 1, "lure body varies between paths");
+        let body = String::from_utf8(bodies.into_iter().next().unwrap()).unwrap();
+        assert!(body.contains("good try"));
+        assert!(body.contains("/.well-known/security.txt"));
+    }
+
+    #[tokio::test]
+    async fn security_txt_points_at_the_real_reporting_channel() {
+        let app = build(DEFAULT_TOKEN_TTL, ":memory:", MAX_CONCURRENT_AUTH);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/security.txt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Contact: https://github.com/"));
+        assert!(body.contains("Policy: https://github.com/"));
+        // Expires is mandatory in RFC 9116 and must be in the future.
+        assert!(body.contains("Expires: 20"));
+    }
+
+    #[test]
+    fn rfc3339_matches_known_instants() {
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_000_000_000), "2001-09-09T01:46:40Z");
+        // Leap day, and the last second of a leap year.
+        assert_eq!(rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_735_689_599), "2024-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn security_events_are_counted_by_class() {
+        let (event, total) = security_event(StatusCode::UNAUTHORIZED, "/vault").unwrap();
+        assert_eq!(event, "auth_rejected");
+        // Other request tests run in parallel and share the process-level
+        // counters, so assert monotonic progress without an exact racy delta.
+        assert!(total > 0);
+
+        assert_eq!(
+            security_event(StatusCode::NOT_FOUND, "/.env").unwrap().0,
+            "honeypot"
+        );
+        assert_eq!(
+            security_event(StatusCode::MISDIRECTED_REQUEST, "/.env")
+                .unwrap()
+                .0,
+            "wrong_public_host"
+        );
+        assert_eq!(
+            security_event(StatusCode::TOO_MANY_REQUESTS, "/sessions")
+                .unwrap()
+                .0,
+            "rate_limited"
+        );
+        assert_eq!(
+            security_event(StatusCode::NOT_FOUND, "/{unmatched}")
+                .unwrap()
+                .0,
+            "unmatched_path"
+        );
+        // Ordinary outcomes stay at info and are not counted.
+        assert!(security_event(StatusCode::OK, "/vault").is_none());
+        assert!(security_event(StatusCode::CONFLICT, "/accounts").is_none());
     }
 
     #[test]
