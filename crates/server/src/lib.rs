@@ -90,6 +90,9 @@ const MAX_ITEM_ID_BYTES: usize = 256;
 const MAX_CONCURRENT_AUTH: usize = 4;
 const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 const MAX_ACTIVE_SESSIONS: usize = 100_000;
+/// How often expired sessions are reclaimed. Expiry is enforced per token on
+/// every request, so this interval bounds memory, never access.
+const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_AUTH_RATE_ENTRIES: usize = 10_000;
 /// Source buckets are keyed by caller-chosen addresses, so they get their own
 /// table and their own bound.
@@ -128,6 +131,14 @@ const MAX_VAULT_MUTATIONS_PER_MIN: u32 = 120;
 /// their durable commit is known. Admit only one such transaction at a time so
 /// a hostile account cannot pre-load a long queue behind a slow commit.
 const MAX_CONCURRENT_VAULT_TRANSACTIONS: usize = 1;
+/// How long a vault transaction waits for that slot before giving up. The slot
+/// is global, so rejecting immediately turned one account's in-flight commit
+/// into a failed write for every other account; a short wait lets ordinary
+/// concurrency queue instead of fail.
+const VAULT_TRANSACTION_ADMISSION_WAIT: Duration = Duration::from_secs(2);
+/// Ceiling on requests waiting for that slot. Waiting must not become its own
+/// unbounded queue.
+const MAX_WAITING_VAULT_TRANSACTIONS: usize = 64;
 const MAX_INBOX_READS_PER_MIN: u32 = 60;
 const MAX_INBOX_DELETES_PER_MIN: u32 = 120;
 const MAX_ACCOUNT_DELETION_ATTEMPTS_PER_MIN: u32 = 5;
@@ -1089,6 +1100,7 @@ struct AppState {
     session_rotation_grace: Duration,
     auth_slots: Arc<Semaphore>,
     vault_transaction_slots: Arc<Semaphore>,
+    waiting_vault_transactions: Arc<AtomicUsize>,
     max_rate_entries: usize,
     max_source_rate_entries: usize,
     rate_window: Duration,
@@ -1108,6 +1120,9 @@ struct Inner {
     /// period. They point to the active successor by hash; no raw token is
     /// retained after a response.
     rotated_sessions: HashMap<[u8; 32], RotatedSession>,
+    /// When the expired-session sweep last ran. Expiry itself is enforced per
+    /// token on every authenticated request; this only amortizes reclamation.
+    sessions_swept_at: Instant,
 }
 
 #[derive(Default)]
@@ -1179,6 +1194,7 @@ impl AppState {
                 accounts,
                 sessions: HashMap::new(),
                 rotated_sessions: HashMap::new(),
+                sessions_swept_at: Instant::now(),
             })),
             rate_limiters: Arc::new(RateLimiters::default()),
             db,
@@ -1187,6 +1203,7 @@ impl AppState {
             session_rotation_grace,
             auth_slots: Arc::new(Semaphore::new(auth_limit)),
             vault_transaction_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_VAULT_TRANSACTIONS)),
+            waiting_vault_transactions: Arc::new(AtomicUsize::new(0)),
             max_rate_entries,
             max_source_rate_entries,
             rate_window,
@@ -3504,19 +3521,24 @@ async fn create_session(
         ))?;
     let mut inner = st.write().await;
     retain_live_sessions(&mut inner, now);
-    let oldest = inner
-        .sessions
-        .iter()
-        .filter(|(_, session)| session.email == req.email)
-        .min_by_key(|(_, session)| session.created_at)
-        .map(|(token_hash, _)| *token_hash);
-    let account_sessions = inner
-        .sessions
-        .values()
-        .filter(|session| session.email == req.email)
-        .count();
+    // One liveness-aware pass for both the account's session count and its
+    // oldest family. This ran as three separate full scans of a map holding up
+    // to MAX_ACTIVE_SESSIONS entries, under the global write lock. The sweep
+    // above is amortized, so expired entries may still be present and must be
+    // skipped here rather than counted toward the per-account cap.
+    let mut account_sessions = 0usize;
+    let mut oldest: Option<([u8; 32], Instant)> = None;
+    for (token_hash, session) in inner.sessions.iter() {
+        if session.email != req.email || now >= session.expires_at {
+            continue;
+        }
+        account_sessions += 1;
+        if oldest.is_none_or(|(_, created_at)| session.created_at < created_at) {
+            oldest = Some((*token_hash, session.created_at));
+        }
+    }
     if account_sessions >= MAX_SESSIONS_PER_ACCOUNT {
-        if let Some(token_hash) = oldest {
+        if let Some((token_hash, _)) = oldest {
             if let Some(oldest) = inner.sessions.get(&token_hash) {
                 let family_id = oldest.family_id;
                 revoke_session_family(&mut inner, family_id);
@@ -3742,11 +3764,7 @@ async fn apply_vault_transaction(
     // This prevents a slow uploader from reserving the slot and prevents valid
     // requests from accumulating behind a transaction whose SQLite commit is
     // slow. The client can safely retry a 503 with its expected revision.
-    let _transaction_slot = st
-        .vault_transaction_slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError(StatusCode::SERVICE_UNAVAILABLE, "storage busy"))?;
+    let _transaction_slot = acquire_vault_transaction_slot(&st).await?;
 
     let mut inner = st.write().await;
     let acc = inner
@@ -4067,6 +4085,42 @@ fn canonical_account_id(email: &str) -> Result<String, ApiError> {
     Ok(email.to_ascii_lowercase())
 }
 
+/// Admits one vault transaction into the global commit slot.
+///
+/// The slot is process-wide, not per account: while one transaction is
+/// committing — a durable fsync under `synchronous=FULL` — nobody else may
+/// hold it. Failing fast there meant an ordinary pair of concurrent writers
+/// rejected each other, and gave one account issuing maximum-size
+/// transactions at its full mutation allowance a cheap way to make every
+/// other account's writes fail. A short bounded wait turns that contention
+/// back into queueing, while the waiter ceiling keeps the queue itself from
+/// becoming the resource under attack.
+async fn acquire_vault_transaction_slot(st: &AppState) -> Result<OwnedSemaphorePermit, ApiError> {
+    let waiting = st.waiting_vault_transactions.fetch_add(1, Ordering::AcqRel);
+    let _waiter = WaitingTransaction(st.waiting_vault_transactions.clone());
+    if waiting >= MAX_WAITING_VAULT_TRANSACTIONS {
+        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "storage busy"));
+    }
+    match tokio::time::timeout(
+        VAULT_TRANSACTION_ADMISSION_WAIT,
+        st.vault_transaction_slots.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) | Err(_) => Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "storage busy")),
+    }
+}
+
+/// Decrements the waiter count on every exit path, including cancellation.
+struct WaitingTransaction(Arc<AtomicUsize>);
+
+impl Drop for WaitingTransaction {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 fn auth_permit(st: &AppState) -> Result<OwnedSemaphorePermit, ApiError> {
     st.auth_slots
         .clone()
@@ -4383,18 +4437,28 @@ async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiE
             }
         }
     }
-    // Slow path: take the write lock, prune expired active/predecessor state,
-    // and re-check in case a concurrent rotation completed between locks.
+    // Slow path: take the write lock, reclaim expired state, and re-check in
+    // case a concurrent rotation completed between locks.
+    //
+    // Every deadline is compared explicitly here. Liveness must never be
+    // inferred from "the sweep would have removed it": that made authentication
+    // depend on reclamation running on this exact request, and any change to
+    // when the sweep runs would silently start honouring expired tokens.
     let mut inner = st.write().await;
     retain_live_sessions(&mut inner, now);
     if let Some(session) = inner.sessions.get(&token_hash) {
-        return Ok(session.email.clone());
+        if now < session.expires_at {
+            return Ok(session.email.clone());
+        }
     }
     if let Some(rotated) = inner.rotated_sessions.get(&token_hash) {
-        if inner
-            .sessions
-            .get(&rotated.successor_hash)
-            .is_some_and(|successor| successor.family_id == rotated.family_id)
+        if now < rotated.expires_at
+            && inner
+                .sessions
+                .get(&rotated.successor_hash)
+                .is_some_and(|successor| {
+                    successor.family_id == rotated.family_id && now < successor.expires_at
+                })
         {
             return Ok(rotated.email.clone());
         }
@@ -4402,7 +4466,27 @@ async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiE
     Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))
 }
 
+/// Reclaims memory held by expired sessions.
+///
+/// This sweep is not what makes an expired token unusable — `require_auth`
+/// checks each session's own deadline — so it is pure housekeeping and does not
+/// have to run on every request. It used to: a full scan of both maps, under
+/// the global write lock, on every login and every rotation. That made the cost
+/// of those requests O(active sessions) rather than O(1), and rotation is
+/// available 30 times a minute to every account, so the amplification grew with
+/// the number of accounts an attacker controlled.
 fn retain_live_sessions(inner: &mut Inner, now: Instant) {
+    if now.saturating_duration_since(inner.sessions_swept_at) < SESSION_SWEEP_INTERVAL
+        && inner.sessions.len() < MAX_ACTIVE_SESSIONS
+    {
+        return;
+    }
+    inner.sessions_swept_at = now;
+    sweep_live_sessions(inner, now);
+}
+
+/// The unconditional sweep, for the paths that need an exact live count.
+fn sweep_live_sessions(inner: &mut Inner, now: Instant) {
     inner.sessions.retain(|_, session| now < session.expires_at);
     let sessions = &inner.sessions;
     inner.rotated_sessions.retain(|_, rotated| {
@@ -4830,97 +4914,30 @@ impl Db {
         .await
     }
 
+    /// Physically removes messages whose TTL has elapsed.
     async fn purge_expired(&self, recipient_id: &str, now: i64) -> Result<(), DbError> {
         let recipient_id = recipient_id.to_owned();
-        self.call_mutation(move |conn| {
-            let tx = conn.transaction()?;
-            {
-                let mut stmt = tx.prepare(
-                    "SELECT created_at, expires_at FROM send_inbox
-                     WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
-                )?;
-                let rows = stmt.query_map(params![recipient_id, now], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-                })?;
-                for row in rows {
-                    let (created_at, expires_at) = row?;
-                    if created_at <= 0
-                        || expires_at <= created_at
-                        || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
-                    {
-                        return Err(stored_data_error(
-                            1,
-                            rusqlite::types::Type::Integer,
-                            io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
-                        ));
-                    }
-                }
-            }
-            tx.execute(
-                "DELETE FROM send_inbox
-                 WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
-                params![recipient_id, now],
-            )?;
-            tx.commit()?;
-            Ok(())
-        })
-        .await
+        self.call_mutation(move |conn| purge_expired_rows(conn, &recipient_id, now))
+            .await
     }
 
-    async fn inbox_list(&self, recipient_id: &str, now: i64) -> Result<Vec<InboxItem>, DbError> {
+    /// Purges the recipient's expired messages and returns the live page in a
+    /// single storage command.
+    ///
+    /// These were two round trips through the single SQLite owner on every
+    /// inbox read. They belong together: the TTL is a deletion promise rather
+    /// than a display rule, so the purge must stay on the read path, and a
+    /// purge that cannot run must fail the read instead of silently serving a
+    /// listing whose expired rows were never removed.
+    async fn purge_and_list_inbox(
+        &self,
+        recipient_id: &str,
+        now: i64,
+    ) -> Result<Vec<InboxItem>, DbError> {
         let recipient_id = recipient_id.to_owned();
-        self.call(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT message_id, blob, created_at, expires_at FROM send_inbox
-             WHERE recipient_id=?1 AND (expires_at IS NULL OR expires_at >= ?2)
-             ORDER BY created_at ASC LIMIT ?3",
-            )?;
-            let rows = stmt.query_map(params![recipient_id, now, MAX_INBOX_PAGE], |r| {
-                let message_id: String = r.get(0)?;
-                let blob_json: String = r.get(1)?;
-                let created_at: i64 = r.get(2)?;
-                let expires_at: Option<i64> = r.get(3)?;
-                let blob: SendBlob = serde_json::from_str(&blob_json)
-                    .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
-                if !valid_message_id(&message_id) {
-                    return Err(stored_data_error(
-                        0,
-                        rusqlite::types::Type::Text,
-                        io::Error::new(io::ErrorKind::InvalidData, "invalid stored message id"),
-                    ));
-                }
-                blob.validate_stored_routing(&message_id, &recipient_id)
-                    .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
-                if created_at <= 0 {
-                    return Err(stored_data_error(
-                        2,
-                        rusqlite::types::Type::Integer,
-                        io::Error::new(io::ErrorKind::InvalidData, "invalid stored creation time"),
-                    ));
-                }
-                if expires_at.is_some_and(|expires_at| {
-                    expires_at <= created_at
-                        || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
-                }) {
-                    return Err(stored_data_error(
-                        3,
-                        rusqlite::types::Type::Integer,
-                        io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
-                    ));
-                }
-                Ok(InboxItem {
-                    message_id,
-                    blob,
-                    created_at,
-                    expires_at,
-                })
-            })?;
-            // Propagate DB row errors instead of silently dropping them.
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
-            }
-            Ok(out)
+        self.call_mutation(move |conn| {
+            purge_expired_rows(conn, &recipient_id, now)?;
+            list_inbox_rows(conn, &recipient_id, now)
         })
         .await
     }
@@ -4937,6 +4954,100 @@ impl Db {
         })
         .await
     }
+}
+
+/// Deletes every message of `recipient_id` whose deadline has passed, refusing
+/// to act on rows whose stored timestamps are not self-consistent.
+fn purge_expired_rows(conn: &mut Connection, recipient_id: &str, now: i64) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx.prepare(
+            "SELECT created_at, expires_at FROM send_inbox
+                 WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
+        )?;
+        let rows = stmt.query_map(params![recipient_id, now], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (created_at, expires_at) = row?;
+            if created_at <= 0
+                || expires_at <= created_at
+                || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
+            {
+                return Err(stored_data_error(
+                    1,
+                    rusqlite::types::Type::Integer,
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
+                ));
+            }
+        }
+    }
+    tx.execute(
+        "DELETE FROM send_inbox
+             WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
+        params![recipient_id, now],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Returns one bounded page of the recipient's live messages, validating every
+/// stored field rather than trusting persistence.
+fn list_inbox_rows(
+    conn: &Connection,
+    recipient_id: &str,
+    now: i64,
+) -> rusqlite::Result<Vec<InboxItem>> {
+    let mut stmt = conn.prepare(
+        "SELECT message_id, blob, created_at, expires_at FROM send_inbox
+         WHERE recipient_id=?1 AND (expires_at IS NULL OR expires_at >= ?2)
+         ORDER BY created_at ASC LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![recipient_id, now, MAX_INBOX_PAGE], |r| {
+        let message_id: String = r.get(0)?;
+        let blob_json: String = r.get(1)?;
+        let created_at: i64 = r.get(2)?;
+        let expires_at: Option<i64> = r.get(3)?;
+        let blob: SendBlob = serde_json::from_str(&blob_json)
+            .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
+        if !valid_message_id(&message_id) {
+            return Err(stored_data_error(
+                0,
+                rusqlite::types::Type::Text,
+                io::Error::new(io::ErrorKind::InvalidData, "invalid stored message id"),
+            ));
+        }
+        blob.validate_stored_routing(&message_id, recipient_id)
+            .map_err(|e| stored_data_error(1, rusqlite::types::Type::Text, e))?;
+        if created_at <= 0 {
+            return Err(stored_data_error(
+                2,
+                rusqlite::types::Type::Integer,
+                io::Error::new(io::ErrorKind::InvalidData, "invalid stored creation time"),
+            ));
+        }
+        if expires_at.is_some_and(|expires_at| {
+            expires_at <= created_at || expires_at > created_at.saturating_add(MAX_SEND_TTL_SECS)
+        }) {
+            return Err(stored_data_error(
+                3,
+                rusqlite::types::Type::Integer,
+                io::Error::new(io::ErrorKind::InvalidData, "invalid stored expiration"),
+            ));
+        }
+        Ok(InboxItem {
+            message_id,
+            blob,
+            created_at,
+            expires_at,
+        })
+    })?;
+    // Propagate DB row errors instead of silently dropping them.
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }
 
 #[derive(Serialize)]
@@ -5163,11 +5274,17 @@ async fn send_inbox(
         .map_err(db_api_error)?
         .ok_or(ApiError(StatusCode::NOT_FOUND, "no identity published"))?;
     let now = now_secs();
-    st.db
-        .purge_expired(&mine, now)
+    // Purge and list in one storage command. The TTL is a deletion promise, not
+    // a display rule, so the purge stays on the read path — but it used to cost
+    // a second round trip through the single SQLite owner on every one of the
+    // 60 reads a minute each account is allowed. Failure still propagates: a
+    // purge that cannot run fails the read rather than silently serving a
+    // listing whose expired rows were never removed.
+    let items = st
+        .db
+        .purge_and_list_inbox(&mine, now)
         .await
         .map_err(db_api_error)?;
-    let items = st.db.inbox_list(&mine, now).await.map_err(db_api_error)?;
     Ok(Json(items))
 }
 
@@ -5355,6 +5472,54 @@ mod tests {
             start + Duration::from_secs(60),
         )
         .is_ok());
+    }
+
+    #[tokio::test]
+    async fn concurrent_vault_transactions_queue_instead_of_rejecting_each_other() {
+        let state = AppState::new(
+            DEFAULT_TOKEN_TTL,
+            ":memory:",
+            MAX_CONCURRENT_AUTH,
+            RuntimeOptions::default(),
+        );
+        // The commit slot is global, so a second writer used to be rejected
+        // outright while the first was committing. It must now wait.
+        let held = acquire_vault_transaction_slot(&state)
+            .await
+            .ok()
+            .expect("first writer holds the slot");
+        let waiter = {
+            let state = state.clone();
+            tokio::spawn(async move { acquire_vault_transaction_slot(&state).await.is_ok() })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished(), "second writer was not made to wait");
+        drop(held);
+        assert!(waiter.await.unwrap(), "second writer never got the slot");
+    }
+
+    #[tokio::test]
+    async fn vault_transaction_waiting_is_itself_bounded() {
+        let state = AppState::new(
+            DEFAULT_TOKEN_TTL,
+            ":memory:",
+            MAX_CONCURRENT_AUTH,
+            RuntimeOptions::default(),
+        );
+        let _held = acquire_vault_transaction_slot(&state)
+            .await
+            .ok()
+            .expect("first writer holds the slot");
+        // Waiting must not become an unbounded queue of its own.
+        state
+            .waiting_vault_transactions
+            .store(MAX_WAITING_VAULT_TRANSACTIONS, Ordering::Release);
+        assert!(acquire_vault_transaction_slot(&state).await.is_err());
+        // The ceiling is released again on every exit path.
+        assert_eq!(
+            state.waiting_vault_transactions.load(Ordering::Acquire),
+            MAX_WAITING_VAULT_TRANSACTIONS
+        );
     }
 
     #[test]
