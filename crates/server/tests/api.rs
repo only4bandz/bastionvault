@@ -855,7 +855,8 @@ async fn rate_limits_login_globally_and_per_account_before_verification() {
 #[tokio::test]
 async fn authentication_rate_state_is_strictly_bounded() {
     let app = server::app_in_memory_with_auth_rate_limits(server::AuthRateLimits {
-        max_entries: 2,
+        // Source + global + first account exactly fill the bounded map.
+        max_entries: 3,
         window: std::time::Duration::from_secs(60),
         account_creations_global: 10,
         account_creations_per_account: 10,
@@ -906,7 +907,7 @@ async fn authentication_rate_state_is_strictly_bounded() {
 }
 
 #[tokio::test]
-async fn rate_limiter_state_is_strictly_bounded_and_reclaims_expired_windows() {
+async fn rate_limiter_state_is_strictly_bounded_and_reclaims_idle_buckets() {
     let unknown_id = data_encoding::BASE32_NOPAD.encode(&[0u8; 16]);
     let path = format!("/send/directory/{unknown_id}");
     let app = server::app_in_memory_with_rate_limits(2, std::time::Duration::from_secs(60));
@@ -926,7 +927,7 @@ async fn rate_limiter_state_is_strictly_bounded_and_reclaims_expired_windows() {
     let (status, _) = send(&app, "GET", &path, Some(&carol), None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 
-    // A zero-length deterministic test window makes the previous entry
+    // A zero-length deterministic refill window makes the previous entry
     // immediately reclaimable for a different subject.
     let reclaiming = server::app_in_memory_with_rate_limits(1, std::time::Duration::ZERO);
     let first = signup_login(&reclaiming, "rate-first@example.com").await;

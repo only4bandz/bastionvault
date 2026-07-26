@@ -54,10 +54,15 @@ Authentication and authenticated-operation counters use separate bounded
 mutexes; neither shares the account/session cache lock or remains held across
 storage work. Send admission applies both a 30/minute sender-recipient limit and
 a 120/minute aggregate recipient limit, so one account cannot consume a
-recipient's entire shared budget. These counters are fixed-window and
-process-local. The selected trusted ingress must add source-aware limits; the
-application deliberately does not trust arbitrary forwarding headers as a
-client identity.
+recipient's entire shared budget. These counters use deterministic integer
+token buckets and are process-local. Authentication-facing routes also apply a
+source bucket to the canonical client address asserted by the same-host trusted
+ingress. The application rejects missing, duplicate, malformed, or chained
+forwarding values and never uses forwarding metadata in development mode.
+Client addresses exist only as bounded in-process counter keys and are not
+added to application logs. Source-bucket capacities per 60-second refill window
+are 5 account creations, 30 logins, 60 prelogins, 10 mailbox challenges, and 30
+proof verifications.
 
 Readiness is answered from a 500 ms cache with one single-flight refresh.
 Concurrent callers at cache expiry fail fast with 503 instead of entering the

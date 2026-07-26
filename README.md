@@ -79,11 +79,11 @@ non-enumerable **Bastion address** (128-bit, base32). Available in both the
   so they **sync across surfaces** (verify a contact in the extension, it's
   verified in the web app too).
 - Server-side: strict public-key/envelope routing validation, per-recipient
-  inbox quotas, per-sender-recipient and aggregate-recipient fixed-window rate
+  inbox quotas, per-sender-recipient and aggregate-recipient token-bucket rate
   limits with strictly bounded state, size caps, message dedupe, bounded expiry,
   and **read-once delete** — all without learning any plaintext. Account
-  creation and login are also globally and per-account rate-limited before any
-  server-side Argon2 work begins.
+  creation and login are also globally, per trusted source, and per-account
+  rate-limited before any server-side Argon2 work begins.
 
 Design + threat model: [`docs/bastion-send-design.md`](docs/bastion-send-design.md).
 
@@ -192,8 +192,9 @@ in [`docs/mailbox-verification.md`](docs/mailbox-verification.md).
 Production mode fails closed unless Axum is loopback-only, SQLite uses an
 absolute path, and one canonical HTTPS public origin is declared. Proxied API
 requests must preserve that public Host and carry the ingress-owned
-`X-Forwarded-Proto: https`; CORS remains disabled. The complete ingress and
-certificate-renewal contract is in
+`X-Forwarded-Proto: https` plus one canonical client IP in `X-Forwarded-For`;
+CORS remains disabled. The complete ingress and certificate-renewal contract is
+in
 [`docs/production-edge-contract.md`](docs/production-edge-contract.md).
 
 ```bash
