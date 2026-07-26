@@ -4370,10 +4370,10 @@ async fn rotate_session(
     //
     // Either way the absolute ceiling is carried over from the family, so a
     // retry cannot be used to restart a session's lifetime.
-    if let Some(rotated) = inner.rotated_sessions.get(&predecessor_hash) {
+    if let Some(rotated) = live_predecessor(&inner, &predecessor_hash, now) {
         let successor_hash = rotated.successor_hash;
         let family_id = rotated.family_id;
-        let undelivered = inner.sessions.get(&successor_hash).and_then(|successor| {
+        let undelivered = live_session(&inner, &successor_hash, now).and_then(|successor| {
             (successor.family_id == family_id && !successor.used.load(Ordering::Acquire))
                 .then_some(successor.created_at)
         });
@@ -4397,6 +4397,11 @@ async fn rotate_session(
         );
     }
 
+    // Removing without checking would let an expired-but-unreclaimed token be
+    // rotated into a fresh access window.
+    if live_session(&inner, &predecessor_hash, now).is_none() {
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
+    }
     let session = inner
         .sessions
         .remove(&predecessor_hash)
@@ -4498,6 +4503,10 @@ async fn delete_session(
 ) -> Result<StatusCode, ApiError> {
     let token_hash = session_token_hash(bearer_token(&headers)?);
     let mut inner = st.write().await;
+    // Deliberately not filtered through the liveness accessors. Revocation is
+    // the one direction where honouring a stale token is the safer default: a
+    // client logging out with a predecessor whose grace has lapsed should still
+    // be able to kill the family's live successor. Nothing is granted here.
     let family_id = inner
         .sessions
         .get(&token_hash)
@@ -4560,71 +4569,46 @@ async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiE
     // the global write lock just to be validated.
     {
         let inner = st.read().await;
-        match inner.sessions.get(&token_hash) {
-            Some(s) if now < s.expires_at => {
-                // Records that this token has served a request. A rotation
-                // retry uses it to tell "the client never received this
-                // successor" from "the client is using it".
-                s.used.store(true, Ordering::Release);
-                return Ok(s.email.clone());
-            }
-            Some(_) => {} // expired → fall through to evict under the write lock
-            None => {
-                if let Some(rotated) = inner.rotated_sessions.get(&token_hash) {
-                    if now < rotated.expires_at
-                        && inner
-                            .sessions
-                            .get(&rotated.successor_hash)
-                            .is_some_and(|successor| {
-                                successor.family_id == rotated.family_id
-                                    && now < successor.expires_at
-                            })
-                    {
-                        return Ok(rotated.email.clone());
-                    }
-                }
-            }
-        }
-    }
-    // Slow path: take the write lock, reclaim expired state, and re-check in
-    // case a concurrent rotation completed between locks.
-    //
-    // Every deadline is compared explicitly here. Liveness must never be
-    // inferred from "the sweep would have removed it": that made authentication
-    // depend on reclamation running on this exact request, and any change to
-    // when the sweep runs would silently start honouring expired tokens.
-    let mut inner = st.write().await;
-    retain_live_sessions(&mut inner, now);
-    if let Some(session) = inner.sessions.get(&token_hash) {
-        if now < session.expires_at {
+        if let Some(session) = live_session(&inner, &token_hash, now) {
+            // Records that this token has served a request. A rotation retry
+            // uses it to tell "the client never received this successor" from
+            // "the client is using it".
             session.used.store(true, Ordering::Release);
             return Ok(session.email.clone());
         }
-    }
-    if let Some(rotated) = inner.rotated_sessions.get(&token_hash) {
-        if now < rotated.expires_at
-            && inner
-                .sessions
-                .get(&rotated.successor_hash)
-                .is_some_and(|successor| {
-                    successor.family_id == rotated.family_id && now < successor.expires_at
-                })
-        {
+        if let Some(rotated) = live_predecessor(&inner, &token_hash, now) {
             return Ok(rotated.email.clone());
         }
+    }
+    // Slow path: take the write lock, reclaim expired state, and re-check in
+    // case a concurrent rotation completed between locks. Liveness still comes
+    // from the record's own deadline, never from reclamation having run.
+    let mut inner = st.write().await;
+    retain_live_sessions(&mut inner, now);
+    if let Some(session) = live_session(&inner, &token_hash, now) {
+        session.used.store(true, Ordering::Release);
+        return Ok(session.email.clone());
+    }
+    if let Some(rotated) = live_predecessor(&inner, &token_hash, now) {
+        return Ok(rotated.email.clone());
     }
     Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))
 }
 
 /// Reclaims memory held by expired sessions.
 ///
-/// This sweep is not what makes an expired token unusable — `require_auth`
-/// checks each session's own deadline — so it is pure housekeeping and does not
-/// have to run on every request. It used to: a full scan of both maps, under
-/// the global write lock, on every login and every rotation. That made the cost
-/// of those requests O(active sessions) rather than O(1), and rotation is
-/// available 30 times a minute to every account, so the amplification grew with
-/// the number of accounts an attacker controlled.
+/// This sweep is not what makes an expired token unusable — every authorization
+/// decision compares the record's own deadline through `live_session` /
+/// `live_predecessor` — so it is pure housekeeping and does not have to run on
+/// every request. It used to: a full scan of both maps, under the global write
+/// lock, on every login and every rotation. That made the cost of those
+/// requests O(active sessions) rather than O(1), and rotation is available 30
+/// times a minute to every account, so the amplification grew with the number
+/// of accounts an attacker controlled.
+///
+/// The capacity clause is load-bearing: the active-session ceiling is measured
+/// against this map's length, so it must never be compared while the map is
+/// padded with expired entries.
 fn retain_live_sessions(inner: &mut Inner, now: Instant) {
     if now.saturating_duration_since(inner.sessions_swept_at) < SESSION_SWEEP_INTERVAL
         && inner.sessions.len() < MAX_ACTIVE_SESSIONS
@@ -4635,7 +4619,7 @@ fn retain_live_sessions(inner: &mut Inner, now: Instant) {
     sweep_live_sessions(inner, now);
 }
 
-/// The unconditional sweep, for the paths that need an exact live count.
+/// The unconditional sweep.
 fn sweep_live_sessions(inner: &mut Inner, now: Instant) {
     inner.sessions.retain(|_, session| now < session.expires_at);
     let sessions = &inner.sessions;
@@ -4645,6 +4629,35 @@ fn sweep_live_sessions(inner: &mut Inner, now: Instant) {
                 .get(&rotated.successor_hash)
                 .is_some_and(|successor| successor.family_id == rotated.family_id)
     });
+}
+
+/// The session for `token_hash`, if it is live *right now*.
+///
+/// Liveness is a property of the record, never of whether reclamation happened
+/// to run on this request. Reading the map directly and trusting the sweep is
+/// what made an expired token briefly acceptable once already; every
+/// authorization decision goes through here so that cannot be reintroduced by
+/// changing when the sweep runs, or by calling a handler in a different order.
+fn live_session<'a>(inner: &'a Inner, token_hash: &[u8; 32], now: Instant) -> Option<&'a Session> {
+    inner
+        .sessions
+        .get(token_hash)
+        .filter(|session| now < session.expires_at)
+}
+
+/// The rotation predecessor for `token_hash`, if it is still inside its grace
+/// window *and* its successor is itself live and in the same family.
+fn live_predecessor<'a>(
+    inner: &'a Inner,
+    token_hash: &[u8; 32],
+    now: Instant,
+) -> Option<&'a RotatedSession> {
+    let rotated = inner.rotated_sessions.get(token_hash)?;
+    if now >= rotated.expires_at {
+        return None;
+    }
+    let successor = live_session(inner, &rotated.successor_hash, now)?;
+    (successor.family_id == rotated.family_id).then_some(rotated)
 }
 
 fn revoke_session_family(inner: &mut Inner, family_id: [u8; 16]) {
@@ -5719,6 +5732,80 @@ mod tests {
         let v4_neighbour: IpAddr = "192.0.2.45".parse().unwrap();
         assert_eq!(source_bucket_key(v4), "192.0.2.44");
         assert_ne!(source_bucket_key(v4), source_bucket_key(v4_neighbour));
+    }
+
+    fn expired_session(email: &str, now: Instant) -> Session {
+        Session {
+            email: email.to_string(),
+            family_id: [0u8; 16],
+            created_at: now,
+            expires_at: now,
+            used: AtomicBool::new(false),
+        }
+    }
+
+    #[test]
+    fn the_active_session_ceiling_is_never_measured_against_unreclaimed_state() {
+        // Login compares sessions.len() with MAX_ACTIVE_SESSIONS. Reclamation
+        // is amortized, so that comparison is only meaningful because the sweep
+        // is forced once the map reaches the ceiling. Without that clause the
+        // server would answer "session capacity reached" to legitimate logins
+        // while every entry in the map was expired.
+        let now = Instant::now();
+        let mut inner = Inner {
+            accounts: HashMap::new(),
+            sessions: HashMap::new(),
+            rotated_sessions: HashMap::new(),
+            // Claim a sweep just happened, so only the capacity clause can
+            // trigger reclamation.
+            sessions_swept_at: now,
+        };
+        for index in 0..MAX_ACTIVE_SESSIONS {
+            let mut token_hash = [0u8; 32];
+            token_hash[..8].copy_from_slice(&(index as u64).to_be_bytes());
+            inner
+                .sessions
+                .insert(token_hash, expired_session("full@example.com", now));
+        }
+        assert_eq!(inner.sessions.len(), MAX_ACTIVE_SESSIONS);
+
+        retain_live_sessions(&mut inner, now + Duration::from_millis(1));
+        assert!(
+            inner.sessions.is_empty(),
+            "a full map of expired sessions was not reclaimed"
+        );
+    }
+
+    #[test]
+    fn liveness_accessors_reject_expired_records_without_a_sweep() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(1);
+        let mut inner = Inner {
+            accounts: HashMap::new(),
+            sessions: HashMap::new(),
+            rotated_sessions: HashMap::new(),
+            sessions_swept_at: now,
+        };
+        let successor_hash = [1u8; 32];
+        let predecessor_hash = [2u8; 32];
+        inner
+            .sessions
+            .insert(successor_hash, expired_session("stale@example.com", now));
+        inner.rotated_sessions.insert(
+            predecessor_hash,
+            RotatedSession {
+                email: "stale@example.com".to_string(),
+                family_id: [0u8; 16],
+                successor_hash,
+                // Grace itself has not lapsed; the successor behind it has.
+                expires_at: later + Duration::from_secs(60),
+            },
+        );
+
+        // The records are still in the maps: nothing has been reclaimed. They
+        // must be refused anyway, or authentication would depend on the sweep.
+        assert!(live_session(&inner, &successor_hash, later).is_none());
+        assert!(live_predecessor(&inner, &predecessor_hash, later).is_none());
     }
 
     #[test]
