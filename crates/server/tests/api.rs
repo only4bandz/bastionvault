@@ -951,10 +951,12 @@ async fn rate_limits_login_globally_and_per_account_before_verification() {
 }
 
 #[tokio::test]
-async fn authentication_rate_state_is_strictly_bounded() {
+async fn authentication_rate_state_stays_bounded_without_refusing_new_subjects() {
     let app = server::app_in_memory_with_auth_rate_limits(server::AuthRateLimits {
-        // Source + global + first account exactly fill the bounded map.
-        max_entries: 3,
+        // Global + first account exactly fill the bounded map. Source buckets
+        // now live in a table of their own, so caller-chosen keys cannot crowd
+        // an account or token bucket out of this one.
+        max_entries: 2,
         window: std::time::Duration::from_secs(60),
         account_creations_global: 10,
         account_creations_per_account: 10,
@@ -977,6 +979,10 @@ async fn authentication_rate_state_is_strictly_bounded() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
+    // A second account arrives with the map already full. At the bound the
+    // limiter evicts its least recently used bucket rather than refusing the
+    // newcomer: answering 503 here let anyone who could mint keys faster than
+    // the table drains deny registration to every unseen subject.
     let (_, second, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
     let (status, _) = send(
         &app,
@@ -989,10 +995,9 @@ async fn authentication_rate_state_is_strictly_bounded() {
         })),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(status, StatusCode::CREATED);
 
-    // Prelogin now participates in the bounded auth-rate map: at capacity a
-    // new live key is refused rather than growing the map without bound.
+    // Prelogin participates in the same bounded map and is served too.
     let (status, _) = send(
         &app,
         "GET",
@@ -1001,7 +1006,30 @@ async fn authentication_rate_state_is_strictly_bounded() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(status, StatusCode::OK);
+
+    // Enforcement is intact for a bucket that survives: the global account
+    // creation allowance still stops the eleventh registration in the window.
+    let mut refused = false;
+    for index in 0..12 {
+        let (_, registration, _) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/accounts",
+            None,
+            Some(json!({
+                "email": format!("rate-capacity-{index}@example.com"),
+                "registration": serde_json::to_value(registration).unwrap()
+            })),
+        )
+        .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            refused = true;
+            break;
+        }
+    }
+    assert!(refused, "the global creation allowance stopped enforcing");
 }
 
 #[tokio::test]
@@ -1018,12 +1046,29 @@ async fn rate_limiter_state_is_strictly_bounded_and_reclaims_idle_buckets() {
     let (status, _) = send(&app, "GET", &path, Some(&bob), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Existing keys remain serviceable at capacity, but a third live key is
-    // rejected before it can grow the map past its configured bound.
+    // Existing keys remain serviceable at capacity, and so does a third live
+    // key: at the bound the limiter evicts its least recently used bucket
+    // rather than refusing the newcomer. Answering 503 here let anyone who
+    // could mint keys faster than the table drains deny service to every
+    // subject that did not already hold an entry.
     let (status, _) = send(&app, "GET", &path, Some(&alice), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = send(&app, "GET", &path, Some(&carol), None).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Eviction must not cost enforcement for the subject still holding a
+    // bucket: its own limit continues to apply.
+    // One more than the server's per-account directory-lookup allowance.
+    const LOOKUP_ATTEMPTS: u32 = 121;
+    let mut throttled = false;
+    for _ in 0..LOOKUP_ATTEMPTS {
+        let (status, _) = send(&app, "GET", &path, Some(&carol), None).await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            throttled = true;
+            break;
+        }
+    }
+    assert!(throttled, "a live bucket stopped enforcing its limit");
 
     // A zero-length deterministic refill window makes the previous entry
     // immediately reclaimable for a different subject.
