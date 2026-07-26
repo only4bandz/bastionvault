@@ -1030,6 +1030,12 @@ async fn security_headers(State(st): State<AppState>, request: Request, next: Ne
     }
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Every authenticated response is specific to its bearer, and vault reads
+    // now carry an ETag validator. `no-store` should already keep these out of
+    // any shared cache; `Vary` states the dependency outright so an
+    // intermediary that mishandles the first directive cannot serve one
+    // account's response to another.
+    headers.insert(header::VARY, HeaderValue::from_static("authorization"));
     headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -1123,6 +1129,8 @@ struct AppState {
     verification_origin: Option<String>,
     /// Per-deployment secret keying deterministic prelogin decoys.
     prelogin_decoy_seed: [u8; 32],
+    /// KDF parameters a decoy claims: this deployment's most common.
+    prelogin_decoy_kdf: KdfParams,
 }
 
 struct Inner {
@@ -1214,6 +1222,7 @@ impl AppState {
             session_rotation_grace,
         } = options;
         let (db, accounts, prelogin_decoy_seed) = Db::open(db_path);
+        let prelogin_decoy_kdf = modal_kdf(&accounts);
         let state = Self {
             inner: Arc::new(RwLock::new(Inner {
                 accounts,
@@ -1236,6 +1245,7 @@ impl AppState {
             transport,
             verification_origin,
             prelogin_decoy_seed,
+            prelogin_decoy_kdf,
         };
         if let Some(config) = smtp {
             mail_outbox::spawn(state.db.clone(), config);
@@ -2042,7 +2052,39 @@ fn migrate_v4_to_v5(conn: &mut Connection) -> rusqlite::Result<()> {
             // Two independent vaults or proofs must never be merged by an
             // automatic case fold. The transaction leaves schema v4 untouched
             // so an operator can resolve the private records explicitly.
-            return Err(rusqlite::Error::InvalidQuery);
+            //
+            // This aborts startup, so the message has to be actionable: an
+            // operator meeting it is mid-upgrade with a server that will not
+            // come back until they act. It names the counts and the remedy, and
+            // still never names an account.
+            let colliding_accounts: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM accounts
+                  WHERE lower(email) IN (
+                    SELECT lower(email) FROM accounts
+                     GROUP BY lower(email) HAVING COUNT(*)>1)",
+                [],
+                |row| row.get(0),
+            )?;
+            let colliding_challenges: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM registration_challenges c
+                  WHERE NOT EXISTS(
+                        SELECT 1 FROM accounts a WHERE lower(a.email)=lower(c.email))
+                    AND lower(c.email) IN (
+                        SELECT lower(email) FROM registration_challenges
+                         GROUP BY lower(email) HAVING COUNT(*)>1)",
+                [],
+                |row| row.get(0),
+            )?;
+            return Err(stored_data_error(
+                0,
+                rusqlite::types::Type::Text,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "schema v5 canonicalizes account identifiers to lowercase, and this                          database holds {colliding_accounts} account row(s) and                          {colliding_challenges} registration-challenge row(s) that differ only                          by letter case. Merging them automatically could hand one person                          another's vault, so the migration refused and left the database at                          schema v4 — this server has not modified it. Resolve the duplicates                          (keep one account per lowercase address, delete or re-issue the                          affected challenges), then start this version again. To list them:                          SELECT lower(email), COUNT(*) FROM accounts GROUP BY 1 HAVING COUNT(*)>1"
+                    ),
+                ),
+            ));
         }
 
         tx.execute_batch(
@@ -3439,12 +3481,45 @@ async fn prelogin(
             kdf: acc.kdf,
             wrapped_vault_key: acc.wrapped_vault_key.clone(),
         })),
-        None => Ok(Json(prelogin_decoy(&st.prelogin_decoy_seed, &email))),
+        None => Ok(Json(prelogin_decoy(
+            &st.prelogin_decoy_seed,
+            st.prelogin_decoy_kdf,
+            &email,
+        ))),
     }
 }
 
+/// The KDF parameters a decoy should claim.
+///
+/// A decoy is only indistinguishable if it looks like the accounts that
+/// actually exist here. Hardcoding `KdfParams::default()` was right for a
+/// deployment whose accounts were all created by the shipped clients — they
+/// always register with the defaults — and wrong for any deployment holding
+/// accounts registered with other parameters, where every decoy announced
+/// itself by not matching the local population.
+///
+/// The mode is used rather than a per-email sample: real parameters never
+/// change for an existing account, so a decoy's must not drift either. The mode
+/// only moves when the population itself does, and an empty deployment falls
+/// back to the registration defaults.
+fn modal_kdf(accounts: &HashMap<String, AccountRecord>) -> KdfParams {
+    let mut tally: Vec<(KdfParams, usize)> = Vec::new();
+    for account in accounts.values() {
+        match tally.iter_mut().find(|(kdf, _)| *kdf == account.kdf) {
+            Some((_, count)) => *count += 1,
+            None => tally.push((account.kdf, 1)),
+        }
+    }
+    tally
+        .into_iter()
+        // Ties resolve deterministically so restarts do not move the answer.
+        .max_by_key(|(kdf, count)| (*count, kdf.mem_kib, kdf.iterations, kdf.parallelism))
+        .map(|(kdf, _)| kdf)
+        .unwrap_or_default()
+}
+
 /// Deterministic, secret-keyed decoy prelogin response for unknown accounts.
-fn prelogin_decoy(seed: &[u8; 32], email: &str) -> Prelogin {
+fn prelogin_decoy(seed: &[u8; 32], decoy_kdf: KdfParams, email: &str) -> Prelogin {
     // Domain-separated PRF stream: SHA-256(seed || label || 0x00 || email).
     // The secret-prefix construction is safe here (fixed-shape input, no
     // attacker-controlled extension surface across labels).
@@ -3465,11 +3540,11 @@ fn prelogin_decoy(seed: &[u8; 32], email: &str) -> Prelogin {
     };
     use base64::{engine::general_purpose::STANDARD as B64_STD, Engine as _};
     Prelogin {
-        // Same shape as a real registration: 16-byte salt, the registration
-        // KDF defaults, and a v1 blob with a 24-byte nonce over a 48-byte
-        // ciphertext (32-byte key + 16-byte AEAD tag).
+        // Same shape as a real registration: 16-byte salt, this deployment's
+        // most common KDF parameters, and a v1 blob with a 24-byte nonce over
+        // a 48-byte ciphertext (32-byte key + 16-byte AEAD tag).
         salt: B64_STD.encode(prf("prelogin-decoy:salt", 16)),
-        kdf: KdfParams::default(),
+        kdf: decoy_kdf,
         wrapped_vault_key: EncryptedBlob {
             v: 1,
             nonce: B64_STD.encode(prf("prelogin-decoy:nonce", 24)),
@@ -5644,6 +5719,55 @@ mod tests {
         let v4_neighbour: IpAddr = "192.0.2.45".parse().unwrap();
         assert_eq!(source_bucket_key(v4), "192.0.2.44");
         assert_ne!(source_bucket_key(v4), source_bucket_key(v4_neighbour));
+    }
+
+    #[test]
+    fn decoy_kdf_follows_the_local_population_not_a_constant() {
+        fn account(kdf: KdfParams) -> AccountRecord {
+            AccountRecord {
+                salt: String::new(),
+                kdf,
+                wrapped_vault_key: EncryptedBlob {
+                    v: 1,
+                    nonce: String::new(),
+                    ct: String::new(),
+                },
+                auth_hash: String::new(),
+                email_verified_at: None,
+                items: HashMap::new(),
+                item_bytes: HashMap::new(),
+                manifest: None,
+                manifest_bytes: 0,
+                stored_bytes: 0,
+                vault_revision: 0,
+            }
+        }
+
+        // An empty deployment falls back to the registration defaults.
+        assert_eq!(modal_kdf(&HashMap::new()), KdfParams::default());
+
+        // A deployment whose accounts were registered with other parameters
+        // gets decoys that match them. Announcing the defaults there marked
+        // every decoy as a decoy.
+        let hardened = KdfParams {
+            mem_kib: 256 * 1024,
+            iterations: 4,
+            parallelism: 2,
+        };
+        let mut accounts = HashMap::new();
+        accounts.insert("a@example.com".to_string(), account(hardened));
+        accounts.insert("b@example.com".to_string(), account(hardened));
+        accounts.insert("c@example.com".to_string(), account(KdfParams::default()));
+        assert_eq!(modal_kdf(&accounts), hardened);
+
+        let seed = [3u8; 32];
+        let decoy = prelogin_decoy(&seed, modal_kdf(&accounts), "nobody@example.com");
+        assert_eq!(decoy.kdf, hardened);
+        // Still deterministic per email, so a decoy never moves under an
+        // observer who asks twice.
+        let repeat = prelogin_decoy(&seed, modal_kdf(&accounts), "nobody@example.com");
+        assert_eq!(decoy.salt, repeat.salt);
+        assert_eq!(decoy.wrapped_vault_key.ct, repeat.wrapped_vault_key.ct);
     }
 
     #[test]

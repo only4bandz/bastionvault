@@ -109,6 +109,19 @@ validator and must never replace manifest authentication, revision/sequence
 comparison, or the local rollback checkpoint. The existing `/vault/revision`
 probe remains supported.
 
+Every response carries `Vary: Authorization` alongside `Cache-Control:
+no-store`. The store directive already keeps authenticated bodies out of shared
+caches; the `Vary` states the dependency outright so an intermediary that
+mishandles it cannot serve one account's vault response to another.
+
+Prelogin decoys claim this deployment's most common KDF parameters, sampled
+once at startup, rather than a hardcoded constant. A decoy is only
+indistinguishable if it resembles the accounts that actually exist here: on a
+deployment holding accounts registered with non-default parameters, a constant
+announced every decoy as a decoy. The mode is used rather than a per-account
+sample because real parameters never change for an existing account, so a
+decoy's must not drift either.
+
 `bastion-ops-status` opens the live WAL database read-only and emits one JSON
 object containing only:
 

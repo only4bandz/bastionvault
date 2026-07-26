@@ -3322,6 +3322,12 @@ async fn security_headers_are_stamped_on_success_and_error_responses() {
                 .to_string()
         };
         assert_eq!(get("cache-control"), "no-store", "{method} {uri}");
+        // Vault reads carry an ETag validator, and every authenticated response
+        // is specific to its bearer. `no-store` should already keep these out
+        // of a shared cache; `Vary` states the dependency outright so an
+        // intermediary that mishandles the first directive cannot serve one
+        // account's response to another.
+        assert_eq!(get("vary"), "authorization", "{method} {uri}");
         assert_eq!(get("pragma"), "no-cache", "{method} {uri}");
         assert_eq!(get("x-content-type-options"), "nosniff", "{method} {uri}");
         assert_eq!(get("referrer-policy"), "no-referrer", "{method} {uri}");
