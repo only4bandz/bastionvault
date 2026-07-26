@@ -1358,56 +1358,59 @@ async fn logout_revokes_token() {
 }
 
 #[tokio::test]
-async fn session_rotation_is_idempotent_and_bounds_predecessor_grace() {
+async fn rotation_mints_the_replacement_and_bounds_predecessor_grace() {
     let app = server::app_in_memory_with_session_lifetimes(
         std::time::Duration::from_secs(1),
         std::time::Duration::from_secs(5),
         std::time::Duration::from_millis(50),
     );
     let token = registered_session(&app, "rotate@example.com").await;
-    let successor = "ab".repeat(32);
 
-    let (status, _) = send(
-        &app,
-        "PUT",
-        "/sessions",
-        Some(&token),
-        Some(json!({ "token": successor })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    // The replacement is minted by the server: a client cannot choose the
+    // entropy of the server's own bearer credential.
+    let (status, body) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let successor = body["token"].as_str().unwrap().to_string();
+    assert_ne!(successor, token);
+    assert_eq!(successor.len(), 64);
 
     // A request already dispatched with the predecessor survives the bounded
-    // grace, and a lost 204 can be retried with the same replacement.
+    // grace period.
     let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = send(
-        &app,
-        "PUT",
-        "/sessions",
-        Some(&token),
-        Some(json!({ "token": successor })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
 
-    // The predecessor cannot fork one family onto a second successor.
-    let (status, _) = send(
-        &app,
-        "PUT",
-        "/sessions",
-        Some(&token),
-        Some(json!({ "token": "cd".repeat(32) })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
-
+    // The successor works, and using it marks it delivered.
     let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
     assert_eq!(status, StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(75)).await;
-    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+
+    // Rotating the predecessor again now that its successor is in use is a
+    // replay, not a retry: the whole family goes.
+    let (status, _) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_lost_rotation_response_can_be_retried_with_the_predecessor() {
+    let app = server::app_in_memory();
+    let token = registered_session(&app, "rotate-retry@example.com").await;
+
+    // First rotation: assume the client never received this response.
+    let (status, body) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let undelivered = body["token"].as_str().unwrap().to_string();
+
+    // Retrying with the predecessor is safe precisely because the successor
+    // never authenticated a request. It is revoked and replaced.
+    let (status, body) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let delivered = body["token"].as_str().unwrap().to_string();
+    assert_ne!(delivered, undelivered);
+
+    let (status, _) = send(&app, "GET", "/vault", Some(&undelivered), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&app, "GET", "/vault", Some(&delivered), None).await;
     assert_eq!(status, StatusCode::OK);
 }
 
@@ -1415,16 +1418,9 @@ async fn session_rotation_is_idempotent_and_bounds_predecessor_grace() {
 async fn logout_through_a_rotation_predecessor_revokes_its_successor() {
     let app = server::app_in_memory();
     let token = registered_session(&app, "rotated-logout@example.com").await;
-    let successor = "12".repeat(32);
-    let (status, _) = send(
-        &app,
-        "PUT",
-        "/sessions",
-        Some(&token),
-        Some(json!({ "token": successor })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let successor = body["token"].as_str().unwrap().to_string();
 
     let (status, _) = send(&app, "DELETE", "/sessions", Some(&token), None).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
@@ -1441,16 +1437,31 @@ async fn rotation_never_extends_the_absolute_session_ceiling() {
     );
     let token = registered_session(&app, "absolute-session@example.com").await;
     tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-    let successor = "34".repeat(32);
-    let (status, _) = send(
-        &app,
-        "PUT",
-        "/sessions",
-        Some(&token),
-        Some(json!({ "token": successor })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let successor = body["token"].as_str().unwrap().to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(110)).await;
+    let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_retried_rotation_does_not_restart_the_absolute_ceiling() {
+    let app = server::app_in_memory_with_session_lifetimes(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(200),
+        std::time::Duration::from_millis(50),
+    );
+    let token = registered_session(&app, "absolute-retry@example.com").await;
+    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    // Rotate, then retry as though the response had been lost. The family's
+    // creation time must carry across both, or a client could restart its
+    // lifetime at will by replaying the retry path.
+    let (status, _) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let successor = body["token"].as_str().unwrap().to_string();
     tokio::time::sleep(std::time::Duration::from_millis(110)).await;
     let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

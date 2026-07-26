@@ -1150,6 +1150,12 @@ struct Session {
     family_id: [u8; 16],
     created_at: Instant,
     expires_at: Instant,
+    /// Set the first time this token authenticates a request. It distinguishes
+    /// "the client never received this successor" from "the client is using
+    /// it", which is what lets a rotation retry be answered safely without
+    /// retaining any raw token. Interior mutability keeps the read-lock fast
+    /// path in `require_auth` from needing the write lock.
+    used: AtomicBool,
 }
 
 struct RotatedSession {
@@ -2980,14 +2986,11 @@ struct LoginResponse {
     token: String,
 }
 
+/// Rotation carries no request fields: the replacement token is minted by the
+/// server and returned in the response.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RotateSessionRequest {
-    /// Fresh client-generated 256-bit bearer token. Supplying it makes a
-    /// retry byte-identical, so a lost success response cannot strand the
-    /// client between two unknown token states.
-    token: String,
-}
+struct RotateSessionRequest {}
 
 #[derive(Serialize)]
 struct VaultResponse {
@@ -3564,6 +3567,7 @@ async fn create_session(
             family_id: new_session_family_id(),
             created_at: now,
             expires_at,
+            used: AtomicBool::new(false),
         },
     );
     Ok(Json(LoginResponse { token }))
@@ -4247,23 +4251,9 @@ fn validate_registration(registration: &Registration) -> Result<(), ApiError> {
 async fn rotate_session(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<RotateSessionRequest>,
-) -> Result<StatusCode, ApiError> {
+    Json(_): Json<RotateSessionRequest>,
+) -> Result<Json<LoginResponse>, ApiError> {
     let predecessor_hash = session_token_hash(bearer_token(&headers)?);
-    if !is_session_token(&req.token) {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "invalid replacement token",
-        ));
-    }
-    let successor_hash = session_token_hash(&req.token);
-    if successor_hash == predecessor_hash {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "invalid replacement token",
-        ));
-    }
-
     let email = require_auth(&st, &headers).await?;
     rate_limit(&st, &email, "session-control", 30)?;
 
@@ -4271,80 +4261,139 @@ async fn rotate_session(
     let mut inner = st.write().await;
     retain_live_sessions(&mut inner, now);
 
-    // Lost-response retry: the server has already installed exactly this
-    // successor. Raw successor bytes are never retained; matching the hash is
-    // sufficient and keeps the operation idempotent.
+    // Lost-response retry.
+    //
+    // The client cannot name the successor — it never chose it and, if the
+    // response was lost, never saw it. What separates a retry from an attempt
+    // to mint a second live token off one predecessor is whether the successor
+    // has ever authenticated a request:
+    //
+    //   never used   → the client did not receive it. Revoke that token and
+    //                  answer with a fresh one.
+    //   already used → the legitimate client holds it, so this predecessor is
+    //                  being replayed. That is the classic reuse signal, and
+    //                  the whole family is revoked rather than extended.
+    //
+    // Either way the absolute ceiling is carried over from the family, so a
+    // retry cannot be used to restart a session's lifetime.
     if let Some(rotated) = inner.rotated_sessions.get(&predecessor_hash) {
-        if rotated.successor_hash == successor_hash && inner.sessions.contains_key(&successor_hash)
-        {
-            return Ok(StatusCode::NO_CONTENT);
-        }
-        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
-    }
-
-    if inner.sessions.contains_key(&successor_hash)
-        || inner.rotated_sessions.contains_key(&successor_hash)
-    {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "invalid replacement token",
-        ));
+        let successor_hash = rotated.successor_hash;
+        let family_id = rotated.family_id;
+        let undelivered = inner.sessions.get(&successor_hash).and_then(|successor| {
+            (successor.family_id == family_id && !successor.used.load(Ordering::Acquire))
+                .then_some(successor.created_at)
+        });
+        let Some(created_at) = undelivered else {
+            revoke_session_family(&mut inner, family_id);
+            tracing::warn!(event = "session_reuse_detected", "security");
+            return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
+        };
+        inner.sessions.remove(&successor_hash);
+        inner.rotated_sessions.remove(&predecessor_hash);
+        return install_rotated_session(
+            &st,
+            &mut inner,
+            predecessor_hash,
+            SessionFamily {
+                email,
+                family_id,
+                created_at,
+            },
+            now,
+        );
     }
 
     let session = inner
         .sessions
         .remove(&predecessor_hash)
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    let absolute_expires_at = session
-        .created_at
-        .checked_add(st.session_absolute_ttl)
-        .ok_or(ApiError(
+    let family = SessionFamily {
+        email: session.email,
+        family_id: session.family_id,
+        created_at: session.created_at,
+    };
+    install_rotated_session(&st, &mut inner, predecessor_hash, family, now)
+}
+
+/// The identity and lifetime a rotation carries forward. `created_at` survives
+/// every rotation, so the absolute session ceiling holds however often a client
+/// rotates — including across a retry.
+struct SessionFamily {
+    email: String,
+    family_id: [u8; 16],
+    created_at: Instant,
+}
+
+/// Mints the replacement token for `predecessor_hash` and installs it, keeping
+/// the predecessor usable for the bounded in-flight grace period.
+fn install_rotated_session(
+    st: &AppState,
+    inner: &mut Inner,
+    predecessor_hash: [u8; 32],
+    family: SessionFamily,
+    now: Instant,
+) -> Result<Json<LoginResponse>, ApiError> {
+    let overflow = || {
+        ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
             "session lifetime overflow",
-        ))?;
+        )
+    };
+    let absolute_expires_at = family
+        .created_at
+        .checked_add(st.session_absolute_ttl)
+        .ok_or_else(overflow)?;
     if now >= absolute_expires_at {
-        revoke_session_family(&mut inner, session.family_id);
+        revoke_session_family(inner, family.family_id);
         return Err(ApiError(StatusCode::UNAUTHORIZED, "session expired"));
     }
     let access_expires_at = now
         .checked_add(st.token_ttl)
         .map(|candidate| candidate.min(absolute_expires_at))
-        .ok_or(ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "session lifetime overflow",
-        ))?;
+        .ok_or_else(overflow)?;
     let grace_expires_at = now
         .checked_add(st.session_rotation_grace)
         .map(|candidate| candidate.min(absolute_expires_at))
-        .ok_or(ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "session lifetime overflow",
-        ))?;
+        .ok_or_else(overflow)?;
+
+    // Server-minted, exactly like the token issued at login. The replacement
+    // used to be supplied by the client, which delegated the entropy of the
+    // server's own bearer credential to whatever generator the caller happened
+    // to use: the server could check its shape but never its randomness.
+    let mut token = new_token();
+    let mut successor_hash = session_token_hash(&token);
+    while inner.sessions.contains_key(&successor_hash)
+        || inner.rotated_sessions.contains_key(&successor_hash)
+    {
+        token = new_token();
+        successor_hash = session_token_hash(&token);
+    }
 
     // Keep at most one predecessor for each active family. This bounds grace
     // state to the active-session cap even if a client rotates repeatedly.
     inner
         .rotated_sessions
-        .retain(|_, rotated| rotated.family_id != session.family_id);
+        .retain(|_, rotated| rotated.family_id != family.family_id);
     inner.sessions.insert(
         successor_hash,
         Session {
-            email: session.email.clone(),
-            family_id: session.family_id,
-            created_at: session.created_at,
+            email: family.email.clone(),
+            family_id: family.family_id,
+            created_at: family.created_at,
             expires_at: access_expires_at,
+            used: AtomicBool::new(false),
         },
     );
     inner.rotated_sessions.insert(
         predecessor_hash,
         RotatedSession {
-            email: session.email,
-            family_id: session.family_id,
+            email: family.email,
+            family_id: family.family_id,
             successor_hash,
             expires_at: grace_expires_at,
         },
     );
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(LoginResponse { token }))
 }
 
 /// Revokes the current session family (logout), including a live successor if
@@ -4418,7 +4467,13 @@ async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiE
     {
         let inner = st.read().await;
         match inner.sessions.get(&token_hash) {
-            Some(s) if now < s.expires_at => return Ok(s.email.clone()),
+            Some(s) if now < s.expires_at => {
+                // Records that this token has served a request. A rotation
+                // retry uses it to tell "the client never received this
+                // successor" from "the client is using it".
+                s.used.store(true, Ordering::Release);
+                return Ok(s.email.clone());
+            }
             Some(_) => {} // expired → fall through to evict under the write lock
             None => {
                 if let Some(rotated) = inner.rotated_sessions.get(&token_hash) {
@@ -4448,6 +4503,7 @@ async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiE
     retain_live_sessions(&mut inner, now);
     if let Some(session) = inner.sessions.get(&token_hash) {
         if now < session.expires_at {
+            session.used.store(true, Ordering::Release);
             return Ok(session.email.clone());
         }
     }

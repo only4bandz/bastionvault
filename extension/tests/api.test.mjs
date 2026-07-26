@@ -6,7 +6,6 @@ import {
   isJsonMediaType,
   makeApi,
   MAX_ERROR_BODY_BYTES,
-  newSessionToken,
   readErrorBody,
   requireInboxResponse,
   requirePreloginResponse,
@@ -268,17 +267,19 @@ test("accepts only the canonical session-token envelope", () => {
   }
 });
 
-test("rotates to a CSPRNG token and resolves stale caller aliases", async () => {
+test("adopts the server-minted replacement and resolves stale caller aliases", async () => {
   const originalFetch = globalThis.fetch;
   const predecessor = "56".repeat(32);
-  let successor = "";
+  const successor = "78".repeat(32);
   globalThis.fetch = async (_url, options) => {
     if (options.method === "PUT") {
       assert.equal(options.headers.Authorization, `Bearer ${predecessor}`);
-      successor = JSON.parse(options.body).token;
-      assert.match(successor, /^[0-9a-f]{64}$/);
-      assert.notEqual(successor, predecessor);
-      return new Response(null, { status: 204 });
+      // The client sends no token: the replacement is the server's to mint.
+      assert.deepEqual(JSON.parse(options.body), {});
+      return new Response(`{"token":"${successor}"}`, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     }
     assert.equal(options.headers.Authorization, `Bearer ${successor}`);
     return new Response('{"items":{},"manifest":null,"revision":0}', {
@@ -295,12 +296,19 @@ test("rotates to a CSPRNG token and resolves stale caller aliases", async () => 
   }
 });
 
-test("generates canonical 256-bit session tokens", () => {
-  const first = newSessionToken();
-  const second = newSessionToken();
-  assert.match(first, /^[0-9a-f]{64}$/);
-  assert.match(second, /^[0-9a-f]{64}$/);
-  assert.notEqual(first, second);
+test("refuses a malformed replacement token", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response('{"token":"not-a-token"}', {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  try {
+    const api = makeApi("https://vault.example.com");
+    await assert.rejects(() => api.rotateSession("56".repeat(32)));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("rejects a malformed successful login before exposing a bearer token", async () => {

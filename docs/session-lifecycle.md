@@ -22,23 +22,41 @@ legacy records inherit their existing expiry as the non-extending ceiling.
 
 ## Rotation protocol
 
-`PUT /v1/sessions` requires the current bearer and an exact JSON body containing
-a fresh client-generated 256-bit lowercase-hex token:
+`PUT /v1/sessions` requires the current bearer and an empty JSON object as its
+body:
+
+```json
+{}
+```
+
+The server mints the replacement itself, exactly as it does at login, and
+returns it:
 
 ```json
 {"token":"<64 lowercase hex characters>"}
 ```
 
-The server stores only the domain-separated hash of either token. It atomically
-replaces the active token, retains one hashed predecessor for the grace period,
-and returns `204`.
+It stores only the domain-separated hash of either token. The replacement was
+previously supplied by the client, which delegated the entropy of the server's
+own bearer credential to whatever generator the caller happened to use — the
+server could validate its shape but never its randomness, and that guarantee has
+to hold for every client that ever talks to the deployment, not only the two in
+this repository.
 
-The client chooses the replacement so a retry can submit the identical
-predecessor/successor pair. That exact retry is idempotent; attempting to fork a
-rotated predecessor onto a different successor returns `401`. Both clients retry
-one ambiguous transport failure. If both responses are lost, they perform a
-fresh authenticated login from the already-unlocked account and revoke the
-ambiguous family best-effort.
+Retrying is still safe, and no raw token is retained to make it so. Each active
+token records whether it has ever authenticated a request, which distinguishes
+the two cases a retry can be in:
+
+- the successor has never been used, so the client did not receive it: it is
+  revoked and a fresh replacement is issued;
+- the successor is already in use, so the legitimate client holds it and this
+  predecessor is being replayed: the entire family is revoked and the server
+  emits a `session_reuse_detected` security event.
+
+The family's creation time carries across both paths, so a retry cannot restart
+a session's lifetime. Both clients retry one ambiguous transport failure. If
+both responses are lost, they perform a fresh authenticated login from the
+already-unlocked account and revoke the ambiguous family best-effort.
 
 Do not shorten the predecessor grace below the complete client request deadline
 and retry budget. Do not make predecessors indefinite: that would turn rotation

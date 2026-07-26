@@ -5,7 +5,6 @@ import {
   isJsonMediaType,
   MAX_ERROR_BODY_BYTES,
   MAX_SERVER_DETAIL_CHARS,
-  newSessionToken,
   readErrorBody,
   readJsonBody,
   requireInboxResponse,
@@ -136,17 +135,19 @@ describe("session-expiry signaling", () => {
     expect(expired).toBe(0);
   });
 
-  it("rotates to a CSPRNG token and resolves stale caller aliases", async () => {
+  it("adopts the server-minted replacement and resolves stale caller aliases", async () => {
     const predecessor = "01".repeat(32);
-    let successor = "";
+    const successor = "ab".repeat(32);
     globalThis.fetch = vi.fn(async (_url, init) => {
       const headers = init?.headers as Record<string, string>;
       if (init?.method === "PUT") {
         expect(headers.Authorization).toBe(`Bearer ${predecessor}`);
-        successor = JSON.parse(String(init.body)).token;
-        expect(successor).toMatch(/^[0-9a-f]{64}$/);
-        expect(successor).not.toBe(predecessor);
-        return new Response(null, { status: 204 });
+        // The client sends no token: the replacement is the server's to mint.
+        expect(JSON.parse(String(init.body))).toEqual({});
+        return new Response(`{"token":"${successor}"}`, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
       }
       expect(headers.Authorization).toBe(`Bearer ${successor}`);
       return new Response('{"items":{},"manifest":null,"revision":0}', {
@@ -159,14 +160,17 @@ describe("session-expiry signaling", () => {
     expect(rotated).toBe(successor);
     await expect(api.getVault(predecessor)).resolves.toMatchObject({ revision: 0 });
   });
-});
 
-it("generates canonical 256-bit session tokens", () => {
-  const first = newSessionToken();
-  const second = newSessionToken();
-  expect(first).toMatch(/^[0-9a-f]{64}$/);
-  expect(second).toMatch(/^[0-9a-f]{64}$/);
-  expect(first).not.toBe(second);
+  it("refuses a malformed replacement token", async () => {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response('{"token":"not-a-token"}', {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+    );
+    await expect(api.rotateSession("02".repeat(32))).rejects.toBeInstanceOf(ApiError);
+  });
 });
 
 describe("hostile server error handling", () => {
