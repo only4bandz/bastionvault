@@ -178,12 +178,6 @@ function forgetSessionFamily(token: string): void {
   sessionTokenAliases.delete(current);
 }
 
-export function newSessionToken(): string {
-  const bytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 export function isJsonMediaType(value: string | null): boolean {
   return value?.split(";", 1)[0]?.trim().toLowerCase() === "application/json";
 }
@@ -555,17 +549,23 @@ export const api = {
     ),
   rotateSession: async (token: string): Promise<string> => {
     const predecessor = currentSessionToken(token);
-    const successor = newSessionToken();
+    // The replacement is minted by the server. A client cannot supply the
+    // entropy of the server's own bearer credential, and the server has no way
+    // to check a generator it does not control.
     const attempt = () =>
-      req<void>("PUT", "/sessions", predecessor, { token: successor }, "empty");
+      req<unknown>("PUT", "/sessions", predecessor, {}, "json").then(
+        requireSessionTokenResponse
+      );
+    let successor: string;
     try {
-      await attempt();
+      successor = await attempt();
     } catch (error) {
-      // The server operation is idempotent for the same predecessor/successor
-      // pair. Retry one ambiguous transport failure so a lost 204 cannot leave
-      // the client using a predecessor that will expire after the grace window.
+      // Retry one ambiguous transport failure. The server answers a retry
+      // safely: a successor that never authenticated a request is revoked and
+      // replaced, while replaying a predecessor whose successor is already in
+      // use revokes the family.
       if (!(error instanceof ApiError) || error.status !== 0) throw error;
-      await attempt();
+      successor = await attempt();
     }
     rememberSessionRotation(predecessor, successor);
     rememberSessionRotation(token, successor);

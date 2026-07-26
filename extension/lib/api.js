@@ -302,12 +302,6 @@ function forgetSessionFamily(token) {
   sessionTokenAliases.delete(current);
 }
 
-export function newSessionToken() {
-  const bytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(bytes);
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
 export function requireRevisionResponse(value) {
   if (
     !value ||
@@ -475,14 +469,16 @@ export function makeApi(
       ),
     rotateSession: async (token) => {
       const predecessor = currentSessionToken(token);
-      const successor = newSessionToken();
+      // The replacement is minted by the server: a client cannot supply the
+      // entropy of the server's own bearer credential.
       const attempt = () =>
-        call("PUT", "/sessions", predecessor, { token: successor }, "empty");
+        call("PUT", "/sessions", predecessor, {}, "json").then(requireSessionTokenResponse);
+      let successor;
       try {
-        await attempt();
+        successor = await attempt();
       } catch (error) {
         if (!(error instanceof ApiError) || error.status !== 0) throw error;
-        await attempt();
+        successor = await attempt();
       }
       rememberSessionRotation(predecessor, successor);
       rememberSessionRotation(token, successor);
