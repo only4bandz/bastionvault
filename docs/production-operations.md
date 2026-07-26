@@ -87,7 +87,14 @@ withdraws readiness and rejects new storage work until that exact command
 finishes. A successful commit or explicit SQLite rollback re-opens admission;
 only loss of the storage worker causes permanent quarantine. Vault transactions
 also have one pre-lock admission slot, preventing an authenticated client from
-pre-loading a queue behind the global cache write lock.
+pre-loading a queue behind the global cache write lock. That slot is global, so
+a request waits a bounded moment for it and only then reports 503: rejecting
+immediately turned one account's in-flight commit into a failed write for every
+other account. The wait queue is itself capped.
+
+Reclamation of expired sessions is amortized rather than run on every login and
+rotation. It never governs access: every authenticated request compares the
+session's own deadline, and a predecessor's, explicitly.
 
 Full vault reads return a weak opaque `ETag` derived from the authenticated
 account and committed vault revision. A matching `If-None-Match` returns an
