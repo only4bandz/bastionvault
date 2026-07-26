@@ -278,6 +278,36 @@ export function requireSessionTokenResponse(value) {
   return value.token;
 }
 
+const sessionTokenAliases = new Map();
+
+function currentSessionToken(token) {
+  let current = token;
+  const seen = new Set();
+  while (sessionTokenAliases.has(current) && !seen.has(current)) {
+    seen.add(current);
+    current = sessionTokenAliases.get(current);
+  }
+  return current;
+}
+
+function rememberSessionRotation(previous, successor) {
+  sessionTokenAliases.set(previous, successor);
+}
+
+function forgetSessionFamily(token) {
+  const current = currentSessionToken(token);
+  for (const [candidate] of sessionTokenAliases) {
+    if (currentSessionToken(candidate) === current) sessionTokenAliases.delete(candidate);
+  }
+  sessionTokenAliases.delete(current);
+}
+
+export function newSessionToken() {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export function requireRevisionResponse(value) {
   if (
     !value ||
@@ -364,9 +394,10 @@ async function req(
   responseKind = "json",
   expectedStatus = responseKind === "json" ? 200 : 204
 ) {
+  const authorizationToken = token ? currentSessionToken(token) : undefined;
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (authorizationToken) headers["Authorization"] = `Bearer ${authorizationToken}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -442,7 +473,29 @@ export function makeApi(
       call("POST", "/sessions", undefined, { email, auth_secret }).then(
         requireSessionTokenResponse
       ),
-    logout: (token) => call("DELETE", "/sessions", token, undefined, "empty"),
+    rotateSession: async (token) => {
+      const predecessor = currentSessionToken(token);
+      const successor = newSessionToken();
+      const attempt = () =>
+        call("PUT", "/sessions", predecessor, { token: successor }, "empty");
+      try {
+        await attempt();
+      } catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 0) throw error;
+        await attempt();
+      }
+      rememberSessionRotation(predecessor, successor);
+      rememberSessionRotation(token, successor);
+      return successor;
+    },
+    logout: async (token) => {
+      await call("DELETE", "/sessions", token, undefined, "empty");
+      forgetSessionFamily(token);
+    },
+    revokeAllSessions: async (token) => {
+      await call("DELETE", "/sessions/all", token, undefined, "empty");
+      forgetSessionFamily(token);
+    },
     deleteAccount: (token, authSecret) =>
       call("DELETE", "/accounts", token, { auth_secret: authSecret }, "empty"),
     getVault: (token) =>

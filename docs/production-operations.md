@@ -42,6 +42,10 @@ Security-relevant outcomes are logged at `warn` with the message `security`, an
 are one per class, never per account, token, or address, so a caller cannot grow
 this state by sending more requests.
 
+An explicit account-wide revocation emits `event="sessions_revoked_all"` at
+`warn` without an account identifier or token. It is an action event rather
+than an outcome counter and therefore has no process-lifetime `total`.
+
 `honeypot` fires only on a closed set of paths no Bastion client ever requests
 (`/.env`, `/admin`, `/wp-login.php`, …). A hit is therefore an unambiguous
 scanner rather than a mistyped URL, which is what makes it worth alerting on;
@@ -139,6 +143,7 @@ this table says “measured”; protocol maxima are not capacity claims.
 | Unexpected process restart | any | repeated restart or migration failure; keep traffic withdrawn |
 | `security` events `auth_rejected` / `rate_limited` | sustained rate above the reviewed baseline | sharp sustained increase; suspected credential-stuffing or enumeration campaign |
 | `security` event `honeypot` / `unmatched_path` | any hit | sustained scanning, or any honeypot hit correlated with a rise in `auth_rejected`; investigate the source |
+| `security` event `sessions_revoked_all` | informational user action | unexplained burst; investigate possible token theft or client loop |
 | Provider bounce/complaint rate | provider warning threshold | provider suspension threshold; disable external registration |
 
 Alert routes must have a named primary owner, secondary owner, and tested

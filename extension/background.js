@@ -68,11 +68,17 @@ import {
   POPUP_SENDER,
   classifyMessageSender,
 } from "./lib/message-sender-policy.js";
+import {
+  boundedSessionExpiry,
+  newAbsoluteSessionDeadline,
+  storedSessionDeadlines,
+} from "./lib/session-deadline.js";
 
 const DEFAULT_KEEP_MINUTES = 60;
 const AUTOLOCK_ALARM = "bastion-autolock";
 const PENDING_SAVE_ALARM = "bastion-pending-save-expiry";
 const SESSION_KEY = "session"; // key in chrome.storage.session
+const SESSION_ROTATION_MS = 10 * 60 * 1000;
 
 // Reserved id for the encrypted Send identity (must match crypto-wasm
 // send_identity_item_id()).
@@ -238,10 +244,36 @@ async function persistVaultIntegrityAnchor(currentSession) {
   });
 }
 
+async function ensureFreshBearer(s) {
+  if (Date.now() - (s.rotatedAt || 0) < SESSION_ROTATION_MS) return;
+  if (s.rotationPromise) return s.rotationPromise;
+  s.rotationPromise = (async () => {
+    const api = makeApi(s.server);
+    const predecessor = s.token;
+    try {
+      s.token = await api.rotateSession(predecessor);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 0) throw error;
+      // Two idempotent rotation attempts lost their response. Re-authenticate
+      // from the unlocked account to recover a known bearer state, then revoke
+      // the ambiguous family best-effort.
+      s.token = await api.login(s.email, s.account.auth_secret);
+      api.logout(predecessor).catch(() => {});
+    }
+    s.rotatedAt = Date.now();
+  })();
+  try {
+    await s.rotationPromise;
+  } finally {
+    s.rotationPromise = null;
+  }
+}
+
 async function commitVaultOperations(s, operations) {
   const execute = async () => {
     try {
       if (session !== s) throw new VaultIntegrityError();
+      await ensureFreshBearer(s);
       const current = s.integrity;
       if (!current) throw new VaultIntegrityError();
       const prepared = prepareVaultMutation(s.account, current, operations);
@@ -302,6 +334,7 @@ async function refreshSessionVault(s) {
   const execute = async () => {
     try {
       if (session !== s || !s.integrity) throw new VaultIntegrityError();
+      await ensureFreshBearer(s);
       const api = makeApi(s.server);
       const head = await api.getVaultRevision(s.token);
       if (!vaultRefreshRequired(s.integrity.revision, head?.revision)) return;
@@ -369,12 +402,20 @@ async function getKeepMinutes() {
 // the vault unlocked indefinitely.
 async function touchSession() {
   const minutes = await getKeepMinutes();
-  const expiresAt = Date.now() + minutes * 60_000;
+  const absoluteExpiresAt =
+    session?.absoluteExpiresAt || newAbsoluteSessionDeadline();
+  const expiresAt = boundedSessionExpiry(Date.now(), minutes, absoluteExpiresAt);
+  if (expiresAt === null) throw new Error("Invalid session deadline.");
   chrome.alarms.create(AUTOLOCK_ALARM, { when: expiresAt });
-  if (session) session.expiresAt = expiresAt;
+  if (session) {
+    session.absoluteExpiresAt = absoluteExpiresAt;
+    session.expiresAt = expiresAt;
+  }
   const area = await trustedSessionArea();
   const stored = await area.get(SESSION_KEY);
   if (stored[SESSION_KEY]) {
+    stored[SESSION_KEY].absoluteExpiresAt =
+      stored[SESSION_KEY].absoluteExpiresAt || stored[SESSION_KEY].expiresAt;
     stored[SESSION_KEY].expiresAt = expiresAt;
     await area.set({ [SESSION_KEY]: stored[SESSION_KEY] });
   }
@@ -386,6 +427,9 @@ async function persistSession() {
   if (!session.integrity) throw new VaultIntegrityError();
   await persistVaultIntegrityAnchor(session);
   const minutes = await getKeepMinutes();
+  if (!session.absoluteExpiresAt) {
+    session.absoluteExpiresAt = newAbsoluteSessionDeadline();
+  }
   if (!session.expiresAt) session.expiresAt = Date.now() + minutes * 60_000;
   const area = await trustedSessionArea();
   await area.set({
@@ -394,6 +438,7 @@ async function persistSession() {
       email: session.email,
       server: session.server,
       expiresAt: session.expiresAt,
+      absoluteExpiresAt: session.absoluteExpiresAt,
     },
   });
 }
@@ -500,7 +545,10 @@ async function lock() {
 // evicted. Returns null (locked) if there is no valid, unexpired session.
 async function ensureSession() {
   if (session) {
-    if (session.expiresAt && Date.now() > session.expiresAt) {
+    if (
+      (session.expiresAt && Date.now() > session.expiresAt) ||
+      (session.absoluteExpiresAt && Date.now() > session.absoluteExpiresAt)
+    ) {
       await lock(); // enforce expiry on the in-memory path, not just via the alarm
       return null;
     }
@@ -510,10 +558,14 @@ async function ensureSession() {
   const area = await trustedSessionArea();
   const stored = (await area.get(SESSION_KEY))[SESSION_KEY];
   if (!stored) return null;
-  if (Date.now() > stored.expiresAt) {
+  // Legacy RAM-backed records predate the absolute field. Their existing
+  // bounded expiry becomes the ceiling; upgrading must not silently extend it.
+  const deadlines = storedSessionDeadlines(stored);
+  if (!deadlines) {
     await area.remove(SESSION_KEY);
     return null;
   }
+  const { absoluteExpiresAt } = deadlines;
 
   let server;
   let email;
@@ -555,7 +607,9 @@ async function ensureSession() {
       lockedRecords,
       integrity,
       mutationTail: Promise.resolve(),
+      rotatedAt: Date.now(),
       expiresAt: stored.expiresAt,
+      absoluteExpiresAt,
     };
     await persistSession();
     chrome.action.setBadgeText({ text: "✓" });
@@ -651,6 +705,8 @@ async function doUnlock(email, password, secretKey) {
     lockedRecords,
     integrity,
     mutationTail: Promise.resolve(),
+    rotatedAt: Date.now(),
+    absoluteExpiresAt: newAbsoluteSessionDeadline(),
   };
   try {
     await persistSession();
@@ -833,6 +889,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await lock();
           sendResponse({ ok: true });
           break;
+        case "REVOKE_ALL": {
+          const s = await ensureSession();
+          if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
+          await makeApi(s.server).revokeAllSessions(s.token);
+          await lock();
+          sendResponse({ ok: true });
+          break;
+        }
         case "LIST": {
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });

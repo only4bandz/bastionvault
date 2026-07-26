@@ -5,6 +5,7 @@ import {
   isJsonMediaType,
   MAX_ERROR_BODY_BYTES,
   MAX_SERVER_DETAIL_CHARS,
+  newSessionToken,
   readErrorBody,
   readJsonBody,
   requireInboxResponse,
@@ -134,6 +135,38 @@ describe("session-expiry signaling", () => {
     await expect(api.getVault("token")).rejects.toMatchObject({ status: 429 });
     expect(expired).toBe(0);
   });
+
+  it("rotates to a CSPRNG token and resolves stale caller aliases", async () => {
+    const predecessor = "01".repeat(32);
+    let successor = "";
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      const headers = init?.headers as Record<string, string>;
+      if (init?.method === "PUT") {
+        expect(headers.Authorization).toBe(`Bearer ${predecessor}`);
+        successor = JSON.parse(String(init.body)).token;
+        expect(successor).toMatch(/^[0-9a-f]{64}$/);
+        expect(successor).not.toBe(predecessor);
+        return new Response(null, { status: 204 });
+      }
+      expect(headers.Authorization).toBe(`Bearer ${successor}`);
+      return new Response('{"items":{},"manifest":null,"revision":0}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const rotated = await api.rotateSession(predecessor);
+    expect(rotated).toBe(successor);
+    await expect(api.getVault(predecessor)).resolves.toMatchObject({ revision: 0 });
+  });
+});
+
+it("generates canonical 256-bit session tokens", () => {
+  const first = newSessionToken();
+  const second = newSessionToken();
+  expect(first).toMatch(/^[0-9a-f]{64}$/);
+  expect(second).toMatch(/^[0-9a-f]{64}$/);
+  expect(first).not.toBe(second);
 });
 
 describe("hostile server error handling", () => {

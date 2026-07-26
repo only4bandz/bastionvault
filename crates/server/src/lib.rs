@@ -53,8 +53,16 @@ use crypto_core::{AuthSecret, EncryptedBlob, KdfParams, PublicIdentity, Registra
 
 /// Default session token lifetime (30 min).
 const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(30 * 60);
+/// A rotated access token may renew the 30-minute access window, but never
+/// extend one authenticated session beyond this process-local absolute cap.
+const DEFAULT_SESSION_ABSOLUTE_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// Already-dispatched requests may still carry the predecessor after rotation.
+/// One minute covers the client's 15-second deadline plus its idempotent retry
+/// without leaving a useful long-lived second bearer token.
+const DEFAULT_SESSION_ROTATION_GRACE: Duration = Duration::from_secs(60);
 /// Maximum request body size (1 MiB) — guardrail against memory DoS.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_SESSION_BODY_BYTES: usize = 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 254;
 const AUTH_SECRET_BYTES: usize = 32;
 const SESSION_TOKEN_BYTES: usize = 32;
@@ -391,6 +399,26 @@ pub fn app_in_memory_with_ttl(token_ttl: Duration) -> Router {
     build(token_ttl, ":memory:", MAX_CONCURRENT_AUTH)
 }
 
+/// In-memory variant with explicit access, absolute, and rotation-grace
+/// lifetimes for deterministic session lifecycle tests.
+#[doc(hidden)]
+pub fn app_in_memory_with_session_lifetimes(
+    token_ttl: Duration,
+    absolute_ttl: Duration,
+    rotation_grace: Duration,
+) -> Router {
+    build_with_rate_limits(
+        token_ttl,
+        ":memory:",
+        MAX_CONCURRENT_AUTH,
+        RuntimeOptions {
+            session_absolute_ttl: absolute_ttl,
+            session_rotation_grace: rotation_grace,
+            ..RuntimeOptions::default()
+        },
+    )
+}
+
 /// In-memory variant with an explicit authentication concurrency limit. A zero
 /// limit is useful for deterministic overload tests.
 pub fn app_in_memory_with_auth_limit(auth_limit: usize) -> Router {
@@ -460,6 +488,8 @@ struct RuntimeOptions {
     transport: Option<TransportPolicy>,
     smtp: Option<mail_outbox::SmtpConfig>,
     verification_origin: Option<String>,
+    session_absolute_ttl: Duration,
+    session_rotation_grace: Duration,
 }
 
 impl Default for RuntimeOptions {
@@ -471,6 +501,8 @@ impl Default for RuntimeOptions {
             transport: None,
             smtp: None,
             verification_origin: None,
+            session_absolute_ttl: DEFAULT_SESSION_ABSOLUTE_TTL,
+            session_rotation_grace: DEFAULT_SESSION_ROTATION_GRACE,
         }
     }
 }
@@ -530,7 +562,14 @@ fn build_with_rate_limits(
             "/registration-challenges/verify",
             post(verify_registration_challenge),
         )
-        .route("/sessions", post(create_session).delete(delete_session))
+        .route(
+            "/sessions",
+            post(create_session)
+                .put(rotate_session)
+                .delete(delete_session)
+                .layer(DefaultBodyLimit::max(MAX_SESSION_BODY_BYTES)),
+        )
+        .route("/sessions/all", axum::routing::delete(delete_all_sessions))
         .route("/vault", get(get_vault))
         .route("/vault/revision", get(get_vault_revision))
         .route("/vault/transaction", transaction_route)
@@ -661,6 +700,7 @@ fn redacted_path(path: &str) -> String {
             | "/registration-challenges"
             | "/registration-challenges/verify"
             | "/sessions"
+            | "/sessions/all"
             | "/vault"
             | "/vault/revision"
             | "/vault/manifest"
@@ -1016,6 +1056,8 @@ struct AppState {
     rate_limiters: Arc<RateLimiters>,
     db: Db,
     token_ttl: Duration,
+    session_absolute_ttl: Duration,
+    session_rotation_grace: Duration,
     auth_slots: Arc<Semaphore>,
     vault_transaction_slots: Arc<Semaphore>,
     max_rate_entries: usize,
@@ -1032,6 +1074,10 @@ struct Inner {
     // Domain-separated token hash -> session. Raw bearer tokens never persist
     // in server state after the login response is constructed.
     sessions: HashMap<[u8; 32], Session>,
+    /// Immediate predecessors retained only for a short in-flight grace
+    /// period. They point to the active successor by hash; no raw token is
+    /// retained after a response.
+    rotated_sessions: HashMap<[u8; 32], RotatedSession>,
 }
 
 #[derive(Default)]
@@ -1051,7 +1097,15 @@ struct RateState {
 /// Active session: the token's owner and its expiration instant.
 struct Session {
     email: String,
+    family_id: [u8; 16],
     created_at: Instant,
+    expires_at: Instant,
+}
+
+struct RotatedSession {
+    email: String,
+    family_id: [u8; 16],
+    successor_hash: [u8; 32],
     expires_at: Instant,
 }
 
@@ -1080,16 +1134,21 @@ impl AppState {
             transport,
             smtp,
             verification_origin,
+            session_absolute_ttl,
+            session_rotation_grace,
         } = options;
         let (db, accounts, prelogin_decoy_seed) = Db::open(db_path);
         let state = Self {
             inner: Arc::new(RwLock::new(Inner {
                 accounts,
                 sessions: HashMap::new(),
+                rotated_sessions: HashMap::new(),
             })),
             rate_limiters: Arc::new(RateLimiters::default()),
             db,
             token_ttl,
+            session_absolute_ttl,
+            session_rotation_grace,
             auth_slots: Arc::new(Semaphore::new(auth_limit)),
             vault_transaction_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_VAULT_TRANSACTIONS)),
             max_rate_entries,
@@ -2867,6 +2926,15 @@ struct LoginResponse {
     token: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RotateSessionRequest {
+    /// Fresh client-generated 256-bit bearer token. Supplying it makes a
+    /// retry byte-identical, so a lost success response cannot strand the
+    /// client between two unknown token states.
+    token: String,
+}
+
 #[derive(Serialize)]
 struct VaultResponse {
     items: HashMap<String, EncryptedBlob>,
@@ -3249,6 +3317,9 @@ async fn delete_account(
     }
     inner.accounts.remove(&email);
     inner.sessions.retain(|_, session| session.email != email);
+    inner
+        .rotated_sessions
+        .retain(|_, session| session.email != email);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3388,9 +3459,14 @@ async fn create_session(
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
     let now = Instant::now();
-    let expires_at = now + st.token_ttl;
+    let expires_at = now
+        .checked_add(st.token_ttl.min(st.session_absolute_ttl))
+        .ok_or(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session lifetime overflow",
+        ))?;
     let mut inner = st.write().await;
-    inner.sessions.retain(|_, session| now < session.expires_at);
+    retain_live_sessions(&mut inner, now);
     let oldest = inner
         .sessions
         .iter()
@@ -3404,7 +3480,10 @@ async fn create_session(
         .count();
     if account_sessions >= MAX_SESSIONS_PER_ACCOUNT {
         if let Some(token_hash) = oldest {
-            inner.sessions.remove(&token_hash);
+            if let Some(oldest) = inner.sessions.get(&token_hash) {
+                let family_id = oldest.family_id;
+                revoke_session_family(&mut inner, family_id);
+            }
         }
     }
     if inner.sessions.len() >= MAX_ACTIVE_SESSIONS {
@@ -3423,6 +3502,7 @@ async fn create_session(
         token_hash,
         Session {
             email: req.email,
+            family_id: new_session_family_id(),
             created_at: now,
             expires_at,
         },
@@ -4066,13 +4146,155 @@ fn validate_registration(registration: &Registration) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// Revokes the current session (logout).
+/// Rotates one session family to a client-generated replacement token.
+///
+/// The predecessor remains usable for a short grace period so requests that
+/// were already dispatched do not fail underneath the client. Repeating the
+/// exact request through that predecessor is idempotent; a different proposed
+/// successor is rejected. The access deadline may slide, but `created_at`
+/// survives every rotation and enforces the absolute session ceiling.
+async fn rotate_session(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<RotateSessionRequest>,
+) -> Result<StatusCode, ApiError> {
+    let predecessor_hash = session_token_hash(bearer_token(&headers)?);
+    if !is_session_token(&req.token) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid replacement token",
+        ));
+    }
+    let successor_hash = session_token_hash(&req.token);
+    if successor_hash == predecessor_hash {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid replacement token",
+        ));
+    }
+
+    let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "session-control", 30)?;
+
+    let now = Instant::now();
+    let mut inner = st.write().await;
+    retain_live_sessions(&mut inner, now);
+
+    // Lost-response retry: the server has already installed exactly this
+    // successor. Raw successor bytes are never retained; matching the hash is
+    // sufficient and keeps the operation idempotent.
+    if let Some(rotated) = inner.rotated_sessions.get(&predecessor_hash) {
+        if rotated.successor_hash == successor_hash && inner.sessions.contains_key(&successor_hash)
+        {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"));
+    }
+
+    if inner.sessions.contains_key(&successor_hash)
+        || inner.rotated_sessions.contains_key(&successor_hash)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "invalid replacement token",
+        ));
+    }
+
+    let session = inner
+        .sessions
+        .remove(&predecessor_hash)
+        .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
+    let absolute_expires_at = session
+        .created_at
+        .checked_add(st.session_absolute_ttl)
+        .ok_or(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session lifetime overflow",
+        ))?;
+    if now >= absolute_expires_at {
+        revoke_session_family(&mut inner, session.family_id);
+        return Err(ApiError(StatusCode::UNAUTHORIZED, "session expired"));
+    }
+    let access_expires_at = now
+        .checked_add(st.token_ttl)
+        .map(|candidate| candidate.min(absolute_expires_at))
+        .ok_or(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session lifetime overflow",
+        ))?;
+    let grace_expires_at = now
+        .checked_add(st.session_rotation_grace)
+        .map(|candidate| candidate.min(absolute_expires_at))
+        .ok_or(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session lifetime overflow",
+        ))?;
+
+    // Keep at most one predecessor for each active family. This bounds grace
+    // state to the active-session cap even if a client rotates repeatedly.
+    inner
+        .rotated_sessions
+        .retain(|_, rotated| rotated.family_id != session.family_id);
+    inner.sessions.insert(
+        successor_hash,
+        Session {
+            email: session.email.clone(),
+            family_id: session.family_id,
+            created_at: session.created_at,
+            expires_at: access_expires_at,
+        },
+    );
+    inner.rotated_sessions.insert(
+        predecessor_hash,
+        RotatedSession {
+            email: session.email,
+            family_id: session.family_id,
+            successor_hash,
+            expires_at: grace_expires_at,
+        },
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Revokes the current session family (logout), including a live successor if
+/// the caller is using the short-lived predecessor after rotation.
 async fn delete_session(
     State(st): State<AppState>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let token_hash = session_token_hash(bearer_token(&headers)?);
-    st.write().await.sessions.remove(&token_hash);
+    let mut inner = st.write().await;
+    let family_id = inner
+        .sessions
+        .get(&token_hash)
+        .map(|session| session.family_id)
+        .or_else(|| {
+            inner
+                .rotated_sessions
+                .get(&token_hash)
+                .map(|session| session.family_id)
+        });
+    if let Some(family_id) = family_id {
+        revoke_session_family(&mut inner, family_id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Revokes every active session for the authenticated account, including the
+/// caller. This is intentionally process-local: sessions are never persisted,
+/// and a process restart already invalidates every bearer token.
+async fn delete_all_sessions(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "session-control", 30)?;
+    let mut inner = st.write().await;
+    inner.sessions.retain(|_, session| session.email != email);
+    inner
+        .rotated_sessions
+        .retain(|_, session| session.email != email);
+    tracing::warn!(event = "sessions_revoked_all", "security");
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -4081,17 +4303,21 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
     single_header(headers, header::AUTHORIZATION.as_str())
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .filter(|token| {
-            token.len() == SESSION_TOKEN_HEX_CHARS
-                && token
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        })
+        .filter(|token| is_session_token(token))
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "missing bearer token"))
 }
 
+fn is_session_token(token: &str) -> bool {
+    token.len() == SESSION_TOKEN_HEX_CHARS
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// Validates the token (existence + non-expiration) and returns the email.
-/// Evicts an expired token along the way.
+/// A predecessor remains valid only while its active successor exists and the
+/// bounded rotation grace has not elapsed. Expired state is evicted along the
+/// way.
 async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiError> {
     let token_hash = session_token_hash(bearer_token(headers)?);
     let now = Instant::now();
@@ -4103,20 +4329,60 @@ async fn require_auth(st: &AppState, headers: &HeaderMap) -> Result<String, ApiE
         match inner.sessions.get(&token_hash) {
             Some(s) if now < s.expires_at => return Ok(s.email.clone()),
             Some(_) => {} // expired → fall through to evict under the write lock
-            None => return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
+            None => {
+                if let Some(rotated) = inner.rotated_sessions.get(&token_hash) {
+                    if now < rotated.expires_at
+                        && inner
+                            .sessions
+                            .get(&rotated.successor_hash)
+                            .is_some_and(|successor| {
+                                successor.family_id == rotated.family_id
+                                    && now < successor.expires_at
+                            })
+                    {
+                        return Ok(rotated.email.clone());
+                    }
+                }
+            }
         }
     }
-    // Slow path: the token exists but is expired — take the write lock to evict
-    // it. Re-check under the lock in case another request already refreshed it.
+    // Slow path: take the write lock, prune expired active/predecessor state,
+    // and re-check in case a concurrent rotation completed between locks.
     let mut inner = st.write().await;
-    match inner.sessions.get(&token_hash) {
-        Some(s) if now < s.expires_at => Ok(s.email.clone()),
-        Some(_) => {
-            inner.sessions.remove(&token_hash);
-            Err(ApiError(StatusCode::UNAUTHORIZED, "session expired"))
-        }
-        None => Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token")),
+    retain_live_sessions(&mut inner, now);
+    if let Some(session) = inner.sessions.get(&token_hash) {
+        return Ok(session.email.clone());
     }
+    if let Some(rotated) = inner.rotated_sessions.get(&token_hash) {
+        if inner
+            .sessions
+            .get(&rotated.successor_hash)
+            .is_some_and(|successor| successor.family_id == rotated.family_id)
+        {
+            return Ok(rotated.email.clone());
+        }
+    }
+    Err(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))
+}
+
+fn retain_live_sessions(inner: &mut Inner, now: Instant) {
+    inner.sessions.retain(|_, session| now < session.expires_at);
+    let sessions = &inner.sessions;
+    inner.rotated_sessions.retain(|_, rotated| {
+        now < rotated.expires_at
+            && sessions
+                .get(&rotated.successor_hash)
+                .is_some_and(|successor| successor.family_id == rotated.family_id)
+    });
+}
+
+fn revoke_session_family(inner: &mut Inner, family_id: [u8; 16]) {
+    inner
+        .sessions
+        .retain(|_, session| session.family_id != family_id);
+    inner
+        .rotated_sessions
+        .retain(|_, session| session.family_id != family_id);
 }
 
 /// Process-constant dummy PHC hash of a random secret nobody knows.
@@ -4160,6 +4426,12 @@ fn new_token() -> String {
     let mut bytes = Zeroizing::new([0u8; SESSION_TOKEN_BYTES]);
     OsRng.fill_bytes(bytes.as_mut());
     data_encoding::HEXLOWER.encode(bytes.as_ref())
+}
+
+fn new_session_family_id() -> [u8; 16] {
+    let mut family_id = [0u8; 16];
+    OsRng.fill_bytes(&mut family_id);
+    family_id
 }
 
 fn session_token_hash(token: &str) -> [u8; 32] {

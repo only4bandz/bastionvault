@@ -47,6 +47,7 @@ type Phase = "welcome" | "verify" | "reveal" | "unlock" | "vault";
 
 const AUTO_LOCK_MS = 10 * 60 * 1000; // lock after 10 minutes of inactivity
 const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
+const SESSION_ROTATION_MS = 10 * 60 * 1000;
 
 /** Vault items under this prefix hold Bastion Send state (identity, contacts),
  * not user entries — never surface them in the vault list. */
@@ -332,6 +333,41 @@ export default function App(): JSX.Element {
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
   }, [phase, lock, toast]);
 
+  // Rotate the bearer independently of UI activity. Stale token props remain
+  // safe because the API client resolves predecessor aliases internally, and
+  // the server accepts already-dispatched predecessor requests for one minute.
+  // If both idempotent rotation attempts lose their responses, a fresh login
+  // re-establishes a known token state from the still-unlocked account.
+  useEffect(() => {
+    if (phase !== "vault" || !account || !token) return;
+    const epoch = sessionEpoch.current;
+    let rotating = false;
+    const rotate = async (): Promise<void> => {
+      if (rotating || sessionEpoch.current !== epoch) return;
+      rotating = true;
+      try {
+        let next: string;
+        try {
+          next = await api.rotateSession(token);
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.status !== 0) throw error;
+          next = await api.login(email, account.auth_secret);
+          api.logout(token).catch(() => {});
+        }
+        if (sessionEpoch.current === epoch) setToken(next);
+      } finally {
+        rotating = false;
+      }
+    };
+    const timer = window.setInterval(() => {
+      void rotate().catch(() => {
+        // 401 dispatches SESSION_EXPIRED_EVENT and locks. A transient non-auth
+        // failure keeps the current 30-minute token and retries next interval.
+      });
+    }, SESSION_ROTATION_MS);
+    return () => window.clearInterval(timer);
+  }, [account, email, phase, token]);
+
   // ── create a new vault locally; persist only after the recovery key is saved ──
   const onCreate = useCallback(async (rawEmail: string, pw: string) => {
     const em = canonicalAccountId(rawEmail);
@@ -550,6 +586,12 @@ export default function App(): JSX.Element {
     [commitVaultOperations]
   );
 
+  const revokeAllSessions = useCallback(async (): Promise<void> => {
+    if (!token) throw new Error("Vault is locked.");
+    await api.revokeAllSessions(token);
+    lock();
+  }, [lock, token]);
+
   const upsert = useCallback(
     async (item: VaultItem): Promise<boolean> => {
       if (!account || !token) {
@@ -740,6 +782,7 @@ export default function App(): JSX.Element {
           onImport={importItems}
           syncStatus={syncStatus}
           onLock={lock}
+          onRevokeAllSessions={revokeAllSessions}
           toast={toast}
         />
       )}

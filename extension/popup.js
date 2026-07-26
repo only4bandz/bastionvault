@@ -249,12 +249,19 @@ async function showVault(state) {
       <button class="iconbtn" id="gen" title="Password generator">${ICON.key}</button>
       <button class="iconbtn" id="send" title="Bastion Send">${ICON.send}</button>
       <div class="spacer"></div>
+      <button class="iconbtn" id="revoke" title="Sign out everywhere">${ICON.shield}</button>
       <button class="iconbtn" id="lock" title="Lock vault">${ICON.lock}</button>
     </div>`;
 
   document.getElementById("lock").addEventListener("click", async () => {
     await send({ type: "LOCK" });
     showUnlock({ server: state.server });
+  });
+  document.getElementById("revoke").addEventListener("click", async () => {
+    if (!window.confirm("Revoke every active Bastion session for this account?")) return;
+    const result = await send({ type: "REVOKE_ALL" });
+    if (result.ok) showUnlock({ server: state.server });
+    else toast(result.error || "Could not revoke sessions");
   });
   document.getElementById("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
   document.getElementById("gen").addEventListener("click", () => showGenerator());
