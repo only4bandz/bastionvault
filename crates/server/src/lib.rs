@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path as FsPath, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -91,6 +91,9 @@ const MAX_CONCURRENT_AUTH: usize = 4;
 const MAX_SESSIONS_PER_ACCOUNT: usize = 8;
 const MAX_ACTIVE_SESSIONS: usize = 100_000;
 const MAX_AUTH_RATE_ENTRIES: usize = 10_000;
+/// Source buckets are keyed by caller-chosen addresses, so they get their own
+/// table and their own bound.
+const MAX_SOURCE_RATE_ENTRIES: usize = 20_000;
 const MAX_ACCOUNT_CREATIONS_GLOBAL_PER_MIN: u32 = 20;
 const MAX_ACCOUNT_CREATIONS_PER_SOURCE_PER_MIN: u32 = 5;
 const MAX_ACCOUNT_CREATIONS_PER_ACCOUNT_PER_MIN: u32 = 2;
@@ -483,6 +486,7 @@ pub fn app_in_memory_with_auth_rate_limits(limits: AuthRateLimits) -> Router {
 
 struct RuntimeOptions {
     max_rate_entries: usize,
+    max_source_rate_entries: usize,
     rate_window: Duration,
     auth_rate_limits: AuthRateLimits,
     transport: Option<TransportPolicy>,
@@ -496,6 +500,7 @@ impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
             max_rate_entries: MAX_RATE_ENTRIES,
+            max_source_rate_entries: MAX_SOURCE_RATE_ENTRIES,
             rate_window: RATE_WINDOW,
             auth_rate_limits: AuthRateLimits::default(),
             transport: None,
@@ -729,6 +734,9 @@ struct SecurityCounters {
     wrong_public_host: AtomicU64,
     honeypot: AtomicU64,
     unmatched_path: AtomicU64,
+    /// Bucket evictions forced by a full rate-limiter table. A sustained rate
+    /// means enforcement is being diluted and the bound needs review.
+    rate_limiter_pressure: AtomicU64,
 }
 
 static SECURITY_COUNTERS: LazyLock<SecurityCounters> = LazyLock::new(SecurityCounters::default);
@@ -917,6 +925,27 @@ fn canonical_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
     })
 }
 
+/// Rate-limit key for a client address.
+///
+/// A single IPv6 address is not a meaningful unit of accountability: the
+/// smallest routine end-site allocation is a /64, so keying on the full address
+/// let one ordinary VPS present 2^64 distinct keys and walk through every
+/// per-source limit at no cost. Aggregating to the /64 makes a source bucket
+/// cost what it is supposed to cost.
+///
+/// IPv4 keeps full-address granularity — /32 is already the end-site unit, and
+/// aggregating further would punish shared NATs.
+fn source_bucket_key(address: IpAddr) -> String {
+    match address {
+        IpAddr::V4(address) => address.to_string(),
+        IpAddr::V6(address) => {
+            let mut prefix = address.octets();
+            prefix[8..].fill(0);
+            format!("{}/64", Ipv6Addr::from(prefix))
+        }
+    }
+}
+
 async fn production_transport_boundary(
     State(st): State<AppState>,
     mut request: Request,
@@ -1061,6 +1090,7 @@ struct AppState {
     auth_slots: Arc<Semaphore>,
     vault_transaction_slots: Arc<Semaphore>,
     max_rate_entries: usize,
+    max_source_rate_entries: usize,
     rate_window: Duration,
     auth_rate_limits: AuthRateLimits,
     transport: Option<TransportPolicy>,
@@ -1084,6 +1114,11 @@ struct Inner {
 struct RateLimiters {
     authenticated: Mutex<HashMap<String, RateState>>,
     authentication: Mutex<HashMap<String, RateState>>,
+    /// Source buckets live apart from account buckets. Their keys are chosen by
+    /// the caller — an address, not an identifier the server issued — so they
+    /// must never be able to crowd an account or token bucket out of a shared
+    /// table.
+    source: Mutex<HashMap<String, RateState>>,
 }
 
 /// Deterministic integer token bucket. `refill_remainder` carries fractional
@@ -1129,6 +1164,7 @@ impl AppState {
     fn new(token_ttl: Duration, db_path: &str, auth_limit: usize, options: RuntimeOptions) -> Self {
         let RuntimeOptions {
             max_rate_entries,
+            max_source_rate_entries,
             rate_window,
             auth_rate_limits,
             transport,
@@ -1152,6 +1188,7 @@ impl AppState {
             auth_slots: Arc::new(Semaphore::new(auth_limit)),
             vault_transaction_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_VAULT_TRANSACTIONS)),
             max_rate_entries,
+            max_source_rate_entries,
             rate_window,
             auth_rate_limits,
             transport,
@@ -4530,11 +4567,34 @@ fn rate_limit_map_at(
         rate.retain(|_, entry| now.saturating_duration_since(entry.updated_at) < window);
     }
 
+    // Every bucket refills completely after one window, so an entry that has
+    // been idle that long carries no enforcement and was already dropped above.
+    // If the table is still full, evict the least recently used entry instead of
+    // refusing the newcomer: answering 503 here let anyone who could mint keys
+    // faster than the table drains — a caller rotating source addresses, or a
+    // flood of distinct account ids — deny service to every subject that did not
+    // already hold an entry. Eviction degrades enforcement for the single
+    // stalest key rather than availability for everyone.
     if rate.len() >= max_entries {
-        return Err(ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "rate limiter capacity reached",
-        ));
+        let stalest = rate
+            .iter()
+            .min_by_key(|(_, entry)| entry.updated_at)
+            .map(|(key, _)| key.clone());
+        match stalest {
+            Some(stalest) => {
+                rate.remove(&stalest);
+                SECURITY_COUNTERS
+                    .rate_limiter_pressure
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            // Unreachable while max_entries > 0; fail closed rather than grow.
+            None => {
+                return Err(ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "rate limiter capacity reached",
+                ))
+            }
+        }
     }
 
     rate.insert(
@@ -4584,13 +4644,28 @@ fn auth_rate_limit(st: &AppState, subject: &str, bucket: &str, max: u32) -> Resu
     )
 }
 
+/// Per-source admission. Keyed by the aggregated source bucket and held in a
+/// table of its own, so caller-chosen keys can neither be minted for free nor
+/// crowd out an account or token bucket.
 fn source_auth_rate_limit(
     st: &AppState,
     source: ClientSource,
     bucket: &str,
     max: u32,
 ) -> Result<(), ApiError> {
-    auth_rate_limit(st, &source.0.to_string(), bucket, max)
+    let mut rate = st
+        .rate_limiters
+        .source
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    rate_limit_map(
+        &mut rate,
+        st.max_source_rate_entries,
+        st.auth_rate_limits.window,
+        &source_bucket_key(source.0),
+        bucket,
+        max,
+    )
 }
 
 impl Db {
@@ -5280,6 +5355,56 @@ mod tests {
             start + Duration::from_secs(60),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn source_buckets_aggregate_ipv6_to_the_end_site_prefix() {
+        // A /64 is the smallest routine end-site allocation, so every address
+        // inside one must share a bucket. Keying on the full address let one
+        // ordinary VPS present 2^64 distinct keys and walk through every
+        // per-source limit at no cost.
+        let first: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+        let second: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+        let neighbour: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(source_bucket_key(first), source_bucket_key(second));
+        assert_ne!(source_bucket_key(first), source_bucket_key(neighbour));
+        assert_eq!(source_bucket_key(first), "2001:db8:1:2::/64");
+
+        // IPv4 keeps full-address granularity: /32 is already the end-site
+        // unit, and aggregating further would punish shared NATs.
+        let v4: IpAddr = "192.0.2.44".parse().unwrap();
+        let v4_neighbour: IpAddr = "192.0.2.45".parse().unwrap();
+        assert_eq!(source_bucket_key(v4), "192.0.2.44");
+        assert_ne!(source_bucket_key(v4), source_bucket_key(v4_neighbour));
+    }
+
+    #[test]
+    fn a_full_rate_table_evicts_its_stalest_bucket_instead_of_refusing_service() {
+        let mut rate = HashMap::new();
+        let window = Duration::from_secs(60);
+        let start = Instant::now();
+
+        let admit = |rate: &mut HashMap<String, RateState>, subject: &str, at: Instant| {
+            rate_limit_map_at(rate, 2, window, subject, "b", 5, at).is_ok()
+        };
+
+        // Two live buckets fill the table.
+        assert!(admit(&mut rate, "first", start));
+        assert!(admit(&mut rate, "second", start + Duration::from_secs(1)));
+
+        // A third subject is admitted; the least recently used bucket goes.
+        assert!(admit(&mut rate, "third", start + Duration::from_secs(2)));
+        assert_eq!(rate.len(), 2);
+        assert!(!rate.contains_key("b\0first"));
+        assert!(rate.contains_key("b\0second"));
+        assert!(rate.contains_key("b\0third"));
+
+        // Enforcement survives eviction for the buckets that remain.
+        let now = start + Duration::from_secs(2);
+        for _ in 0..4 {
+            assert!(admit(&mut rate, "third", now));
+        }
+        assert!(!admit(&mut rate, "third", now));
     }
 
     #[test]

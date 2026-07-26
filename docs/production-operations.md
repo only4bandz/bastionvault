@@ -61,7 +61,15 @@ a 120/minute aggregate recipient limit, so one account cannot consume a
 recipient's entire shared budget. These counters use deterministic integer
 token buckets and are process-local. Authentication-facing routes also apply a
 source bucket to the canonical client address asserted by the same-host trusted
-ingress. The application rejects missing, duplicate, malformed, or chained
+ingress. Source buckets are keyed by end-site prefix — the full address for
+IPv4, the /64 for IPv6 — because a single IPv6 address is not a unit of
+accountability: one ordinary allocation would otherwise supply 2^64 distinct
+keys and clear every per-source limit at no cost. They are held in a table of
+their own, separate from account and token buckets, so caller-chosen keys can
+never crowd out a key the server issued. At its bound a rate table evicts its
+least recently used bucket and counts a `rate_limiter_pressure` event rather
+than refusing an unseen subject; a sustained rate of those events means
+enforcement is being diluted and the bound needs review. The application rejects missing, duplicate, malformed, or chained
 forwarding values and never uses forwarding metadata in development mode.
 Client addresses exist only as bounded in-process counter keys and are not
 added to application logs. Source-bucket capacities per 60-second refill window
