@@ -41,15 +41,9 @@ import {
   type AnchorStorage,
   type VaultRollbackAnchor,
 } from "./lib/vault-anchor";
+import { canonicalAccountId } from "./lib/account-id";
 
 type Phase = "welcome" | "verify" | "reveal" | "unlock" | "vault";
-
-/** One account per mailbox: the server keys accounts by the exact string, so
- * every email that leaves this app is trimmed and lowercased. Without this,
- * "Bob@x.com" and "bob@x.com" silently become two different vaults. */
-function canonicalEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
 
 const AUTO_LOCK_MS = 10 * 60 * 1000; // lock after 10 minutes of inactivity
 const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
@@ -340,7 +334,7 @@ export default function App(): JSX.Element {
 
   // ── create a new vault locally; persist only after the recovery key is saved ──
   const onCreate = useCallback(async (rawEmail: string, pw: string) => {
-    const em = canonicalEmail(rawEmail);
+    const em = canonicalAccountId(rawEmail);
     if (emailVerificationRequired === null) {
       throw new Error("Server registration policy is unavailable. Try again.");
     }
@@ -357,7 +351,7 @@ export default function App(): JSX.Element {
   }, [email, emailVerificationRequired, mailboxProof]);
 
   const requestMailboxVerification = useCallback(async (rawEmail: string) => {
-    const em = canonicalEmail(rawEmail);
+    const em = canonicalAccountId(rawEmail);
     await api.requestRegistrationChallenge(em);
     setEmail(em);
     setMailboxProof(null);
@@ -410,7 +404,7 @@ export default function App(): JSX.Element {
 
   // ── unlock an existing vault from the server ──
   const onUnlock = useCallback(async (rawEmail: string, pw: string, secretKey: string) => {
-    const em = canonicalEmail(rawEmail);
+    const em = canonicalAccountId(rawEmail);
     await ensureWasm();
     const pre = await api.prelogin(em).catch((e) => {
       if (e instanceof ApiError && e.status === 404) throw new Error("No vault found for this email.");

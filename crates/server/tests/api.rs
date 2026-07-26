@@ -221,7 +221,8 @@ async fn full_account_and_vault_flow() {
 async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
     let path = test_db_path("mailbox-proof");
     let app = server::app_with_db_and_mailbox_verification(&path, "https://vault.example.com");
-    let email = "verified@example.com";
+    let email = "Verified@Example.COM";
+    let canonical_email = "verified@example.com";
     let (_vault, registration, _secret_key) =
         Vault::register_with(b"verified-password", fast_kdf()).unwrap();
     let auth_secret = registration.auth_secret.expose_b64().to_string();
@@ -252,6 +253,10 @@ async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
     let body: String = conn
         .query_row("SELECT text_body FROM mail_outbox", [], |row| row.get(0))
         .unwrap();
+    let recipient: String = conn
+        .query_row("SELECT recipient FROM mail_outbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(recipient, canonical_email);
     let token = body
         .split("#token=")
         .nth(1)
@@ -260,7 +265,7 @@ async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
         .to_string();
     drop(conn);
     let snapshot = server::operational_snapshot(path.as_ref()).unwrap();
-    assert_eq!(snapshot.schema_version, 4);
+    assert_eq!(snapshot.schema_version, 5);
     assert_eq!(snapshot.accounts, 0);
     assert_eq!(snapshot.registration_challenges_active, 1);
     assert_eq!(snapshot.registration_challenges_verified, 0);
@@ -289,13 +294,17 @@ async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
         assert!(snapshot_fields.contains_key(field), "missing {field}");
     }
     assert!(!snapshot_json.to_string().contains(email));
+    assert!(!snapshot_json.to_string().contains(canonical_email));
 
     let (status, _) = send(
         &app,
         "POST",
         "/v1/accounts",
         None,
-        Some(json!({ "email": email, "registration": registration.clone() })),
+        Some(json!({
+            "email": "VERIFIED@example.com",
+            "registration": registration.clone()
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -309,7 +318,7 @@ async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(verified["email"], email);
+    assert_eq!(verified["email"], canonical_email);
 
     let (status, _) = send(
         &app,
@@ -317,7 +326,7 @@ async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
         "/v1/accounts",
         None,
         Some(json!({
-            "email": email,
+            "email": "verified@EXAMPLE.COM",
             "registration": registration,
             "mailbox_proof": token
         })),
@@ -330,7 +339,10 @@ async fn mailbox_proof_precedes_account_creation_and_is_consumed_atomically() {
         "POST",
         "/v1/sessions",
         None,
-        Some(json!({ "email": email, "auth_secret": auth_secret })),
+        Some(json!({
+            "email": "VERIFIED@EXAMPLE.COM",
+            "auth_secret": auth_secret
+        })),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -615,6 +627,92 @@ async fn rejects_malformed_account_identifiers() {
 }
 
 #[tokio::test]
+async fn account_identifiers_are_canonical_across_registration_login_and_prelogin() {
+    let path = test_db_path("canonical-account-id");
+    let app = server::app_with_db(&path);
+    let (_vault, registration, _secret_key) =
+        Vault::register_with(b"canonical-password", fast_kdf()).unwrap();
+    let auth_secret = registration.auth_secret.expose_b64().to_string();
+    let registration = serde_json::to_value(registration).unwrap();
+
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(json!({
+            "email": "Alice+Vault@Example.COM",
+            "registration": registration
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (_, duplicate_registration, _) =
+        Vault::register_with(b"other-password", fast_kdf()).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(json!({
+            "email": "ALICE+VAULT@example.com",
+            "registration": serde_json::to_value(duplicate_registration).unwrap()
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    let (_, upper_prelogin) = send(
+        &app,
+        "GET",
+        "/v1/accounts/ALICE+VAULT@EXAMPLE.COM/prelogin",
+        None,
+        None,
+    )
+    .await;
+    let (_, lower_prelogin) = send(
+        &app,
+        "GET",
+        "/v1/accounts/alice+vault@example.com/prelogin",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(upper_prelogin, lower_prelogin);
+
+    let (status, login) = send(
+        &app,
+        "POST",
+        "/v1/sessions",
+        None,
+        Some(json!({
+            "email": "ALICE+VAULT@Example.com",
+            "auth_secret": auth_secret
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let token = login["token"].as_str().unwrap();
+    let (status, _) = send(&app, "GET", "/v1/vault", Some(token), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let stored: String = conn
+        .query_row("SELECT email FROM accounts", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(stored, "alice+vault@example.com");
+    assert!(conn
+        .execute(
+            "INSERT INTO accounts(
+               email,salt,kdf,wrapped_vault_key,auth_hash,vault_revision,email_verified_at
+             ) VALUES('Upper@Example.COM','salt','{}','{}','hash',0,1)",
+            [],
+        )
+        .is_err());
+}
+
+#[tokio::test]
 async fn rejects_malformed_registration_before_storage() {
     let app = server::app_in_memory();
     let (_, reg, _sk) = Vault::register_with(b"pw", fast_kdf()).unwrap();
@@ -805,7 +903,7 @@ async fn rate_limits_login_globally_and_per_account_before_verification() {
         "/sessions",
         None,
         Some(json!({
-            "email": "login-alice@example.com",
+            "email": "LOGIN-ALICE@EXAMPLE.COM",
             "auth_secret": wrong_secret
         })),
     )
@@ -2076,7 +2174,7 @@ fn migrates_legacy_accounts_with_zero_vault_revision() {
     let user_version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(user_version, 4);
+    assert_eq!(user_version, 5);
     assert!(conn
         .execute(
             "INSERT INTO items(email,id,blob) VALUES('missing@example.com','orphan','{}')",
@@ -2935,7 +3033,7 @@ async fn rate_limits_prelogin_globally_and_per_account() {
     let (status, _) = send(
         &app,
         "GET",
-        "/accounts/prelogin-alice@example.com/prelogin",
+        "/accounts/PRELOGIN-ALICE@EXAMPLE.COM/prelogin",
         None,
         None,
     )

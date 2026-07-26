@@ -185,22 +185,28 @@ elapsed time.
 
 1. Freeze one reviewed commit and record binary, web-asset, and configuration
    checksums. Run `bash scripts/verify-all.sh` from a clean checkout.
-2. Confirm alert delivery, free disk/inodes, current off-host backup age, mail
+2. Before the schema-v5 rollout, run
+   `python3 scripts/check-account-id-migration.py /var/lib/bastion/bastion.db`
+   against the live v4 database. The read-only aggregate check must report zero
+   account and challenge case collisions. A collision blocks deployment:
+   automatic selection, deletion, renaming, or merging of either vault is
+   prohibited.
+3. Confirm alert delivery, free disk/inodes, current off-host backup age, mail
    provider health, and certificate lifetime.
-3. Create and verify a pre-deployment SQLite-aware backup. Encrypt and copy it
+4. Create and verify a pre-deployment SQLite-aware backup. Encrypt and copy it
    off-host before changing the running process.
-4. Put the ingress into maintenance/read-only withdrawal. Stop the existing
+5. Put the ingress into maintenance/read-only withdrawal. Stop the existing
    server cleanly and confirm no process owns the server lock.
-5. Install the pinned binary and immutable assets. Never start old and new
+6. Install the pinned binary and immutable assets. Never start old and new
    binaries concurrently against the same database.
-6. Start the new binary. Startup migrations are forward-only and must complete
+7. Start the new binary. Startup migrations are forward-only and must complete
    before `/readyz` returns success.
-7. Run the edge and production-operations acceptance commands. Inspect logs for
+8. Run the edge and production-operations acceptance commands. Inspect logs for
    migration, storage, 5xx, and SMTP errors.
-8. Perform one real mailbox registration with a designated test address. Verify
+9. Perform one real mailbox registration with a designated test address. Verify
    there was no account before proof, the current link succeeds, a rotated link
    fails, and email provides no recovery behavior.
-9. Remove maintenance only after all checks pass. Record timestamps, command
+10. Remove maintenance only after all checks pass. Record timestamps, command
    output, artifact hashes, and operator/reviewer names.
 
 ## Rollback

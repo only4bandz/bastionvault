@@ -70,6 +70,57 @@ export function vaultRollbackAnchorKey(server, accountId) {
   return `${ANCHOR_PREFIX}:${encodeURIComponent(server)}:${encodeURIComponent(accountId)}`;
 }
 
+/**
+ * Move a legacy case-sensitive checkpoint scope to the canonical account id.
+ *
+ * If both scopes already exist, one must cryptographically dominate the other.
+ * Incomparable revision/sequence/digest histories fail closed rather than
+ * selecting whichever key happened to be read last.
+ */
+export async function migrateVaultRollbackAnchorScope(
+  area,
+  server,
+  legacyAccountId,
+  canonicalAccountId
+) {
+  const legacyKey = vaultRollbackAnchorKey(server, legacyAccountId);
+  const canonicalKey = vaultRollbackAnchorKey(server, canonicalAccountId);
+  if (legacyKey === canonicalKey) return canonicalKey;
+
+  const [firstKey, secondKey] = [legacyKey, canonicalKey].sort();
+  return withVaultRollbackLock(firstKey, () =>
+    withVaultRollbackLock(secondKey, async () => {
+      const legacy = await readVaultRollbackAnchor(area, legacyKey);
+      if (!legacy) return canonicalKey;
+      const canonical = await readVaultRollbackAnchor(area, canonicalKey);
+      let winner = legacy;
+      if (canonical) {
+        try {
+          assertVaultRollbackProgress(legacy, canonical);
+        } catch {
+          try {
+            assertVaultRollbackProgress(canonical, legacy);
+            winner = canonical;
+          } catch {
+            throw new VaultRollbackError(
+              "Case-variant vault rollback checkpoints conflict."
+            );
+          }
+        }
+      }
+      await writeVaultRollbackAnchor(area, canonicalKey, winner);
+      try {
+        await area.remove(legacyKey);
+      } catch {
+        throw new VaultRollbackError(
+          "The legacy vault rollback checkpoint could not be removed."
+        );
+      }
+      return canonicalKey;
+    })
+  );
+}
+
 export async function readVaultRollbackAnchor(area, key) {
   let values;
   try {
