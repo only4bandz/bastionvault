@@ -30,6 +30,7 @@ import { canonicalAccountId } from "./lib/account-id.js";
 import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.js";
 import { assertUnlockKdfPolicy } from "./lib/kdf-policy.js";
 import { revealFieldValue } from "./lib/reveal-policy.js";
+import { redactItem } from "./lib/item-redaction.js";
 import { CLIPBOARD_CLEAR_MS } from "./lib/clipboard-clear.js";
 import { validContentMessage } from "./lib/content-message-policy.js";
 import { matchesSite } from "./lib/match.js";
@@ -1064,16 +1065,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           break;
         }
         case "ITEM": {
-          // Full decrypted item for the detail view. The popup is a trusted
-          // extension-page context (same trust boundary that already gets
-          // individual secrets via REVEAL); content scripts never see this.
+          // Everything the detail view needs to RENDER, and nothing it needs
+          // to keep secret. Passwords, card numbers and CVVs are stripped
+          // here; the popup asks for one of them through REVEAL at the moment
+          // the user reveals or copies it, so no secret sits in the popup's
+          // DOM for the lifetime of the view.
           const s = await ensureSession();
           if (!s) return sendResponse({ ok: false, error: "locked", locked: true });
           await refreshSessionVault(s);
           await touchSession();
           const it = s.items.get(msg.id);
           if (!it) throw new Error("Item not found.");
-          sendResponse({ ok: true, item: it });
+          sendResponse({ ok: true, item: redactItem(it) });
           break;
         }
         case "FILL": {
