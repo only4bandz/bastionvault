@@ -2685,20 +2685,21 @@ impl Db {
         mail: RegistrationMail,
     ) -> Result<ChallengeRequestOutcome, DbError> {
         self.call_mutation(move |conn| {
-            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let mut tx =
+                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute(
                 "DELETE FROM registration_challenges WHERE expires_at<?1",
                 [mail.created_at],
             )?;
+            // Both lookups run unconditionally. Returning early on the first
+            // one made an existing mailbox measurably cheaper to probe than an
+            // unknown one, which reintroduced the enumeration oracle the
+            // uniform 202 answer and the prelogin decoy exist to close.
             let account_exists: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM accounts WHERE email=?1)",
                 [&mail.recipient],
                 |row| row.get(0),
             )?;
-            if account_exists {
-                tx.commit()?;
-                return Ok(ChallengeRequestOutcome::Noop);
-            }
             let resend_after = tx
                 .query_row(
                     "SELECT resend_after FROM registration_challenges WHERE email=?1",
@@ -2706,17 +2707,19 @@ impl Db {
                     |row| row.get::<_, i64>(0),
                 )
                 .optional()?;
-            if resend_after.is_some_and(|until| mail.created_at < until) {
-                tx.commit()?;
-                return Ok(ChallengeRequestOutcome::Noop);
-            }
-            // Replacing the challenge cascades any queued stale message before
-            // the new token and mail are inserted atomically.
-            tx.execute(
+            let resend_gated = resend_after.is_some_and(|until| mail.created_at < until);
+
+            // The write sequence runs for every caller and is discarded when
+            // no mail may be sent, so the statements executed do not depend on
+            // whether the mailbox is registered. Replacing the challenge
+            // cascades any queued stale message before the new token and mail
+            // are inserted atomically.
+            let savepoint = tx.savepoint()?;
+            savepoint.execute(
                 "DELETE FROM registration_challenges WHERE email=?1",
                 [&mail.recipient],
             )?;
-            tx.execute(
+            savepoint.execute(
                 "INSERT INTO registration_challenges(
                    email,token_hash,expires_at,resend_after,verified_at,created_at
                  ) VALUES(?1,?2,?3,?4,NULL,?5)",
@@ -2729,7 +2732,7 @@ impl Db {
                 ],
             )?;
             let queued = mail_outbox::enqueue_registration(
-                &tx,
+                &savepoint,
                 &mail.recipient,
                 mail_outbox::MailDraft {
                     id: &mail.outbox_id,
@@ -2739,9 +2742,18 @@ impl Db {
                     created_at: mail.created_at,
                 },
             )?;
+            if account_exists || resend_gated {
+                // Dropping the savepoint rolls its work back: nothing is
+                // stored and no mail is queued for a mailbox that must not
+                // receive one.
+                drop(savepoint);
+                tx.commit()?;
+                return Ok(ChallengeRequestOutcome::Noop);
+            }
             if !queued {
                 return Ok(ChallengeRequestOutcome::QueueFull);
             }
+            savepoint.commit()?;
             tx.commit()?;
             Ok(ChallengeRequestOutcome::Queued)
         })
