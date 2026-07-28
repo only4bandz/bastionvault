@@ -400,6 +400,8 @@ function Compose({
         </select>
 
         <div className="field-label" style={{ marginTop: 14 }}>Note</div>
+        {/* The body of an end-to-end-encrypted note must not reach cloud
+            spell-checkers, autocorrect dictionaries, or autofill stores. */}
         <textarea
           className="textarea"
           rows={5}
@@ -407,6 +409,10 @@ function Compose({
           onChange={(e) => setNote(e.target.value)}
           placeholder="Your encrypted note…"
           autoFocus
+          spellCheck={false}
+          autoCorrect="off"
+          autoCapitalize="none"
+          autoComplete="off"
         />
 
         <label className="send-check">
@@ -415,7 +421,20 @@ function Compose({
         </label>
 
         <div className="field-label" style={{ marginTop: 14 }}>Extra passphrase (optional)</div>
-        <input className="input" type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="shared out-of-band" />
+        {/* An out-of-band Send passphrase must never enter the browser's
+            (possibly synced) password store: "new-password" suppresses both
+            the save prompt and autofill, where "off" is widely ignored. */}
+        <input
+          className="input"
+          type="password"
+          value={pass}
+          onChange={(e) => setPass(e.target.value)}
+          placeholder="shared out-of-band"
+          autoComplete="new-password"
+          spellCheck={false}
+          autoCorrect="off"
+          autoCapitalize="none"
+        />
 
         <div className="field-label" style={{ marginTop: 14 }}>Expires</div>
         <select className="input" value={exp} onChange={(e) => setExp(e.target.value)}>
@@ -655,6 +674,10 @@ function Message({
               type="password"
               value={pass}
               autoFocus
+              autoComplete="new-password"
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="none"
               onChange={(e) => setPass(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key !== "Enter") return;
