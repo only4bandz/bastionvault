@@ -481,6 +481,21 @@ pub fn seal(
     passphrase: Option<&[u8]>,
     signer: Option<(&IdentityKeys, &str)>,
 ) -> Result<SendBlob> {
+    seal_with_claim(plaintext, recipient_id, recipient, passphrase, signer, None)
+}
+
+/// `seal` plus a test-only escape hatch for building the one blob shape an
+/// honest client cannot produce: a claimed `sender_id` with **no** signature.
+/// That shape is what a hostile client hand-rolls, so `open` must be tested
+/// against it directly.
+fn seal_with_claim(
+    plaintext: &[u8],
+    recipient_id: &str,
+    recipient: &PublicIdentity,
+    passphrase: Option<&[u8]>,
+    signer: Option<(&IdentityKeys, &str)>,
+    unsigned_claim: Option<&str>,
+) -> Result<SendBlob> {
     if plaintext.len() > MAX_PLAINTEXT {
         return Err(CryptoError::Malformed);
     }
@@ -525,6 +540,10 @@ pub fn seal(
         let sig: Signature = keys.sig.sign(&t);
         inner.sender_id = Some(sender_id.to_string());
         inner.sig = Some(b64(&sig.to_bytes()));
+    }
+    if let Some(claimed) = unsigned_claim {
+        inner.sender_id = Some(claimed.to_string());
+        inner.sig = None;
     }
     let ser = serde_json::to_vec(&inner);
     inner.plaintext.zeroize(); // wipe the base64-plaintext String regardless of outcome
@@ -720,8 +739,17 @@ pub fn open(
             // A signature is present but the caller gave no key to check it.
             None => Sender::Unverified(sid.clone()),
         },
-        // A claimed sender id with no signature is never trustworthy.
-        (Some(sid), None) => Sender::Unverified(sid.clone()),
+        // A claimed sender id with no signature is never trustworthy. When the
+        // caller supplied a verifier it is asserting "I expect a signature
+        // from this identity", so an unsigned claim is a forgery attempt, not
+        // a merely-unverified message: fail closed instead of downgrading.
+        // Accepting it let anyone name a victim's verified contact as the
+        // sender and — because the caller cannot then distinguish this from a
+        // failed check — impersonate a key rotation to destroy that trust.
+        (Some(sid), None) => match verify_sender {
+            Some(_) => return Err(CryptoError::UnsignedSenderClaim),
+            None => Sender::Unverified(sid.clone()),
+        },
         _ => Sender::Anonymous,
     };
 
@@ -779,3 +807,68 @@ impl CtNe for [u8; 32] {
 
 // CEK / wrap_key are 32 bytes by construction.
 const _: () = assert!(KEY_LEN == 32);
+
+#[cfg(test)]
+mod unsigned_claim {
+    //! An unsigned message may still NAME a sender. Whether that is merely
+    //! untrusted or an outright forgery depends on what the caller asked for.
+    use super::*;
+
+    fn forged_blob(recipient: &PublicIdentity, claimed: &str) -> SendBlob {
+        seal_with_claim(
+            b"forged note",
+            "BOB-ID",
+            recipient,
+            None,
+            None,
+            Some(claimed),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_unsigned_claim_is_untrusted_when_no_verifier_was_asked_for() {
+        let bob = IdentityKeys::generate(1);
+        let blob = forged_blob(&bob.public(), "ALICE-ID");
+
+        // Discovery pass: the caller has not named an expected signer, so the
+        // claim is surfaced as untrusted rather than rejected.
+        let opened = open(&blob, &bob, None, None).unwrap();
+        assert_eq!(opened.sender, Sender::Unverified("ALICE-ID".to_string()));
+    }
+
+    #[test]
+    fn an_unsigned_claim_is_a_forgery_when_a_verifier_was_asked_for() {
+        let alice = IdentityKeys::generate(1);
+        let bob = IdentityKeys::generate(1);
+        let blob = forged_blob(&bob.public(), "ALICE-ID");
+
+        // The caller pinned Alice's key: it expects a signature from her.
+        // A message carrying none cannot be a key rotation — it is a
+        // fabricated claim, and must be distinguishable from a failed check.
+        let Err(error) = open(&blob, &bob, None, Some(&alice.public())) else {
+            panic!("a forged sender claim was accepted");
+        };
+        assert!(matches!(error, CryptoError::UnsignedSenderClaim));
+
+        // A genuinely signed message from Alice still verifies…
+        let signed = seal(
+            b"real note",
+            "BOB-ID",
+            &bob.public(),
+            None,
+            Some((&alice, "ALICE-ID")),
+        )
+        .unwrap();
+        let opened = open(&signed, &bob, None, Some(&alice.public())).unwrap();
+        assert_eq!(opened.sender, Sender::Verified("ALICE-ID".to_string()));
+
+        // …and a signature that fails the check stays an opaque AEAD error,
+        // which is what a real key rotation looks like.
+        let mallory = IdentityKeys::generate(1);
+        let Err(error) = open(&signed, &bob, None, Some(&mallory.public())) else {
+            panic!("a signature check against the wrong key succeeded");
+        };
+        assert!(matches!(error, CryptoError::Aead));
+    }
+}

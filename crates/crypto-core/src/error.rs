@@ -26,6 +26,16 @@ pub enum CryptoError {
     #[error("malformed encrypted data")]
     Malformed,
 
+    /// A message claims a sender identity the caller asked to verify, but
+    /// carries no signature at all.
+    ///
+    /// Distinct from [`CryptoError::Aead`] on purpose: a failed *check* may
+    /// mean the contact rotated their key, while a missing signature can only
+    /// mean the claim was fabricated. Collapsing the two let a stranger forge
+    /// a key-rotation alarm against a verified contact.
+    #[error("sender identity claimed without a signature")]
+    UnsignedSenderClaim,
+
     /// Empty master password — rejected at the crypto boundary.
     ///
     /// The full password policy (length, entropy) remains the caller's
