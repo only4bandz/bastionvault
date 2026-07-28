@@ -11,7 +11,7 @@ import {
   type PassphraseOptions,
 } from "../lib/generator";
 import { copySecretWithFeedback } from "../lib/clipboard";
-import { IcCopy, IcRefresh } from "./icons";
+import { IcCopy, IcEye, IcRefresh } from "./icons";
 
 const DEFAULTS: GenOptions = {
   length: 20,
@@ -54,13 +54,35 @@ export function Generator({
   const [opts, setOpts] = useState<GenOptions>(DEFAULTS);
   const [phraseOpts, setPhraseOpts] = useState<PassphraseOptions>(PHRASE_DEFAULTS);
   const [pw, setPw] = useState("");
+  // A freshly generated password is as sensitive as a stored one: it is about
+  // to become a credential. The item detail view and the Emergency Kit both
+  // conceal on blur/tab-hide for the shoulder-surfer, screen-share and screen
+  // recorder cases; a candidate left legible in an unfocused window is the
+  // same exposure, and the app's hidden-tab lock only fires after 30s.
+  const [concealed, setConcealed] = useState(false);
 
   function regen(m = mode, o = opts, p = phraseOpts) {
     setPw(m === "characters" ? generatePassword(o) : generatePassphrase(p));
+    setConcealed(false); // a value the user just asked for is shown
   }
   useEffect(() => {
     regen("characters", DEFAULTS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const conceal = (): void => setConcealed(true);
+    const onVisibilityChange = (): void => {
+      if (document.visibilityState === "hidden") conceal();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("blur", conceal);
+    window.addEventListener("pagehide", conceal);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("blur", conceal);
+      window.removeEventListener("pagehide", conceal);
+    };
   }, []);
 
   function set<K extends keyof GenOptions>(k: K, v: GenOptions[K]) {
@@ -108,7 +130,18 @@ export function Generator({
       </div>
 
       <div className="gen-out">
-        <span className="val mono">{pw || "—"}</span>
+        <span className="val mono">
+          {pw ? (concealed ? "•".repeat(Math.min(pw.length, 24)) : pw) : "—"}
+        </span>
+        {pw && concealed && (
+          <button
+            className="icon-btn"
+            aria-label={`Show generated ${label.toLowerCase()}`}
+            onClick={() => setConcealed(false)}
+          >
+            <IcEye size={17} />
+          </button>
+        )}
         <button className="icon-btn" aria-label={`Regenerate ${label.toLowerCase()}`} onClick={() => regen()}>
           <IcRefresh size={17} />
         </button>
