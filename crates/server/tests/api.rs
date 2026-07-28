@@ -2075,6 +2075,90 @@ async fn challenge_mail_to_one_recipient_is_capped_per_day() {
 }
 
 #[tokio::test]
+async fn a_challenge_for_a_registered_mailbox_stores_and_queues_nothing() {
+    let path = test_db_path("challenge-rollback");
+    let app = server::app_with_db_and_mailbox_verification(&path, "https://vault.example.com");
+    let email = "already@example.com";
+    let (_vault, registration, _secret_key) =
+        Vault::register_with(b"known-password", fast_kdf()).unwrap();
+    let registration = serde_json::to_value(registration).unwrap();
+
+    // Register the mailbox for real (challenge → verify → account).
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/registration-challenges",
+        None,
+        Some(json!({ "email": email })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let body: String = conn
+        .query_row("SELECT text_body FROM mail_outbox", [], |row| row.get(0))
+        .unwrap();
+    drop(conn);
+    let token = body
+        .split("#token=")
+        .nth(1)
+        .and_then(|tail| tail.lines().next())
+        .unwrap()
+        .to_string();
+    send(
+        &app,
+        "POST",
+        "/v1/registration-challenges/verify",
+        None,
+        Some(json!({ "token": token.clone() })),
+    )
+    .await;
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/accounts",
+        None,
+        Some(json!({ "email": email, "registration": registration, "mailbox_proof": token })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let outbox_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM mail_outbox", [], |row| row.get(0))
+        .unwrap();
+    drop(conn);
+
+    // A challenge for the now-registered mailbox still answers 202, but the
+    // work done on its behalf is rolled back: no stored challenge, no mail.
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/registration-challenges",
+        None,
+        Some(json!({ "email": email })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let challenges: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM registration_challenges WHERE email=?1",
+            [email],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let outbox_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM mail_outbox", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(challenges, 0, "a challenge was stored for a known account");
+    assert_eq!(
+        outbox_after, outbox_before,
+        "mail was queued for a known account"
+    );
+}
+
+#[tokio::test]
 async fn login_does_not_reveal_an_unverified_account() {
     let path = test_db_path("unverified-login-enumeration");
     let known = "legacy-unverified@example.com";

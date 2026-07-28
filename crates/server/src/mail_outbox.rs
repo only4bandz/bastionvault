@@ -48,8 +48,10 @@ pub(super) fn valid_recipient(value: &str) -> bool {
 
 /// Insert mail while the producer's authoritative SQLite transaction is still
 /// open. Returns false when the bounded active queue is full.
+/// Takes a plain `&Connection` so callers may enqueue inside a transaction or
+/// a savepoint (both deref to `Connection`); it must never run outside one.
 pub(super) fn enqueue_registration(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Connection,
     challenge_email: &str,
     draft: MailDraft<'_>,
 ) -> rusqlite::Result<bool> {
