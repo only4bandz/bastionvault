@@ -117,6 +117,35 @@ describe("Vault dashboard accessibility", () => {
     );
   });
 
+  it("keeps item notes concealed until asked, and re-conceals them on blur", async () => {
+    vi.useFakeTimers();
+    try {
+      const NOTE = "recovery codes: 8842-1195";
+      renderVault([{ ...LOGIN, id: "note-1", title: "Bank", notes: NOTE }]);
+      fireEvent.click(screen.getByRole("button", { name: "Open Bank" }));
+
+      // Notes are a payload, not a caption: they start masked like the password.
+      expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: "Reveal notes" }));
+      expect(screen.getByText(NOTE)).toBeVisible();
+
+      // They follow the shared auto-conceal deadline…
+      await act(() => vi.advanceTimersByTimeAsync(30_000));
+      expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
+
+      // …and the window-blur rule that already governs every other secret.
+      fireEvent.click(screen.getByRole("button", { name: "Reveal notes" }));
+      expect(screen.getByText(NOTE)).toBeVisible();
+      act(() => {
+        fireEvent.blur(window);
+      });
+      expect(screen.queryByText(NOTE)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("warns in the item detail when the saved website is cleartext HTTP", () => {
     renderVault([{ ...LOGIN, id: "http-1", title: "Router", url: "http://192.168.1.1/admin" }]);
     fireEvent.click(screen.getByRole("button", { name: "Open Router" }));

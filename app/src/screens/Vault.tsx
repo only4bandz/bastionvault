@@ -1017,9 +1017,33 @@ function ItemDetailView({
             );
           })}
           {item.notes && (
+            // Notes hold the payload of a Secure Note item, and are where
+            // recovery codes and 2FA backup keys usually end up on a login.
+            // They belong behind the same reveal/auto-conceal machinery as the
+            // password and CVV rather than being legible the moment the
+            // dialog opens and through every window blur and tab hide.
             <div className="row-copy" style={{ alignItems: "flex-start" }}>
               <span className="k">Notes</span>
-              <span className="v" style={{ whiteSpace: "pre-wrap" }}>{item.notes}</span>
+              <span className="v" style={{ whiteSpace: "pre-wrap" }}>
+                {revealed.has("Notes")
+                  ? item.notes
+                  : "•".repeat(Math.min(14, item.notes.length))}
+              </span>
+              <button
+                className="icon-btn"
+                aria-label={`${revealed.has("Notes") ? "Hide" : "Reveal"} notes`}
+                aria-pressed={revealed.has("Notes")}
+                onClick={() => toggleReveal("Notes")}
+              >
+                <IcEye size={16} />
+              </button>
+              <button
+                className="icon-btn"
+                aria-label="Copy notes"
+                onClick={() => copy(item.notes!, "Notes", true)}
+              >
+                <IcCopy size={16} />
+              </button>
             </div>
           )}
           {item.folder && (
