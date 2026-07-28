@@ -305,7 +305,9 @@
   };
 
   function bestUsername(scope) {
-    const inputs = Array.from((scope || document).querySelectorAll("input"));
+    // Visible fields only, same rule as the fill path: a hidden decoy input
+    // is page-controlled and must not become the saved username.
+    const inputs = Array.from((scope || document).querySelectorAll("input")).filter(fillable);
     const email = inputs.find((i) => (i.type || "").toLowerCase() === "email" && i.value);
     if (email) return email.value.trim().slice(0, MAX_STAGED_USERNAME_CHARS);
     const userlike = inputs.find(
@@ -318,7 +320,15 @@
 
   // When a password field was filled and the form is submitted, stage it.
   function stageFromForm(scope) {
-    const pwField = (scope || document).querySelector('input[type="password"]');
+    // Take the first VISIBLE password field carrying a value. Reading
+    // `querySelector('input[type="password"]')` blindly meant a page whose
+    // first password input is a hidden decoy (honeypot, or one the page
+    // scripts itself) got that value staged — and, through SAVE_LOGIN's
+    // dedupe path, written over the user's real credential. The fill path
+    // filters with `fillable()` for exactly this reason; capture now does too.
+    const pwField = Array.from((scope || document).querySelectorAll('input[type="password"]'))
+      .filter(fillable)
+      .find((i) => i.value);
     const pw = pwField && pwField.value;
     if (!pw || pw.length > MAX_STAGED_PASSWORD_CHARS) return;
     chrome.runtime
