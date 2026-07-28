@@ -685,6 +685,11 @@ fn build_with_rate_limits(
         .merge(legacy)
         .nest("/v1", routes)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        // Outside the handlers (and the body extractors that run inside
+        // them), so the deadline covers slow body trickle as well as slow
+        // handler work. Inside `security_headers`/`request_log`, so a 408 is
+        // still stamped and logged like any other response.
+        .layer(middleware::from_fn(request_deadline))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             production_transport_boundary,
@@ -834,6 +839,25 @@ fn security_event(status: StatusCode, path: &str) -> Option<(&'static str, u64)>
 /// logged at error, security-relevant outcomes at warn, everything else at
 /// info. No request/response bodies, no headers — nothing secret is ever
 /// recorded, and the path is already redacted of user data.
+/// Hard deadline for one request, handler and body reads included. Without
+/// it, a client can open a request and trickle body bytes indefinitely — each
+/// stalled request pins a hyper task and its buffers. The TLS ingress is
+/// trusted for transport, not for slow-body policing. Thirty seconds covers
+/// the slowest legitimate work (a full vault transaction on slow storage)
+/// with an order of magnitude to spare.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+
+async fn request_deadline(request: Request, next: Next) -> Response {
+    deadline(REQUEST_DEADLINE, request, next).await
+}
+
+async fn deadline(limit: Duration, request: Request, next: Next) -> Response {
+    match tokio::time::timeout(limit, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => ApiError(StatusCode::REQUEST_TIMEOUT, "request timed out").into_response(),
+    }
+}
+
 async fn request_log(request: Request, next: Next) -> Response {
     let method = request.method().clone();
     let path = redacted_path(request.uri().path());
@@ -5575,6 +5599,30 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
         })
+    }
+
+    #[tokio::test]
+    async fn requests_past_the_deadline_return_408_and_fast_ones_pass() {
+        let app = Router::new()
+            .route(
+                "/slow",
+                get(|| async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    "late"
+                }),
+            )
+            .route("/fast", get(|| async { "ok" }))
+            .layer(middleware::from_fn(|request, next| {
+                deadline(Duration::from_millis(20), request, next)
+            }));
+
+        let slow = Request::builder().uri("/slow").body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(slow).await.unwrap();
+        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+
+        let fast = Request::builder().uri("/fast").body(Body::empty()).unwrap();
+        let response = app.oneshot(fast).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]
