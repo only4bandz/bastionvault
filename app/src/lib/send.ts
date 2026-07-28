@@ -320,6 +320,17 @@ export async function composeNote(
 
 // ── inbox ──
 
+/** `true` when the sender folded a passphrase into this blob's key derivation. */
+export function isPassphraseProtected(blob: unknown): boolean {
+  return (
+    typeof blob === "object" &&
+    blob !== null &&
+    !Array.isArray(blob) &&
+    Object.prototype.hasOwnProperty.call(blob, "pw") &&
+    (blob as { pw?: unknown }).pw !== undefined
+  );
+}
+
 export interface Opened {
   plaintext?: string;
   sender?: { state: string; id: string | null };
@@ -351,6 +362,17 @@ export function openMessage(account: Account, contacts: Contact[], blob: unknown
   const pinned = Object.fromEntries(
     contacts.map((contact) => [contact.bastion_id, contact.public])
   );
+  // Whether a passphrase is REQUIRED is a property of the blob (the sender
+  // folded one into the KDF, so it carries a `pw` block), not of a failure.
+  // Inferring it from "the open threw" meant any undecryptable blob — a junk
+  // envelope the server dropped into the inbox, a tampered ciphertext, a
+  // message for a rotated key — showed the padlock prompt, reliably coaxing
+  // the user into typing an out-of-band Send passphrase into an attacker's
+  // message. The `pw` block is server-visible and already validated, so the
+  // answer is knowable without guessing.
+  const passphraseRequired = isPassphraseProtected(blob);
+  if (passphraseRequired && !passphrase) return { needsPass: true };
+
   let opened: Opened;
   try {
     opened = JSON.parse(
@@ -361,7 +383,11 @@ export function openMessage(account: Account, contacts: Contact[], blob: unknown
       )
     ) as Opened;
   } catch {
-    return passphrase ? { error: "Wrong passphrase or corrupted message." } : { needsPass: true };
+    return {
+      error: passphraseRequired
+        ? "Wrong passphrase, or this message was tampered with."
+        : "This message could not be decrypted — it may have been tampered with.",
+    };
   }
   const known = contacts.find((contact) => contact.bastion_id === opened.sender?.id);
   // A contact's name is only ever lent to a sender the user verified out of

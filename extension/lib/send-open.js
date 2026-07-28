@@ -7,8 +7,26 @@ function pinnedSenders(contacts) {
   );
 }
 
+/** `true` when the sender folded a passphrase into this blob's key derivation. */
+export function isPassphraseProtected(blob) {
+  return (
+    typeof blob === "object" &&
+    blob !== null &&
+    !Array.isArray(blob) &&
+    Object.prototype.hasOwnProperty.call(blob, "pw") &&
+    blob.pw !== undefined
+  );
+}
+
 /** Open one message with verified-contact enforcement entirely inside WASM. */
 export function openMessage(account, contacts, blob, passphrase) {
+  // A passphrase prompt must follow from the blob carrying a `pw` block, not
+  // from a failed open: otherwise any undecryptable message (a junk envelope
+  // the server injected, a tampered ciphertext) asks the user to type an
+  // out-of-band Send passphrase into it.
+  const passphraseRequired = isPassphraseProtected(blob);
+  if (passphraseRequired && !passphrase) return { needsPass: true };
+
   let opened;
   try {
     opened = JSON.parse(
@@ -19,9 +37,11 @@ export function openMessage(account, contacts, blob, passphrase) {
       )
     );
   } catch {
-    return passphrase
-      ? { error: "Wrong passphrase or corrupted message." }
-      : { needsPass: true };
+    return {
+      error: passphraseRequired
+        ? "Wrong passphrase, or this message was tampered with."
+        : "This message could not be decrypted — it may have been tampered with.",
+    };
   }
   // Only a verified contact lends its display name; an unverified id is the
   // sender's own claim and must not borrow a name from the address book.

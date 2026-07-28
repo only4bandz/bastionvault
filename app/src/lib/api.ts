@@ -1,6 +1,17 @@
 // Client for the zero-knowledge sync server. In dev, requests go through the
 // Vite proxy (/api -> http://127.0.0.1:7777). The server only ever sees opaque
 // encrypted blobs + a hash of the auth secret — never plaintext.
+// Type-only on the other side (kdf-policy imports `Registration` as a type),
+// so this shares the envelope constants without creating a runtime cycle.
+import {
+  MAX_ITERATIONS,
+  MAX_MEM_KIB,
+  MAX_PARALLELISM,
+  MIN_ITERATIONS,
+  MIN_MEM_KIB,
+  MIN_PARALLELISM,
+} from "./kdf-policy";
+
 const BASE = "/api/v1";
 const REQUEST_TIMEOUT_MS = 15_000;
 export const MAX_ERROR_BODY_BYTES = 4096;
@@ -320,17 +331,24 @@ export function requireWhoamiResponse(
   };
 }
 
+/**
+ * The `pw` block of an inbox blob is attacker-supplied: the sender chooses it
+ * and the server can rewrite it. Hold it to the same Argon2id envelope every
+ * other derivation in this app is held to, so out-of-envelope parameters are
+ * refused before they ever reach WASM.
+ */
 function validSendPasswordParams(value: unknown): boolean {
   return (
     exactRecord(value, ["salt", "mem_kib", "iterations", "parallelism"]) &&
     exactBase64Bytes(value.salt, 16) &&
-    Number.isSafeInteger(value.mem_kib) &&
-    (value.mem_kib as number) > 0 &&
-    Number.isSafeInteger(value.iterations) &&
-    (value.iterations as number) > 0 &&
-    Number.isSafeInteger(value.parallelism) &&
-    (value.parallelism as number) > 0
+    inKdfEnvelope(value.mem_kib, MIN_MEM_KIB, MAX_MEM_KIB) &&
+    inKdfEnvelope(value.iterations, MIN_ITERATIONS, MAX_ITERATIONS) &&
+    inKdfEnvelope(value.parallelism, MIN_PARALLELISM, MAX_PARALLELISM)
   );
+}
+
+function inKdfEnvelope(value: unknown, min: number, max: number): boolean {
+  return Number.isSafeInteger(value) && (value as number) >= min && (value as number) <= max;
 }
 
 function validSendBlob(value: unknown, messageId: string): boolean {
