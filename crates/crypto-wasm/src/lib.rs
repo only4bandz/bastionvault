@@ -731,6 +731,9 @@ pub fn unlock(
     let master_password = Zeroizing::new(master_password);
     let secret_key = Zeroizing::new(secret_key);
     let reg: Registration = serde_json::from_str(registration_json).map_err(js_err)?;
+    // The server supplies this record; refuse a format this build cannot read
+    // rather than interpreting unknown-version fields under v1 semantics.
+    reg.validate_version().map_err(js_err)?;
     let secret = AccountSecret::parse(&secret_key).map_err(js_err)?;
     let (vault, auth) = Vault::unlock(
         master_password.as_bytes(),
@@ -767,7 +770,11 @@ pub fn rehydrate(session_json: String) -> Result<Account, JsError> {
     // Defense in depth: the registration must be well-formed (reject malformed /
     // attacker-mangled stored sessions instead of building a half-valid Account).
     serde_json::from_str::<Registration>(&session.registration_json)
-        .map_err(|_| JsError::new("invalid registration"))?;
+        .map_err(|_| JsError::new("invalid registration"))
+        .and_then(|reg| {
+            reg.validate_version()
+                .map_err(|_| JsError::new("invalid registration"))
+        })?;
 
     // Both the base64 input owned by `session` and decoded bytes are wiped on
     // every return path, including an invalid key length.

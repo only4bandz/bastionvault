@@ -411,3 +411,24 @@ fn vault_wire_types_reject_unknown_fields() {
         .insert("admin".into(), serde_json::json!(true));
     assert!(serde_json::from_value::<crypto_core::Registration>(reg_json).is_err());
 }
+
+#[test]
+fn registration_version_must_match_this_build() {
+    let (_vault, reg, _secret) = Vault::register_with(b"pw", fast_kdf()).unwrap();
+    assert!(reg.validate_version().is_ok());
+
+    // A record claiming a format this build does not implement is refused
+    // rather than read under v1 semantics.
+    for version in [0u8, 2, 42] {
+        let mut tampered = serde_json::to_value(&reg).unwrap();
+        tampered
+            .as_object_mut()
+            .unwrap()
+            .insert("version".into(), serde_json::json!(version));
+        let tampered: crypto_core::Registration = serde_json::from_value(tampered).unwrap();
+        assert!(
+            tampered.validate_version().is_err(),
+            "version {version} was accepted"
+        );
+    }
+}
