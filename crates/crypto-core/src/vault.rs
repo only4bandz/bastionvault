@@ -110,6 +110,24 @@ pub struct Registration {
     pub auth_secret: AuthSecret,
 }
 
+impl Registration {
+    /// Rejects a registration whose format this build does not implement.
+    ///
+    /// `version` exists so the schema can migrate without breaking existing
+    /// accounts, but nothing read it: a server (or a mangled stored session)
+    /// could present any value and unlock proceeded, interpreting every field
+    /// under v1 semantics. That is the same unauthenticated-metadata mistake
+    /// the AEAD envelope avoids by binding its own `v` into the AAD. Checking
+    /// it means a future v2 record fails cleanly on a v1 client instead of
+    /// being mis-parsed.
+    pub fn validate_version(&self) -> Result<()> {
+        if self.version != aead::FORMAT_VERSION {
+            return Err(CryptoError::Malformed);
+        }
+        Ok(())
+    }
+}
+
 /// An unlocked vault: holds the vault key in the clear (in memory, wiped on
 /// drop) and can encrypt/decrypt items.
 pub struct Vault {
