@@ -82,9 +82,32 @@ fn send_blob_format_is_stable() {
     assert_eq!(opened.sender, Sender::Verified("AID".to_string()));
 }
 
+/// The lock-phrase (pinlock) record format. A drift in the Argon2id→HKDF lock
+/// key chain, the commitment derivation, or the length-prefixed AAD framing
+/// would make every stored locked record unopenable — round-trip tests cannot
+/// see it because they re-derive both sides.
+#[test]
+fn locked_record_format_is_stable() {
+    let phrase = b"orange kettle drum";
+    let salt = [0x33u8; 16];
+
+    let record: crypto_core::LockedRecord = serde_json::from_str(FROZEN_LOCKED_RECORD).unwrap();
+    let opened = crypto_core::lock_open(&record, phrase, &salt, kat_kdf()).unwrap();
+    assert_eq!(&*opened.plaintext, b"kat-plaintext");
+    assert_eq!(opened.sender, Sender::Verified("AID".to_string()));
+
+    // A wrong phrase fails closed at the commitment, with no plaintext.
+    assert!(crypto_core::lock_open(&record, b"wrong phrase", &salt, kat_kdf()).is_err());
+}
+
 fn identity(b64: &str) -> IdentityKeys {
     IdentityKeys::from_bytes(&B64.decode(b64).unwrap()).unwrap()
 }
 
 // A signed blob produced by the current implementation and frozen.
 const FROZEN_SEND_BLOB: &str = r#"{"v":1,"type":"send","message_id":"C0+YVgpEBKPL4jFtc12dZw==","recipient_id":"BID","recipient_enc_pub":"m3vakeXpSNXx8kxZvQiwTOai6l97CrjOhRjkAkq7q3A=","recipient_key_version":1,"eph_pub":"GXGH9em0zNu5Kz1NwT0Uob0+YuJqRYeYRiJby/nOHTI=","wrapped_cek":{"v":1,"nonce":"QZPVZntrLBXEPMqp9hT/sFolIzybrjuF","ct":"oSMScaL8yD9dm3WtpfW1oCkUxvTutVnN18Q/XENJh+VMZ7LzJX9K32Hd9n+p0aAr"},"cek_commit":"DBHmDIfPNSk+gyW4gH7wWed+FZAzR8E9lnvjTiDpt7o=","body":{"v":1,"nonce":"qVe5JV2C/6e74/RGT3Af97/yM1Ivip+S","ct":"are9RWFe7eoAOLiknj/GJd6C8WC3x5SHS7RMDxkqAHyMrYG4wJw84E+bE1n7ZX/ttkJ5hiQvT0rrl47jaB7AL6VmUNYShAsN/Z9kUWx1Lf4A0Sk/yhu818fSt7w7zr2OUgBDSUioSU39GVRFrywq/nNtPQszogwg4xw1UCConHPIs0bNJ0gp6GieDwLaYkhVmEOCCVZY194Gpyo4FBYKOLU3oVCuimaB2S823kL1zd2WhGnMH16Zpsyt+mJQFaUxWG6RHO/Tnzz04oKdQ/NDF2E6qDWYSsKIy5VMwKqys/rSoglUMa7/gXNxhvJ2LO3QBPdwRAHEQpJp8UnREAT5PBJ0Rnqu61/l+8bbPgAVbMg="}}"#;
+
+// A locked record produced by the current implementation (from
+// FROZEN_SEND_BLOB, contact "contact-kat", phrase "orange kettle drum",
+// salt 0x33×16, KAT params) and frozen.
+const FROZEN_LOCKED_RECORD: &str = r#"{"v":1,"local_id":"r3daXYlHjd5HXD4llHIWNg==","contact_id":"contact-kat","message_id":"C0+YVgpEBKPL4jFtc12dZw==","lock_commit":"TUTbRJf4XID6buYVMXzcCoNr41a4f80i4lfUUXoUmvQ=","body":{"v":1,"nonce":"3bunx2q/K2quCHIVv/DGtspDeVk+rwU8","ct":"Zr/Y05Y79zBK0G0r9lLirEha1lviO7atJX+UlKrqVXtAOrONn6ETU2VU8WflDFV8pSAh/491O6dbmZiZA7SMhVzos4BsHNl1hZwa2WxfJEE2buQoq5yM"},"created_at":1700000000}"#;
