@@ -3130,9 +3130,33 @@ async fn bastion_send_directory_and_inbox_flow() {
     let (s, _) = send(&app, "POST", "/send", Some(&alice), Some(post(&blob, None))).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 
-    // Replay (same message_id) → 409.
+    // Replay (same message_id) is answered idempotently, and stores nothing
+    // new. A distinct status would tell the sender whether that exact message
+    // is still in the recipient's inbox — a covert read receipt.
     let (s, _) = send(&app, "POST", "/send", Some(&alice), Some(post(&blob, None))).await;
-    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    // Delivery, then deletion, then a replay of the same envelope: every
+    // answer is identical, so a sender cannot use POST as a read receipt to
+    // learn whether the recipient still holds (or has deleted) the message.
+    let (_, inbox) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
+    let delivered_id = inbox[0]["message_id"].as_str().unwrap().to_string();
+    let (s, _) = send(
+        &app,
+        "DELETE",
+        &format!("/send/inbox/{delivered_id}"),
+        Some(&bob),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (after_delete, _) =
+        send(&app, "POST", "/send", Some(&alice), Some(post(&blob, None))).await;
+    assert_eq!(
+        after_delete,
+        StatusCode::NO_CONTENT,
+        "POST distinguished a deleted message from a stored one"
+    );
 
     // A well-formed but unknown recipient remains a 404.
     let unknown_blob = send_seal(b"unknown", &unknown_id, &bob_v1_public, None, None).unwrap();
