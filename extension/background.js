@@ -19,7 +19,9 @@
 import init, { unlock, rehydrate, send_safety_number, send_lock_open, send_lock_new_params } from "./pkg/crypto_wasm.js";
 import {
   autofillPolicyError,
+  contentMayClearPending,
   credentialPageError,
+  savePipelineError,
   validatedAutofillTarget,
   frameAutofillError,
 } from "./lib/autofill-policy.js";
@@ -949,9 +951,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         case "STAGE_USER": {
           // Username/email typed (often on a prior step than the password).
-          // Insecure-HTTP pages can be attacker-authored (network MITM): they
-          // must not feed the save pipeline either — same rule as fills.
-          if (!senderHost || senderCredentialError) {
+          // Insecure-HTTP pages and third-party iframes must not feed the
+          // save pipeline — same rules as fills.
+          if (savePipelineError(senderHost, senderCredentialError, senderFrameError)) {
             return sendResponse({ ok: false, error: "forbidden" });
           }
           await setLastUser(msg.username, senderHost);
@@ -962,7 +964,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // Form submitted with a password — remember it so we can offer to save
           // once the page settles. Host/URL are taken from the SENDER frame, not
           // the message, so a page can't stage a save for another origin.
-          if (msg.password && senderHost && !senderCredentialError) {
+          if (msg.password && !savePipelineError(senderHost, senderCredentialError, senderFrameError)) {
             const stagedUser = await takeLastUser(senderHost);
             await setPending({
               host: senderHost,
@@ -979,7 +981,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // the non-secret bits; the password stays in the worker. Passive — no
           // keep-unlock extension. Host comes from the sender.
           const p = await getPending();
-          if (p && senderHost && !senderCredentialError && matchesSite(p.url || p.host, senderHost)) {
+          if (
+            p &&
+            !savePipelineError(senderHost, senderCredentialError, senderFrameError) &&
+            matchesSite(p.url || p.host, senderHost)
+          ) {
             const s = session;
             const dup =
               s && [...s.items.values()].some((it) => it.type === "login" && it.username === p.username && matchesSite(it.url || it.title, senderHost));
@@ -999,7 +1005,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // dedupe path, overwrite) a credential staged on site X. Host and
           // title are taken from the staged pending (host-bound at STAGE_SAVE),
           // never from the message.
-          if (!senderHost || senderCredentialError || !matchesSite(p.url || p.host, senderHost)) {
+          if (
+            savePipelineError(senderHost, senderCredentialError, senderFrameError) ||
+            !matchesSite(p.url || p.host, senderHost)
+          ) {
             return sendResponse({ ok: false, error: "forbidden" });
           }
           await touchSession();
@@ -1021,12 +1030,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: true });
           break;
         }
-        case "CLEAR_PENDING":
-          await clearPending();
-          lastUser = null;
-          await (await trustedSessionArea()).remove("lastUser");
+        case "CLEAR_PENDING": {
+          // The popup may always discard staged state. A content frame may
+          // only discard what was staged for its OWN site — otherwise any
+          // page (even an ad iframe) could silently destroy another site's
+          // pending save or staged username.
+          if (isExtPage) {
+            await clearPending();
+            lastUser = null;
+            await (await trustedSessionArea()).remove("lastUser");
+            sendResponse({ ok: true });
+            break;
+          }
+          const p = await getPending();
+          if (contentMayClearPending(p, senderHost, senderFrameError)) {
+            await clearPending();
+          }
+          const area = await trustedSessionArea();
+          if (!lastUser) lastUser = (await area.get("lastUser")).lastUser || null;
+          if (lastUser && stagedUsernameFor(lastUser, senderHost)) {
+            lastUser = null;
+            await area.remove("lastUser");
+          }
           sendResponse({ ok: true });
           break;
+        }
         case "CLIP_CLEAR": {
           // The popup copied a secret and wants it wiped after the delay. The
           // popup's own timer dies when it closes, so the offscreen document
