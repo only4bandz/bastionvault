@@ -5602,12 +5602,17 @@ async fn send_post(
         .await
         .map_err(db_api_error)?
     {
-        InboxInsert::Inserted => Ok(StatusCode::NO_CONTENT),
-        InboxInsert::Duplicate => Err(ApiError(StatusCode::CONFLICT, "duplicate message")),
-        InboxInsert::Full => Err(ApiError(
-            StatusCode::TOO_MANY_REQUESTS,
-            "recipient inbox full",
-        )),
+        // A duplicate is the correct idempotent answer to a retried POST —
+        // and answering 409 made it a covert read receipt: nothing here
+        // checks that a blob is decryptable, so any authenticated caller
+        // could re-post a chosen `message_id` and learn from 409-vs-204
+        // whether that exact message was still sitting in the target's
+        // inbox. A sender got a silent read/delete receipt on every note.
+        InboxInsert::Inserted | InboxInsert::Duplicate => Ok(StatusCode::NO_CONTENT),
+        // "Full" is likewise the recipient's state, not the sender's. It now
+        // shares the rate limiter's shape and wording so a stranger cannot
+        // separate "you are throttled" from "their inbox is full".
+        InboxInsert::Full => Err(ApiError(StatusCode::TOO_MANY_REQUESTS, "rate limited")),
         InboxInsert::UnknownRecipient => Err(ApiError(StatusCode::NOT_FOUND, "unknown recipient")),
     }
 }
