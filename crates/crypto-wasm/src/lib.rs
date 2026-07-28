@@ -544,8 +544,9 @@ impl Account {
     /// (`items_json` = object `{ id: encryptedBlob }`). Digest computation and
     /// ordering stay inside the audited Rust implementation.
     pub fn manifest_from_items(&self, items_json: &str) -> Result<String, JsError> {
-        let items: HashMap<String, EncryptedBlob> =
-            serde_json::from_str(items_json).map_err(js_err)?;
+        // Duplicate-preserving too: `Manifest::from_items` rejects a repeated
+        // id outright, and that check is only reachable if the parse kept it.
+        let items = parse_item_pairs(items_json).map_err(js_err)?;
         let present: Vec<(&str, &EncryptedBlob)> =
             items.iter().map(|(id, blob)| (id.as_str(), blob)).collect();
         let manifest = Manifest::from_items(&present).map_err(js_err)?;
@@ -625,13 +626,54 @@ impl Account {
     pub fn check_manifest(&self, manifest_json: &str, items_json: &str) -> Result<String, JsError> {
         let manifest: Manifest = serde_json::from_str(manifest_json).map_err(js_err)?;
         manifest.validate().map_err(js_err)?;
-        let items: HashMap<String, EncryptedBlob> =
-            serde_json::from_str(items_json).map_err(js_err)?;
+        let items = parse_item_pairs(items_json).map_err(js_err)?;
         let present: Vec<(&str, &EncryptedBlob)> =
             items.iter().map(|(id, blob)| (id.as_str(), blob)).collect();
         let report = manifest.check(&present);
         serde_json::to_string(&report).map_err(js_err)
     }
+}
+
+/// Parses the server's item map while **preserving duplicate ids**.
+///
+/// `Manifest::check` reports ids served twice ("the server may be trying to
+/// hide an item behind a namesake"), but deserializing into a `HashMap` — or
+/// into `serde_json::Value`, whose maps behave the same — silently keeps only
+/// the last value for a repeated JSON key. A hostile server could therefore
+/// serve `{"id":blobA,"id":blobB}`: blobA vanished before `check` ever ran,
+/// the duplicates report stayed empty, and the substituted blob was what got
+/// digest-compared. Collecting pairs keeps that defense reachable.
+fn parse_item_pairs(items_json: &str) -> serde_json::Result<Vec<(String, EncryptedBlob)>> {
+    struct Pairs(Vec<(String, EncryptedBlob)>);
+
+    impl<'de> serde::Deserialize<'de> for Pairs {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct PairsVisitor;
+
+            impl<'de> serde::de::Visitor<'de> for PairsVisitor {
+                type Value = Pairs;
+
+                fn expecting(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                    f.write_str("a map of item id to encrypted blob")
+                }
+
+                fn visit_map<M: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: M,
+                ) -> Result<Pairs, M::Error> {
+                    let mut out = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                    while let Some(entry) = map.next_entry::<String, EncryptedBlob>()? {
+                        out.push(entry);
+                    }
+                    Ok(Pairs(out))
+                }
+            }
+
+            deserializer.deserialize_map(PairsVisitor)
+        }
+    }
+
+    serde_json::from_str::<Pairs>(items_json).map(|pairs| pairs.0)
 }
 
 /// Creates a new account with the default KDF parameters (64 MiB).
@@ -744,4 +786,49 @@ pub fn rehydrate(session_json: String) -> Result<Account, JsError> {
         auth_secret,
         identity: None,
     })
+}
+
+#[cfg(test)]
+mod manifest_parsing {
+    //! A hostile server may repeat a JSON key. `HashMap`/`Value` parsing keeps
+    //! only the last value, which silently disarmed both the duplicates report
+    //! and `Manifest::from_items`'s rejection.
+    use super::*;
+
+    const DUPLICATE_IDS: &str = r#"{
+      "a": { "v": 1, "nonce": "AAAA", "ct": "AAAA" },
+      "a": { "v": 1, "nonce": "BBBB", "ct": "BBBB" }
+    }"#;
+
+    #[test]
+    fn duplicate_ids_survive_parsing() {
+        let pairs = parse_item_pairs(DUPLICATE_IDS).unwrap();
+        assert_eq!(pairs.len(), 2, "a duplicated id was silently dropped");
+        assert_eq!(pairs[0].0, "a");
+        assert_eq!(pairs[1].0, "a");
+        assert_ne!(pairs[0].1.ct, pairs[1].1.ct, "both blobs must be kept");
+    }
+
+    #[test]
+    fn duplicate_ids_are_reported_and_refuse_a_manifest() {
+        let pairs = parse_item_pairs(DUPLICATE_IDS).unwrap();
+        let present: Vec<(&str, &EncryptedBlob)> =
+            pairs.iter().map(|(id, blob)| (id.as_str(), blob)).collect();
+
+        // The integrity report names the namesake instead of hiding it…
+        let manifest = Manifest::from_items(&present[..1]).unwrap();
+        assert_eq!(manifest.check(&present).duplicates, vec!["a".to_string()]);
+        // …and a manifest can never be built over a duplicated id.
+        assert!(Manifest::from_items(&present).is_err());
+    }
+
+    #[test]
+    fn ordinary_item_maps_still_parse() {
+        let pairs = parse_item_pairs(
+            r#"{"a":{"v":1,"nonce":"AAAA","ct":"AAAA"},"b":{"v":1,"nonce":"BBBB","ct":"BBBB"}}"#,
+        )
+        .unwrap();
+        assert_eq!(pairs.len(), 2);
+        assert!(parse_item_pairs("[]").is_err());
+    }
 }
