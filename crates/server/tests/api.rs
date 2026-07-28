@@ -1429,6 +1429,31 @@ async fn logout_through_a_rotation_predecessor_revokes_its_successor() {
 }
 
 #[tokio::test]
+async fn replaying_a_used_predecessor_revokes_the_whole_family() {
+    let app = server::app_in_memory();
+    let token = registered_session(&app, "reuse@example.com").await;
+
+    // Rotate, then actually USE the successor: that is what separates a
+    // lost-response retry (successor never used → reissue) from a replay of
+    // the predecessor (successor already live → the family is compromised).
+    let (status, body) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let successor = body["token"].as_str().unwrap().to_string();
+    let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Replaying the predecessor is refused…
+    let (status, _) = send(&app, "PUT", "/sessions", Some(&token), Some(json!({}))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // …and takes the live successor down with it, rather than leaving the
+    // attacker's target authenticated.
+    let (status, _) = send(&app, "GET", "/vault", Some(&successor), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn rotation_never_extends_the_absolute_session_ceiling() {
     let app = server::app_in_memory_with_session_lifetimes(
         std::time::Duration::from_secs(1),
