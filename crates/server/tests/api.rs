@@ -1787,6 +1787,61 @@ async fn logout_still_revokes_the_live_session() {
 }
 
 #[tokio::test]
+async fn a_message_without_an_expiry_still_gets_a_bounded_lifetime() {
+    let path = test_db_path("send-lifetime");
+    let app = server::app_with_db(&path);
+    let alice = signup_login(&app, "alice@example.com").await;
+    let bob = signup_login(&app, "bob@example.com").await;
+
+    let bob_identity = IdentityKeys::generate(1);
+    let (_, published) = send(
+        &app,
+        "PUT",
+        "/send/identity",
+        Some(&bob),
+        Some(serde_json::to_value(bob_identity.public()).unwrap()),
+    )
+    .await;
+    let bob_id = published["bastion_id"].as_str().unwrap().to_string();
+
+    // Deliver with no expiry at all: the sender simply omitted the field.
+    let blob = send_seal(b"no expiry", &bob_id, &bob_identity.public(), None, None).unwrap();
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/send",
+        Some(&alice),
+        Some(json!({
+            "recipient_id": blob.recipient_id,
+            "message_id": blob.message_id,
+            "blob": blob,
+            "expires_at": null,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A NULL deadline was never purged, so a handful of senders could occupy
+    // an inbox permanently. Every stored row must now carry a bounded one.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    let (created_at, expires_at): (i64, Option<i64>) = conn
+        .query_row(
+            "SELECT created_at, expires_at FROM send_inbox WHERE recipient_id=?1",
+            [&bob_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(conn);
+
+    let expires_at = expires_at.expect("a stored message kept a NULL deadline");
+    assert!(expires_at > created_at, "deadline must be in the future");
+    assert!(
+        expires_at <= created_at + 7 * 24 * 60 * 60,
+        "deadline must not exceed the maximum send lifetime"
+    );
+}
+
+#[tokio::test]
 async fn health_ok() {
     let app = server::app_in_memory();
     for route in ["/health", "/livez", "/readyz"] {
@@ -3139,12 +3194,15 @@ async fn bastion_send_directory_and_inbox_flow() {
     // Delivery, then deletion, then a replay of the same envelope: every
     // answer is identical, so a sender cannot use POST as a read receipt to
     // learn whether the recipient still holds (or has deleted) the message.
-    let (_, inbox) = send(&app, "GET", "/send/inbox", Some(&bob), None).await;
-    let delivered_id = inbox[0]["message_id"].as_str().unwrap().to_string();
+    let delivered_path = blob
+        .message_id
+        .replace('+', "%2B")
+        .replace('/', "%2F")
+        .replace('=', "%3D");
     let (s, _) = send(
         &app,
         "DELETE",
-        &format!("/send/inbox/{delivered_id}"),
+        &format!("/send/inbox/{delivered_path}"),
         Some(&bob),
         None,
     )
