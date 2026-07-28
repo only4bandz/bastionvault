@@ -135,15 +135,38 @@ export function requireContactsPayload(value: unknown): Contact[] {
   return value as Contact[];
 }
 
+/**
+ * The address the server reports must belong to the identity this device
+ * holds. `whoami` was previously trusted verbatim: a malicious server could
+ * answer with an attacker's `bastion_id` and public key, the user would
+ * display and hand out that address as their own, and everyone who added it
+ * without comparing safety numbers would encrypt to the attacker — while the
+ * victim's real inbox stayed silent, since the server resolves inboxes by
+ * account, not by the address it advertised.
+ */
+function assertOwnIdentity(account: Account, who: { public: SendPublic }): void {
+  const mine = JSON.parse(account.send_identity_public()) as SendPublic;
+  if (canonPublic(mine) !== canonPublic(who.public)) {
+    throw new Error(
+      "The server published a different Send key for this account. " +
+        "Your address was not shown — do not share it, and contact the server operator."
+    );
+  }
+}
+
 /** Whether Send is enabled on this account, and the published Bastion address. */
 export async function sendState(account: Account, token: string): Promise<SendState> {
   const enabled = account.has_send_identity;
   let bastionId: string | null = null;
   if (enabled) {
     try {
-      bastionId = (await api.whoami(token)).bastion_id;
+      const who = await api.whoami(token);
+      assertOwnIdentity(account, who);
+      bastionId = who.bastion_id;
     } catch {
-      bastionId = null; // enabled locally but not published yet
+      // Enabled locally but not published yet — or the server answered with
+      // an identity that is not ours, in which case no address is shown.
+      bastionId = null;
     }
   }
   return { enabled, bastionId };
@@ -165,6 +188,9 @@ export async function sendEnable(
   } catch (e) {
     if (!(e instanceof ApiError && e.status === 404)) throw e;
   }
+  // Only meaningful once this device holds an identity to compare against;
+  // the "no local identity" branch below handles the other case.
+  if (who && account.has_send_identity) assertOwnIdentity(account, who);
   if (!account.has_send_identity) {
     if (who) {
       return { error: "Send is already enabled on another device. Unlock that device to use Send here." };

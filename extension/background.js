@@ -99,6 +99,20 @@ const lockContactFor = (s, id) => (s.contacts || []).find((c) => c.bastion_id ==
 
 // Canonical JSON of a PublicIdentity (stable key order) for fingerprinting.
 const canonPublic = (pub) => JSON.stringify(pub, Object.keys(pub).sort());
+
+// The address the server reports must belong to the identity this device
+// holds. Trusting `whoami` verbatim let a malicious server hand back an
+// attacker's address and key: the user would publish and share that address
+// as their own, everyone adding it without comparing safety numbers would
+// encrypt to the attacker, and the victim's real inbox would stay silent.
+function assertOwnSendIdentity(account, who) {
+  const mine = JSON.parse(account.send_identity_public());
+  if (canonPublic(mine) !== canonPublic(who.public)) {
+    throw new Error(
+      "The server published a different Send key for this account. Do not share this address."
+    );
+  }
+}
 async function sha256hex(str) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -1122,9 +1136,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           let bastionId = s.sendBastionId || null;
           if (enabled && !bastionId) {
             try {
-              bastionId = (await makeApi(s.server).whoami(s.token))?.bastion_id || null;
+              const who = await makeApi(s.server).whoami(s.token);
+              assertOwnSendIdentity(s.account, who);
+              bastionId = who?.bastion_id || null;
               s.sendBastionId = bastionId;
             } catch {
+              // Not published yet, or the server answered with an identity
+              // that is not ours: show no address either way.
               bastionId = null;
             }
           }
@@ -1145,6 +1163,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (s.account.has_send_identity) {
             // Identity already created locally. Make sure it's published (this
             // self-heals an earlier publish that failed, e.g. a stale server).
+            if (who) assertOwnSendIdentity(s.account, who);
             const bastionId =
               who?.bastion_id ||
               (await api.publishIdentity(s.token, JSON.parse(s.account.send_identity_public()))).bastion_id;

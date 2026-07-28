@@ -1,6 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Account } from "./wasm";
-import { openMessage, requireContactsPayload, type Contact } from "./send";
+import { api } from "./api";
+import {
+  openMessage,
+  requireContactsPayload,
+  sendEnable,
+  sendState,
+  type Contact,
+} from "./send";
 
 const contact: Contact = {
   bastion_id: "ALICE",
@@ -127,6 +134,48 @@ describe("Send passphrase prompting", () => {
     } as unknown as Account;
     const opened = openMessage(account, [contact], protectedBlob, "wrong");
     expect(opened.error).toMatch(/wrong passphrase/i);
+  });
+});
+
+describe("Send identity ownership", () => {
+  const mine = { enc_pub: Array(32).fill(1), sig_pub: Array(32).fill(2), key_version: 1 };
+  const attacker = { enc_pub: Array(32).fill(9), sig_pub: Array(32).fill(8), key_version: 1 };
+
+  function accountWithIdentity(): Account {
+    return {
+      has_send_identity: true,
+      send_identity_public: () => JSON.stringify(mine),
+    } as unknown as Account;
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("shows no address when the server reports a different identity", async () => {
+    // A malicious server answers whoami with an attacker's address and key.
+    // Publishing it as "your Bastion address" would route every future note
+    // to the attacker while the victim's own inbox stayed silent.
+    vi.spyOn(api, "whoami").mockResolvedValue({ bastion_id: "ATTACKER", public: attacker });
+
+    const state = await sendState(accountWithIdentity(), "token");
+    expect(state.enabled).toBe(true);
+    expect(state.bastionId).toBeNull();
+  });
+
+  it("accepts the address when the reported identity is ours", async () => {
+    vi.spyOn(api, "whoami").mockResolvedValue({ bastion_id: "MINE", public: mine });
+
+    const state = await sendState(accountWithIdentity(), "token");
+    expect(state.bastionId).toBe("MINE");
+  });
+
+  it("refuses to enable against a foreign published identity", async () => {
+    vi.spyOn(api, "whoami").mockResolvedValue({ bastion_id: "ATTACKER", public: attacker });
+
+    await expect(
+      sendEnable(accountWithIdentity(), "token", async () => undefined)
+    ).rejects.toThrow(/different Send key/i);
   });
 });
 
