@@ -131,6 +131,13 @@ impl AccountSecret {
         Ok(out)
     }
 
+    /// Test-only constructor for known-answer vectors; production keys come
+    /// only from the CSPRNG or from parsing a formatted key.
+    #[cfg(test)]
+    pub(crate) fn from_bytes_for_tests(bytes: [u8; ACCOUNT_SECRET_LEN]) -> Self {
+        Self(bytes)
+    }
+
     /// "Emergency Kit" text to print and keep offline.
     ///
     /// Contains the Secret Key (recoverable nowhere else) and a space to write
@@ -152,5 +159,65 @@ impl AccountSecret {
             account_label = account_label,
             secret = self.to_formatted(),
         )
+    }
+}
+
+#[cfg(test)]
+mod kat {
+    //! Golden vectors for the formatted Secret Key encoding. The checksum
+    //! domain label, base32 grouping, and version tag are all format-bearing:
+    //! a silent change to any of them would invalidate every printed
+    //! Emergency Kit while round-trip tests kept passing.
+    use super::*;
+
+    const KAT_BYTES: [u8; ACCOUNT_SECRET_LEN] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f,
+    ];
+    const KAT_FORMATTED: &str = "A1-AAAQE-AYEAU-DAOCA-JBIFQ-YDIOB-4D3U";
+
+    #[test]
+    fn formatted_encoding_vector() {
+        let secret = AccountSecret::from_bytes_for_tests(KAT_BYTES);
+        assert_eq!(secret.to_formatted(), KAT_FORMATTED);
+    }
+
+    #[test]
+    fn parse_accepts_the_vector_and_tolerated_formattings() {
+        for input in [
+            KAT_FORMATTED.to_string(),
+            KAT_FORMATTED.to_lowercase(),
+            KAT_FORMATTED.replace('-', " "),
+            KAT_FORMATTED[3..].to_string(), // version prefix omitted
+        ] {
+            let parsed = AccountSecret::parse(&input).unwrap();
+            assert_eq!(parsed.as_bytes(), &KAT_BYTES, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn parse_rejects_any_single_character_typo() {
+        // Substituting every body position with a different base32 character
+        // must trip the checksum — this is the property the Emergency Kit
+        // relies on to catch a hand-typed mistake before Argon2id runs.
+        let body: Vec<char> = KAT_FORMATTED.chars().collect();
+        let mut rejected = 0;
+        for (i, original) in body.iter().enumerate() {
+            if !original.is_ascii_alphanumeric() || i < 2 {
+                continue; // skip separators and the version tag
+            }
+            let replacement = if *original == 'Z' { '2' } else { 'Z' };
+            let mut typo: Vec<char> = body.clone();
+            typo[i] = replacement;
+            let typo: String = typo.into_iter().collect();
+            assert!(
+                AccountSecret::parse(&typo).is_err(),
+                "typo at {i} accepted: {typo}"
+            );
+            rejected += 1;
+        }
+        // 29 base32 body characters (⌈144 bits / 5⌉; the version tag is
+        // skipped) — every one must be covered.
+        assert_eq!(rejected, 29, "expected every body character to be covered");
     }
 }
