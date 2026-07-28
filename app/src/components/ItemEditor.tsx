@@ -253,7 +253,19 @@ export function ItemEditor({
 
           <div className="field">
             <label htmlFor="item-notes">Notes</label>
-            <textarea id="item-notes" className="textarea" value={item.notes ?? ""} onChange={(e) => set("notes", e.target.value)} />
+            {/* Notes are vault plaintext (a Secure Note's entire content, or
+                recovery codes stashed on a login): keep them away from cloud
+                spell-check and autocorrect, same rule as SecretInput. */}
+            <textarea
+              id="item-notes"
+              className="textarea"
+              value={item.notes ?? ""}
+              onChange={(e) => set("notes", e.target.value)}
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="none"
+              autoComplete="off"
+            />
           </div>
       </Dialog>
       {confirmingDiscard && (
