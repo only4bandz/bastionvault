@@ -46,18 +46,37 @@ fn js_err<E: core::fmt::Display>(e: E) -> JsError {
     JsError::new(&e.to_string())
 }
 
-fn serialize_opened_message(opened: send::OpenedMessage) -> Result<String, JsError> {
-    let plaintext = String::from_utf8(opened.plaintext.to_vec()).map_err(js_err)?;
-    let (state, id) = match opened.sender {
+/// Wire shape of an opened message. Borrowing rather than owning keeps the
+/// plaintext from being cloned into an unwiped `serde_json::Value` on its way
+/// out: the only copy that outlives this call is the JSON string handed to JS.
+#[derive(serde::Serialize)]
+struct OpenedJson<'a> {
+    plaintext: &'a str,
+    sender: SenderJson<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct SenderJson<'a> {
+    state: &'a str,
+    id: Option<&'a str>,
+}
+
+fn serialize_opened(plaintext: &[u8], sender: Sender) -> Result<String, JsError> {
+    let plaintext = core::str::from_utf8(plaintext).map_err(js_err)?;
+    let (state, id) = match &sender {
         Sender::Anonymous => ("anonymous", None),
-        Sender::Unverified(id) => ("unverified", Some(id)),
-        Sender::Verified(id) => ("verified", Some(id)),
+        Sender::Unverified(id) => ("unverified", Some(id.as_str())),
+        Sender::Verified(id) => ("verified", Some(id.as_str())),
     };
-    serde_json::to_string(&serde_json::json!({
-        "plaintext": plaintext,
-        "sender": { "state": state, "id": id },
-    }))
+    serde_json::to_string(&OpenedJson {
+        plaintext,
+        sender: SenderJson { state, id },
+    })
     .map_err(js_err)
+}
+
+fn serialize_opened_message(opened: send::OpenedMessage) -> Result<String, JsError> {
+    serialize_opened(&opened.plaintext, opened.sender)
 }
 
 fn serialize_key_change(sender_id: &str) -> Result<String, JsError> {
@@ -117,23 +136,17 @@ pub fn send_lock_new_params() -> Result<String, JsError> {
 #[wasm_bindgen]
 pub fn send_lock_open(
     record_json: &str,
-    lock_phrase: &str,
+    lock_phrase: String,
     lock_salt_b64: &str,
     lock_kdf_json: &str,
 ) -> Result<String, JsError> {
     let record: LockedRecord = serde_json::from_str(record_json).map_err(js_err)?;
     let salt = decode_salt(lock_salt_b64)?;
     let kdf_params: KdfParams = serde_json::from_str(lock_kdf_json).map_err(js_err)?;
+    let lock_phrase = Zeroizing::new(lock_phrase);
     let opened =
         pinlock::lock_open(&record, lock_phrase.as_bytes(), &salt, kdf_params).map_err(js_err)?;
-    let plaintext = String::from_utf8(opened.plaintext.to_vec()).map_err(js_err)?;
-    let (state, id) = match opened.sender {
-        Sender::Anonymous => ("anonymous", None),
-        Sender::Unverified(id) => ("unverified", Some(id)),
-        Sender::Verified(id) => ("verified", Some(id)),
-    };
-    let out = serde_json::json!({ "plaintext": plaintext, "sender": { "state": state, "id": id } });
-    serde_json::to_string(&out).map_err(js_err)
+    serialize_opened(&opened.plaintext, opened.sender)
 }
 
 /// Safety number to compare out-of-band with a contact — binds both Bastion
@@ -278,7 +291,11 @@ impl Account {
     pub fn decrypt_item(&self, blob_json: &str, item_id: &str) -> Result<String, JsError> {
         let blob: EncryptedBlob = serde_json::from_str(blob_json).map_err(js_err)?;
         let plain = self.vault()?.decrypt_item(&blob, item_id).map_err(js_err)?;
-        String::from_utf8(plain.to_vec()).map_err(js_err)
+        // Borrow the wiped-on-drop buffer instead of cloning it into a plain
+        // Vec first: only the String handed to JS survives this call.
+        core::str::from_utf8(&plain)
+            .map(str::to_owned)
+            .map_err(js_err)
     }
 
     /// Exports the unlocked session as JSON `{ "vault_key": "<b64>",
@@ -381,12 +398,14 @@ impl Account {
     /// recipient). Returns the `SendBlob` JSON to upload.
     pub fn send_seal(
         &self,
-        plaintext: &str,
+        plaintext: String,
         recipient_id: &str,
         recipient_public_json: &str,
         passphrase: Option<String>,
         sender_id: Option<String>,
     ) -> Result<String, JsError> {
+        let plaintext = Zeroizing::new(plaintext);
+        let passphrase = passphrase.map(Zeroizing::new);
         let recip: PublicIdentity = serde_json::from_str(recipient_public_json).map_err(js_err)?;
         let signer = match &sender_id {
             Some(id) => Some((self.identity()?, id.as_str())),
@@ -396,7 +415,7 @@ impl Account {
             plaintext.as_bytes(),
             recipient_id,
             &recip,
-            passphrase.as_deref().map(str::as_bytes),
+            passphrase.as_ref().map(|p| p.as_bytes()),
             signer,
         )
         .map_err(js_err)?;
@@ -413,6 +432,7 @@ impl Account {
         passphrase: Option<String>,
         verify_sender_json: Option<String>,
     ) -> Result<String, JsError> {
+        let passphrase = passphrase.map(Zeroizing::new);
         let blob: send::SendBlob = serde_json::from_str(blob_json).map_err(js_err)?;
         let verifier: Option<PublicIdentity> = match &verify_sender_json {
             Some(j) => Some(serde_json::from_str(j).map_err(js_err)?),
@@ -421,7 +441,7 @@ impl Account {
         let opened = send::open(
             &blob,
             self.identity()?,
-            passphrase.as_deref().map(str::as_bytes),
+            passphrase.as_ref().map(|p| p.as_bytes()),
             verifier.as_ref(),
         )
         .map_err(js_err)?;
@@ -445,7 +465,7 @@ impl Account {
         let opened = send::open(
             &blob,
             self.identity()?,
-            passphrase.as_deref().map(str::as_bytes),
+            passphrase.as_ref().map(|p| p.as_bytes()),
             None,
         )
         .map_err(js_err)?;
@@ -458,7 +478,7 @@ impl Account {
         match send::open(
             &blob,
             self.identity()?,
-            passphrase.as_deref().map(str::as_bytes),
+            passphrase.as_ref().map(|p| p.as_bytes()),
             Some(verifier),
         ) {
             Ok(verified) if matches!(&verified.sender, Sender::Verified(id) if id == &sender_id) => {
@@ -490,10 +510,12 @@ impl Account {
         created_at: f64,
         send_passphrase: Option<String>,
         verify_sender_json: Option<String>,
-        lock_phrase: &str,
+        lock_phrase: String,
         lock_salt_b64: &str,
         lock_kdf_json: &str,
     ) -> Result<String, JsError> {
+        let lock_phrase = Zeroizing::new(lock_phrase);
+        let send_passphrase = send_passphrase.map(Zeroizing::new);
         let blob: send::SendBlob = serde_json::from_str(blob_json).map_err(js_err)?;
         let verifier: Option<PublicIdentity> = match &verify_sender_json {
             Some(j) => Some(serde_json::from_str(j).map_err(js_err)?),
@@ -504,7 +526,7 @@ impl Account {
         let record = pinlock::lock_finalize(
             &blob,
             self.identity()?,
-            send_passphrase.as_deref().map(str::as_bytes),
+            send_passphrase.as_ref().map(|p| p.as_bytes()),
             verifier.as_ref(),
             contact_id,
             created_at as i64,
@@ -614,7 +636,8 @@ impl Account {
 
 /// Creates a new account with the default KDF parameters (64 MiB).
 #[wasm_bindgen]
-pub fn register(master_password: &str) -> Result<Account, JsError> {
+pub fn register(master_password: String) -> Result<Account, JsError> {
+    let master_password = Zeroizing::new(master_password);
     let (vault, reg, secret) = Vault::register(master_password.as_bytes()).map_err(js_err)?;
     let registration_json = Zeroizing::new(serde_json::to_string(&reg).map_err(js_err)?);
     let auth_secret = Some(Zeroizing::new(reg.auth_secret.expose_b64().to_string()));
@@ -631,7 +654,7 @@ pub fn register(master_password: &str) -> Result<Account, JsError> {
 /// or for tests).
 #[wasm_bindgen]
 pub fn register_with(
-    master_password: &str,
+    master_password: String,
     mem_kib: u32,
     iterations: u32,
     parallelism: u32,
@@ -641,6 +664,7 @@ pub fn register_with(
         iterations,
         parallelism,
     };
+    let master_password = Zeroizing::new(master_password);
     let (vault, reg, secret) =
         Vault::register_with(master_password.as_bytes(), params).map_err(js_err)?;
     let registration_json = Zeroizing::new(serde_json::to_string(&reg).map_err(js_err)?);
@@ -658,12 +682,14 @@ pub fn register_with(
 /// (formatted), and the registration data (JSON returned by the server).
 #[wasm_bindgen]
 pub fn unlock(
-    master_password: &str,
-    secret_key: &str,
+    master_password: String,
+    secret_key: String,
     registration_json: &str,
 ) -> Result<Account, JsError> {
+    let master_password = Zeroizing::new(master_password);
+    let secret_key = Zeroizing::new(secret_key);
     let reg: Registration = serde_json::from_str(registration_json).map_err(js_err)?;
-    let secret = AccountSecret::parse(secret_key).map_err(js_err)?;
+    let secret = AccountSecret::parse(&secret_key).map_err(js_err)?;
     let (vault, auth) = Vault::unlock(
         master_password.as_bytes(),
         &secret,
@@ -691,8 +717,10 @@ pub fn unlock(
 /// torn down. The Secret Key is never present on a rehydrated account, so
 /// `reveal_secret` correctly fails on it.
 #[wasm_bindgen]
-pub fn rehydrate(session_json: &str) -> Result<Account, JsError> {
-    let session: ImportedSession = serde_json::from_str(session_json).map_err(js_err)?;
+pub fn rehydrate(session_json: String) -> Result<Account, JsError> {
+    // Carries the exported vault key; wipe the wasm-side copy on return.
+    let session_json = Zeroizing::new(session_json);
+    let session: ImportedSession = serde_json::from_str(&session_json).map_err(js_err)?;
 
     // Defense in depth: the registration must be well-formed (reject malformed /
     // attacker-mangled stored sessions instead of building a half-valid Account).
