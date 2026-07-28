@@ -180,6 +180,10 @@ const VERIFICATION_TTL_SECONDS: i64 = 30 * 60;
 const VERIFICATION_RESEND_SECONDS: i64 = 2 * 60;
 const MAX_CHALLENGES_GLOBAL_PER_MIN: u32 = 30;
 const MAX_CHALLENGES_PER_SOURCE_PER_MIN: u32 = 10;
+/// Logout is deliberately cheap and always answers 204, so it needs admission
+/// of its own: it is the only endpoint where a caller with no valid
+/// credential could otherwise reach the global write lock at will.
+const MAX_LOGOUTS_PER_SOURCE_PER_MIN: u32 = 60;
 const MAX_CHALLENGES_PER_EMAIL_PER_MIN: u32 = 2;
 /// Standing daily allowance of verification mail per recipient mailbox. The
 /// per-minute bucket only bounds bursts, so an attacker rotating source
@@ -4583,28 +4587,47 @@ fn install_rotated_session(
 /// the caller is using the short-lived predecessor after rotation.
 async fn delete_session(
     State(st): State<AppState>,
+    Extension(source): Extension<ClientSource>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
     let token_hash = session_token_hash(bearer_token(&headers)?);
-    let mut inner = st.write().await;
+    source_auth_rate_limit(&st, source, "logout-source", MAX_LOGOUTS_PER_SOURCE_PER_MIN)?;
     // Deliberately not filtered through the liveness accessors. Revocation is
     // the one direction where honouring a stale token is the safer default: a
     // client logging out with a predecessor whose grace has lapsed should still
     // be able to kill the family's live successor. Nothing is granted here.
-    let family_id = inner
+    //
+    // Probe under the SHARED lock first: any shape-valid token reaches this
+    // handler, so an anonymous caller spraying random tokens must not
+    // serialize logins, rotations, and vault writes behind exclusive
+    // write-lock acquisitions. Only a hit pays for the write lock.
+    let probed = {
+        let inner = st.read().await;
+        session_family(&inner, &token_hash)
+    };
+    if probed.is_some() {
+        let mut inner = st.write().await;
+        // Re-resolve under the write lock: the family may have rotated or
+        // been revoked between the probe and the upgrade.
+        if let Some(family_id) = session_family(&inner, &token_hash) {
+            revoke_session_family(&mut inner, family_id);
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Family lookup by token hash across live and grace-period sessions.
+fn session_family(inner: &Inner, token_hash: &[u8; 32]) -> Option<[u8; 16]> {
+    inner
         .sessions
-        .get(&token_hash)
+        .get(token_hash)
         .map(|session| session.family_id)
         .or_else(|| {
             inner
                 .rotated_sessions
-                .get(&token_hash)
+                .get(token_hash)
                 .map(|session| session.family_id)
-        });
-    if let Some(family_id) = family_id {
-        revoke_session_family(&mut inner, family_id);
-    }
-    Ok(StatusCode::NO_CONTENT)
+        })
 }
 
 /// Revokes every active session for the authenticated account, including the
