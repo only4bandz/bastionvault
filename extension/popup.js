@@ -115,21 +115,6 @@ let currentTabId = null;
 let currentServer = "";
 let vaultState = null;
 
-// Rough local password-strength estimate (no network). Returns {label, ok}.
-function passwordStrength(pw) {
-  if (!pw) return { label: "No password", ok: false, level: 0 };
-  let score = 0;
-  if (pw.length >= 8) score++;
-  if (pw.length >= 12) score++;
-  if (pw.length >= 16) score++;
-  if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
-  if (/\d/.test(pw)) score++;
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  if (score >= 5) return { label: "Strong password", ok: true, level: 3 };
-  if (score >= 3) return { label: "Fair password", ok: false, level: 2 };
-  return { label: "Weak password", ok: false, level: 1 };
-}
-
 function rowHtml(it) {
   const fill = it.type === "login" && (it.username || it.hasPassword)
     ? `<button class="iconbtn" data-act="fill" data-id="${esc(it.id)}" title="Fill on this page">${ICON.fill}</button>`
@@ -853,19 +838,39 @@ async function showDetail(id) {
   if (!r.ok || r.locked) return showUnlock({ server: currentServer });
   const it = r.item;
 
-  // One field block. `secret` masks the value behind a reveal toggle.
+  const lengths = it.secretLengths || {};
+  const mask = (length) => "•".repeat(Math.min(length || 0, 20));
+
+  // A plain field: its value is not secret, so it may live in the DOM.
   const field = (label, value, opts = {}) => {
     if (!value) return "";
-    const { secret = false, mono = false, link = false } = opts;
-    const display = secret ? "•".repeat(Math.min(value.length, 20)) : value;
+    const { mono = false, link = false } = opts;
     const acts =
       `${link ? `<button class="iconbtn" data-open title="Open">${ICON.link}</button>` : ""}` +
-      `${secret ? `<button class="iconbtn" data-reveal title="Reveal">${ICON.eye}</button>` : ""}` +
       `<button class="iconbtn" data-copy title="Copy ${esc(label)}">${ICON.copy}</button>`;
     return `<div class="dfield">
       <div class="dlabel">${esc(label)}</div>
       <div class="dval">
-        <span class="dtext ${mono ? "mono" : ""}" data-value="${esc(value)}" data-secret="${secret ? 1 : 0}" data-shown="0">${esc(display)}</span>
+        <span class="dtext ${mono ? "mono" : ""}" data-value="${esc(value)}" data-shown="0">${esc(value)}</span>
+        <div class="dacts">${acts}</div>
+      </div>
+    </div>`;
+  };
+
+  // A secret field: the popup never receives its value. Only the mask width
+  // is known here; the plaintext is fetched through REVEAL when the user
+  // reveals or copies it, and is never written into the DOM as an attribute.
+  const secretField = (label, name, opts = {}) => {
+    const length = lengths[name];
+    if (!length) return "";
+    const { mono = false } = opts;
+    const acts =
+      `<button class="iconbtn" data-reveal title="Reveal">${ICON.eye}</button>` +
+      `<button class="iconbtn" data-copy title="Copy ${esc(label)}">${ICON.copy}</button>`;
+    return `<div class="dfield" data-field="${esc(name)}">
+      <div class="dlabel">${esc(label)}</div>
+      <div class="dval">
+        <span class="dtext ${mono ? "mono" : ""}" data-shown="0">${mask(length)}</span>
         <div class="dacts">${acts}</div>
       </div>
     </div>`;
@@ -873,11 +878,11 @@ async function showDetail(id) {
 
   let body = "";
   if (it.type === "login") {
-    const s = passwordStrength(it.password || "");
+    const s = it.passwordHealth || { label: "No password", ok: false };
     body =
       field("Email or Username", it.username) +
-      field("Password", it.password, { secret: true, mono: true }) +
-      (it.password
+      secretField("Password", "password", { mono: true }) +
+      (lengths.password
         ? `<div class="dfield"><div class="dlabel">Password Health</div>
              <div class="health ${s.ok ? "ok" : "warn"}">${ICON.shield}<span>${esc(s.label)}</span></div></div>`
         : "") +
@@ -885,9 +890,9 @@ async function showDetail(id) {
   } else if (it.type === "card") {
     body =
       field("Cardholder", it.username) +
-      field("Card Number", it.cardNumber, { secret: true, mono: true }) +
+      secretField("Card Number", "cardNumber", { mono: true }) +
       field("Expiry", it.cardExp, { mono: true }) +
-      field("CVV", it.cardCvv, { secret: true, mono: true });
+      secretField("CVV", "cardCvv", { mono: true });
   }
   body += field("Notes", it.notes);
 
@@ -905,12 +910,26 @@ async function showDetail(id) {
 
   wireFavicons(app); // same favicon fallback as the list
 
+  // Fetches one secret field on demand. The value stays in this closure for
+  // the duration of the call and is never stored on the element.
+  const readSecret = async (name) => {
+    const r = await send({ type: "REVEAL", id, field: name });
+    if (!r.ok) {
+      toast(r.locked ? "Vault locked" : "Could not read the field");
+      return null;
+    }
+    return r.value || "";
+  };
+
   app.querySelectorAll(".dfield").forEach((f) => {
     const text = f.querySelector(".dtext");
+    const name = f.dataset.field || null; // set only on secret fields
     const value = text?.dataset.value || "";
     const copyBtn = f.querySelector("[data-copy]");
-    copyBtn?.addEventListener("click", () => {
-      copyText(value, f.querySelector(".dlabel").textContent);
+    copyBtn?.addEventListener("click", async () => {
+      const plaintext = name ? await readSecret(name) : value;
+      if (plaintext === null) return;
+      copyText(plaintext, f.querySelector(".dlabel").textContent);
       flashCheck(copyBtn);
     });
     f.querySelector("[data-open]")?.addEventListener("click", () => {
@@ -918,11 +937,20 @@ async function showDetail(id) {
       chrome.tabs.create({ url });
     });
     const reveal = f.querySelector("[data-reveal]");
-    reveal?.addEventListener("click", () => {
+    reveal?.addEventListener("click", async () => {
       const shown = text.dataset.shown === "1";
-      text.dataset.shown = shown ? "0" : "1";
-      text.textContent = shown ? "•".repeat(Math.min(value.length, 20)) : value;
-      reveal.innerHTML = shown ? ICON.eye : ICON.eyeOff;
+      if (shown) {
+        // Re-mask from the length alone: nothing revealed is kept around.
+        text.dataset.shown = "0";
+        text.textContent = mask(lengths[name]);
+        reveal.innerHTML = ICON.eye;
+        return;
+      }
+      const plaintext = await readSecret(name);
+      if (plaintext === null) return;
+      text.dataset.shown = "1";
+      text.textContent = plaintext;
+      reveal.innerHTML = ICON.eyeOff;
     });
   });
 }
