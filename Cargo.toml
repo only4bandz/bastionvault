@@ -20,3 +20,15 @@ unsafe_code = "forbid"
 opt-level = 3
 lto = true
 codegen-units = 1
+# Integer overflow is a correctness bug everywhere, but in this workspace it
+# is a security bug: crypto-core does length and index arithmetic while
+# parsing attacker-supplied envelopes (base32 Secret Keys, AEAD nonces and
+# ciphertexts, X25519/Ed25519 material, Argon2id parameters), and the server
+# tracks quotas and revisions the same way. Rust's default leaves these checks
+# ON in debug and OFF in release, so every such computation is checked in CI
+# and unchecked in the binary and the WASM that users actually run — the tests
+# would panic loudly on a wrapping bound while production silently corrupted
+# state. Turning them on costs a predictable-branch per arithmetic op, which
+# is negligible next to Argon2id and SQLite, and converts a silent wrap into
+# an immediate, contained panic.
+overflow-checks = true
