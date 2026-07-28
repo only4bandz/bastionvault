@@ -115,3 +115,28 @@ test("frame guard: fails closed when the top URL is missing or invalid", () => {
   assert.ok(frameAutofillError("https://bank.com/login", "not a url"));
   assert.ok(frameAutofillError(undefined, "https://bank.com/"));
 });
+
+test("save pipeline enforces host, HTTPS, and same-site frame rules", async () => {
+  const { savePipelineError } = await import("../lib/autofill-policy.js");
+  // A same-site HTTPS frame may stage/commit.
+  assert.equal(savePipelineError("example.com", null, null), null);
+  // No sender host (extension page or unparseable sender) is refused.
+  assert.match(savePipelineError(null, null, null), /open a website/i);
+  // Insecure-HTTP and third-party-frame errors pass through untouched.
+  assert.equal(savePipelineError("example.com", "insecure", null), "insecure");
+  assert.equal(savePipelineError("example.com", null, "third-party frame"), "third-party frame");
+  // The credential-page rule outranks the frame rule, mirroring CREDS.
+  assert.equal(savePipelineError("example.com", "insecure", "frame"), "insecure");
+});
+
+test("only a same-site frame may clear a staged pending save", async () => {
+  const { contentMayClearPending } = await import("../lib/autofill-policy.js");
+  const pending = { host: "example.com", url: "https://example.com/login" };
+  assert.equal(contentMayClearPending(pending, "example.com", null), true);
+  assert.equal(contentMayClearPending(pending, "www.example.com", null), true);
+  // Another site, a third-party frame, or no staged save at all: refused.
+  assert.equal(contentMayClearPending(pending, "evil.example.net", null), false);
+  assert.equal(contentMayClearPending(pending, "example.com", "third-party frame"), false);
+  assert.equal(contentMayClearPending(null, "example.com", null), false);
+  assert.equal(contentMayClearPending(pending, null, null), false);
+});

@@ -43,6 +43,31 @@ export function frameAutofillError(frameUrl, tabUrl) {
   return null;
 }
 
+/**
+ * The credential SAVE pipeline (STAGE_USER / STAGE_SAVE / PENDING_SAVE /
+ * SAVE_LOGIN) is held to the same third-party-frame rule as fills: a hidden
+ * iframe of another site staging, probing, or committing credentials while
+ * the user believes they are on the top-level page is the same UI-redress
+ * trap in the other direction — it ends with an attacker-chosen password
+ * overwriting the user's real one via the dedupe path.
+ * Returns null when allowed, an error string otherwise.
+ */
+export function savePipelineError(senderHost, credentialError, frameError) {
+  if (!senderHost) return "Open a website before saving credentials.";
+  return credentialError || frameError || null;
+}
+
+/**
+ * A content frame may discard staged save state only for its own site.
+ * Without this, any page — including an ad iframe — could silently destroy
+ * another site's pending "Save to Bastion?" offer.
+ */
+export function contentMayClearPending(pending, senderHost, frameError) {
+  return Boolean(
+    pending && senderHost && !frameError && matchesSite(pending.url || pending.host, senderHost)
+  );
+}
+
 export function autofillPolicyError(item, tab, expectedTabId) {
   if (!Number.isInteger(expectedTabId) || !tab || tab.id !== expectedTabId) {
     return "The active tab changed. Reopen Bastion before filling.";
