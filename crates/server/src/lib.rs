@@ -3587,15 +3587,16 @@ fn prelogin_decoy(seed: &[u8; 32], decoy_kdf: KdfParams, email: &str) -> Prelogi
     };
     use base64::{engine::general_purpose::STANDARD as B64_STD, Engine as _};
     Prelogin {
-        // Same shape as a real registration: 16-byte salt, this deployment's
-        // most common KDF parameters, and a v1 blob with a 24-byte nonce over
-        // a 48-byte ciphertext (32-byte key + 16-byte AEAD tag).
-        salt: B64_STD.encode(prf("prelogin-decoy:salt", 16)),
+        // Same shape as a real registration, spelled with the same constants
+        // real records are validated against: if the format version or any
+        // envelope size ever moves, decoys move with it instead of announcing
+        // themselves by shape.
+        salt: B64_STD.encode(prf("prelogin-decoy:salt", REGISTRATION_SALT_BYTES)),
         kdf: decoy_kdf,
         wrapped_vault_key: EncryptedBlob {
-            v: 1,
-            nonce: B64_STD.encode(prf("prelogin-decoy:nonce", 24)),
-            ct: B64_STD.encode(prf("prelogin-decoy:ct", 48)),
+            v: crypto_core::aead::FORMAT_VERSION,
+            nonce: B64_STD.encode(prf("prelogin-decoy:nonce", WRAPPED_KEY_NONCE_BYTES)),
+            ct: B64_STD.encode(prf("prelogin-decoy:ct", WRAPPED_KEY_CIPHERTEXT_BYTES)),
         },
     }
 }
@@ -5568,6 +5569,23 @@ mod tests {
                 .iter()
                 .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
         })
+    }
+
+    #[test]
+    fn decoy_prelogin_passes_the_same_structural_checks_as_real_credentials() {
+        // A decoy that fails the validator real records are held to would be
+        // distinguishable by shape the moment the envelope format moves.
+        let decoy = prelogin_decoy(&[7u8; 32], KdfParams::default(), "ghost@example.com");
+        assert!(is_exact_b64(&decoy.salt, REGISTRATION_SALT_BYTES));
+        assert_eq!(decoy.wrapped_vault_key.v, crypto_core::aead::FORMAT_VERSION);
+        assert!(is_exact_b64(
+            &decoy.wrapped_vault_key.nonce,
+            WRAPPED_KEY_NONCE_BYTES
+        ));
+        assert!(is_exact_b64(
+            &decoy.wrapped_vault_key.ct,
+            WRAPPED_KEY_CIPHERTEXT_BYTES
+        ));
     }
 
     #[test]
