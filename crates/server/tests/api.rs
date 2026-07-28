@@ -1680,6 +1680,50 @@ async fn pre_auth_account_routes_reject_oversized_bodies() {
 }
 
 #[tokio::test]
+async fn deprecated_vault_mutations_share_the_vault_write_allowance() {
+    let app = server::app_in_memory();
+    let token = signup_login(&app, "legacy-writer@example.com").await;
+
+    // The compatibility routes must draw from the same per-account
+    // "vault-write" bucket as the atomic transaction path (120/min).
+    let blob = json!({ "v": 1, "nonce": B64.encode([0u8; 24]), "ct": "AA==" });
+    let mut refused = None;
+    for attempt in 1..=121u32 {
+        let (status, _) = send(
+            &app,
+            "PUT",
+            &format!("/vault/items/item-{attempt}"),
+            Some(&token),
+            Some(json!({ "blob": blob.clone() })),
+        )
+        .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            refused = Some(attempt);
+            break;
+        }
+        assert_eq!(status, StatusCode::NO_CONTENT, "attempt {attempt} failed");
+    }
+    assert_eq!(refused, Some(121), "legacy writes were never rate limited");
+
+    // The other two compatibility verbs draw from the same bucket.
+    let (status, _) = send(&app, "DELETE", "/vault/items/item-1", Some(&token), None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    let (status, _) = send(
+        &app,
+        "PUT",
+        "/vault/manifest",
+        Some(&token),
+        Some(json!({ "blob": blob })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // Reads stay unaffected by the write allowance.
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn health_ok() {
     let app = server::app_in_memory();
     for route in ["/health", "/livez", "/readyz"] {
@@ -2702,7 +2746,9 @@ async fn concurrent_writes_keep_cache_and_sqlite_consistent() {
     let token = login["token"].as_str().unwrap().to_string();
 
     let mut writes = tokio::task::JoinSet::new();
-    for value in 0..128 {
+    // Stay under the 120/min per-account vault-write allowance: this test
+    // measures winner consistency, not admission.
+    for value in 0..100 {
         let app = app.clone();
         let token = token.clone();
         let blob = serde_json::to_value(

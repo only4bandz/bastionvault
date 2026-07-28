@@ -3979,6 +3979,10 @@ async fn put_item(
 ) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
     validate_item_id(&id)?;
     let email = require_auth(&st, &headers).await?;
+    // The atomic transaction path admits writers through this same bucket;
+    // the compatibility routes must not offer an unmetered bypass to the
+    // write lock and its durable commit.
+    rate_limit(&st, &email, "vault-write", MAX_VAULT_MUTATIONS_PER_MIN)?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
     if blob_json.len() > MAX_VAULT_BLOB_BYTES {
@@ -4038,6 +4042,7 @@ async fn delete_item(
 ) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
     validate_item_id(&id)?;
     let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "vault-write", MAX_VAULT_MUTATIONS_PER_MIN)?;
     let mut inner = st.write().await;
     let acc = inner
         .accounts
@@ -4068,6 +4073,7 @@ async fn put_manifest(
     Json(body): Json<BlobBody>,
 ) -> Result<(StatusCode, [(&'static str, &'static str); 1]), ApiError> {
     let email = require_auth(&st, &headers).await?;
+    rate_limit(&st, &email, "vault-write", MAX_VAULT_MUTATIONS_PER_MIN)?;
     let blob_json = serde_json::to_string(&body.blob)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
     if blob_json.len() > MAX_VAULT_MANIFEST_BYTES {
