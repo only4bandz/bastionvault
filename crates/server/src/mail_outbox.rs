@@ -531,6 +531,67 @@ mod tests {
         .unwrap()
     }
 
+    fn draft_for<'a>(id: &'a str, recipient: &'a str, now: i64) -> MailDraft<'a> {
+        MailDraft {
+            id,
+            recipient,
+            subject: "Verify your Bastion account",
+            text_body: "verification body",
+            created_at: now,
+        }
+    }
+
+    /// The per-owner cap is what stops one mailbox from occupying the queue.
+    /// It is enforced only by unread code, so it is pinned here.
+    #[tokio::test]
+    async fn one_owner_cannot_occupy_more_than_its_share_of_the_outbox() {
+        let (db, _, _) = Db::open(":memory:");
+        let accepted = db
+            .call_mutation(move |conn| {
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                // Queued registration mail is owned by a challenge row.
+                for (index, owner) in ["crowder@example.com", "other@example.com"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    tx.execute(
+                        "INSERT INTO registration_challenges(
+                           email,token_hash,expires_at,resend_after,verified_at,created_at
+                         ) VALUES(?1,?2,?3,?4,NULL,?5)",
+                        params![owner, [index as u8; 32].as_slice(), 10_000, 100, 100],
+                    )?;
+                }
+                let mut accepted = Vec::new();
+                for attempt in 0..(MAX_ACTIVE_PER_OWNER + 1) {
+                    let id = format!("{:032x}", attempt);
+                    accepted.push(enqueue_registration(
+                        &tx,
+                        "crowder@example.com",
+                        draft_for(&id, "crowder@example.com", 100),
+                    )?);
+                }
+                // A different owner is unaffected by the first one's usage.
+                let other = enqueue_registration(
+                    &tx,
+                    "other@example.com",
+                    draft_for("ffffffffffffffffffffffffffffffff", "other@example.com", 100),
+                )?;
+                tx.commit()?;
+                Ok((accepted, other))
+            })
+            .await
+            .unwrap();
+        let (owner_results, other) = accepted;
+
+        assert_eq!(
+            owner_results,
+            vec![true, true, true, false],
+            "the per-owner outbox cap did not hold"
+        );
+        assert!(other, "one owner's cap must not block another owner");
+    }
+
     #[tokio::test]
     async fn accepted_mail_is_scrubbed_after_delivery() {
         let (db, _, _) = Db::open(":memory:");
