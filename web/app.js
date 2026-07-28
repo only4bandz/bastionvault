@@ -62,12 +62,28 @@ function renderPlain() {
 const INACTIVITY_MS = 2 * 60 * 1000;
 let idleTimer = null;
 
+// Locking must clear what is on the SCREEN too, not just the in-memory key.
+// The demo displays the Secret Key and the Emergency Kit, and prefills the
+// unlock fields with the real password and Secret Key so the "another device"
+// step is one click — so announcing "Locked" while leaving all of that
+// visible handed the next person everything needed to unlock.
+function clearVisibleSecrets() {
+  $("secret-out").replaceChildren();
+  for (const id of ["reg-pw", "unlock-pw", "unlock-sk"]) {
+    $(id).value = "";
+  }
+}
+
 function doLock(reason) {
   if (!account || account.is_locked) return;
   account.lock();
+  clearVisibleSecrets();
   $("btn-add").disabled = true;
   renderPlain();
-  log(`Locked (${reason}). Unlock again to read items.`, "warn");
+  log(
+    `Locked (${reason}). The Secret Key and passwords were cleared from this page.`,
+    "warn"
+  );
 }
 
 function armIdle() {
