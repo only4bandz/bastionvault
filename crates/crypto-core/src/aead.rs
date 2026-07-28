@@ -28,6 +28,14 @@ pub const FORMAT_VERSION: u8 = 1;
 // note but an anti-DoS safeguard.
 const MAX_ENCODED_NONCE_LEN: usize = 64;
 const MAX_ENCODED_CT_LEN: usize = 8 * 1024 * 1024;
+const TAG_LEN: usize = 16;
+
+/// Largest plaintext `encrypt` will seal. Derived from [`MAX_ENCODED_CT_LEN`]
+/// so the bound holds on BOTH sides of the round trip: without it, an
+/// oversized item would encrypt successfully, upload as a valid blob, and
+/// only fail at decrypt time — silent, permanent data loss discovered on
+/// read. Refusing at write time keeps every sealed blob readable.
+pub const MAX_PLAINTEXT_LEN: usize = (MAX_ENCODED_CT_LEN / 4) * 3 - TAG_LEN;
 
 /// An encrypted envelope: version + nonce + ciphertext (which includes the auth
 /// tag).
@@ -63,6 +71,10 @@ fn versioned_aad(version: u8, aad: &[u8]) -> Vec<u8> {
 /// preventing a blob from being moved elsewhere. The format version is bound to
 /// it too. Pass `&[]` if there is no specific context.
 pub(crate) fn encrypt(key: &SecretKey, plaintext: &[u8], aad: &[u8]) -> Result<EncryptedBlob> {
+    // Symmetric to decrypt's ceiling: never seal what cannot be unsealed.
+    if plaintext.len() > MAX_PLAINTEXT_LEN {
+        return Err(CryptoError::Malformed);
+    }
     let cipher = XChaCha20Poly1305::new(key.as_bytes().into());
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let aad = versioned_aad(FORMAT_VERSION, aad);
@@ -113,6 +125,33 @@ pub(crate) fn decrypt(key: &SecretKey, blob: &EncryptedBlob, aad: &[u8]) -> Resu
             },
         )
         .map_err(|_| CryptoError::Aead)
+}
+
+#[cfg(test)]
+mod bounds {
+    //! The encrypt-side ceiling must guarantee the decrypt-side ceiling: any
+    //! blob `encrypt` produces has to remain decodable under decrypt's
+    //! anti-DoS bound, and anything larger must be refused before sealing.
+    use super::*;
+
+    #[test]
+    fn max_plaintext_round_trips_and_one_more_byte_is_refused() {
+        let key = SecretKey::from_bytes([0x11u8; 32]);
+
+        let max = vec![0u8; MAX_PLAINTEXT_LEN];
+        let blob = encrypt(&key, &max, b"bounds").unwrap();
+        assert!(
+            blob.ct.len() <= MAX_ENCODED_CT_LEN,
+            "encoded ct escapes the decrypt bound"
+        );
+        assert_eq!(decrypt(&key, &blob, b"bounds").unwrap(), max);
+
+        let over = vec![0u8; MAX_PLAINTEXT_LEN + 1];
+        assert!(matches!(
+            encrypt(&key, &over, b"bounds"),
+            Err(CryptoError::Malformed)
+        ));
+    }
 }
 
 #[cfg(test)]
