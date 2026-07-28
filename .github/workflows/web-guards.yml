@@ -9,11 +9,34 @@ on:
     branches: [main]
   pull_request:
 
+# These jobs only read the tree. Without an explicit block they inherit the
+# repository default token scope, which on repositories never switched to
+# read-only defaults is write-all — handed to guard scripts a pull request can
+# itself modify.
+permissions:
+  contents: read
+
+concurrency:
+  group: web-guards-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   no-browser-secret-storage:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Nothing after checkout needs git credentials. The default
+          # writes GITHUB_TOKEN into .git/config, where build scripts,
+          # proc macros, npm lifecycle scripts and PR-authored guard
+          # scripts running later in the same job can read it.
+          persist-credentials: false
+      # Run the guard's own self-test first: invoking a guard proves nothing
+      # if the guard itself can be neutered in the same pull request that
+      # introduces a floating action reference.
+      - name: Verify the pin guard actually rejects unpinned actions
+        run: bash scripts/test-workflow-pin-guard.sh
       - name: Require immutable GitHub Action references
         run: bash scripts/check-workflow-pins.sh
       - name: Forbid browser-side secret storage in web/

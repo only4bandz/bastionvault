@@ -3,9 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-workflow_dir="${BASTION_WORKFLOW_DIR:-.github/workflows}"
+# Scans all of .github, not just .github/workflows: `uses:` also appears in
+# composite action definitions (.github/actions/*/action.yml), which a
+# depth-1 scan of the workflows directory silently skipped. An unpinned
+# third-party action introduced there would ship unchecked — exactly the
+# supply-chain hole this guard exists to close.
+workflow_dir="${BASTION_WORKFLOW_DIR:-.github}"
 mapfile -d '' -t workflow_files < <(
-  find "$workflow_dir" -maxdepth 1 -type f \
+  find "$workflow_dir" -type f \
     \( -name '*.yml' -o -name '*.yaml' \) -print0 | sort -z
 )
 if (( ${#workflow_files[@]} == 0 )); then

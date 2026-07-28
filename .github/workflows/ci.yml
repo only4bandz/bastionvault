@@ -22,6 +22,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Nothing after checkout needs git credentials. The default
+          # writes GITHUB_TOKEN into .git/config, where build scripts,
+          # proc macros, npm lifecycle scripts and PR-authored guard
+          # scripts running later in the same job can read it.
+          persist-credentials: false
       - name: Install Rust 1.91.0
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
@@ -40,6 +46,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Nothing after checkout needs git credentials. The default
+          # writes GITHUB_TOKEN into .git/config, where build scripts,
+          # proc macros, npm lifecycle scripts and PR-authored guard
+          # scripts running later in the same job can read it.
+          persist-credentials: false
       - name: Install Rust 1.91.0 with the WASM target
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
