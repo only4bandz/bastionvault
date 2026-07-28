@@ -79,6 +79,18 @@ fn serialize_opened_message(opened: send::OpenedMessage) -> Result<String, JsErr
     serialize_opened(&opened.plaintext, opened.sender)
 }
 
+/// A message that named a pinned contact as its sender but carried no
+/// signature. The claimed id is deliberately NOT echoed: repeating it would
+/// let the forger put a contact's name on screen, which is the point of the
+/// forgery.
+fn serialize_forged_sender() -> Result<String, JsError> {
+    serde_json::to_string(&serde_json::json!({
+        "sender": { "state": "anonymous", "id": null },
+        "forgedSender": true,
+    }))
+    .map_err(js_err)
+}
+
 fn serialize_key_change(sender_id: &str) -> Result<String, JsError> {
     serde_json::to_string(&serde_json::json!({
         "sender": { "state": "unverified", "id": sender_id },
@@ -488,6 +500,11 @@ impl Account {
                 drop(unverified);
                 serialize_key_change(&sender_id)
             }
+            // A missing signature cannot be a key rotation: the message never
+            // carried proof of anything. Reporting it as "their key changed"
+            // let a stranger vandalize a verified contact's trust state, so
+            // it gets its own, non-alarming state.
+            Err(crypto_core::CryptoError::UnsignedSenderClaim) => serialize_forged_sender(),
             Err(_) => serialize_key_change(&sender_id),
         }
     }
