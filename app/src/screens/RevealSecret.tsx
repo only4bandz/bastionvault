@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, type JSX } from "react";
 import { Brand } from "../components/Brand";
 import { IcCopy } from "../components/icons";
-import { copyWithFeedback } from "../lib/clipboard";
+import {
+  clearPendingSecretCopy,
+  copySecretWithFeedback,
+  SECRET_KEY_CLEAR_MS,
+} from "../lib/clipboard";
 import type { Account, RevealedSecret } from "../lib/wasm";
 
 export function RevealSecret({
@@ -57,12 +61,19 @@ export function RevealSecret({
   }, []);
 
   function copy() {
-    if (data) void copyWithFeedback(data.secret_key, "Secret Key", toast);
+    // Scheduled wipe: the Secret Key must never sit on the OS clipboard
+    // indefinitely (it used to outlive vault creation, lock, and the session).
+    if (data) {
+      void copySecretWithFeedback(data.secret_key, "Secret Key", toast, undefined, SECRET_KEY_CLEAR_MS);
+    }
   }
 
   async function finish() {
     setSubmitErr("");
     setSubmitting(true);
+    // The user has confirmed the key is saved; a still-pending clipboard copy
+    // must not follow them into the unlocked session.
+    await clearPendingSecretCopy();
     try {
       await onDone();
     } catch (e) {
