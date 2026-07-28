@@ -63,6 +63,11 @@ const DEFAULT_SESSION_ROTATION_GRACE: Duration = Duration::from_secs(60);
 /// Maximum request body size (1 MiB) — guardrail against memory DoS.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_SESSION_BODY_BYTES: usize = 1024;
+/// Account and registration-challenge payloads are structurally tiny (an
+/// email, a fixed-size registration envelope, or a challenge token), yet they
+/// are reachable without credentials. Bounding them tightly keeps anonymous
+/// callers from making the server buffer and parse the global 1 MiB limit.
+const MAX_ACCOUNT_BODY_BYTES: usize = 4 * 1024;
 const MAX_ACCOUNT_ID_BYTES: usize = 254;
 const AUTH_SECRET_BYTES: usize = 32;
 const SESSION_TOKEN_BYTES: usize = 32;
@@ -582,15 +587,22 @@ fn build_with_rate_limits(
             authenticate_vault_transaction,
         ));
     let protected_routes = Router::new()
-        .route("/accounts", post(create_account).delete(delete_account))
+        .route(
+            "/accounts",
+            post(create_account)
+                .delete(delete_account)
+                .layer(DefaultBodyLimit::max(MAX_ACCOUNT_BODY_BYTES)),
+        )
         .route("/accounts/:email/prelogin", get(prelogin))
         .route(
             "/registration-challenges",
-            post(request_registration_challenge),
+            post(request_registration_challenge)
+                .layer(DefaultBodyLimit::max(MAX_ACCOUNT_BODY_BYTES)),
         )
         .route(
             "/registration-challenges/verify",
-            post(verify_registration_challenge),
+            post(verify_registration_challenge)
+                .layer(DefaultBodyLimit::max(MAX_ACCOUNT_BODY_BYTES)),
         )
         .route(
             "/sessions",

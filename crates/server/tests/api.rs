@@ -1644,6 +1644,42 @@ async fn rejects_invalid_item_ids_and_oversized_blobs() {
 }
 
 #[tokio::test]
+async fn pre_auth_account_routes_reject_oversized_bodies() {
+    let app = server::app_in_memory();
+
+    // Every payload on these routes is structurally tiny; anything past the
+    // 4 KiB route limit must be refused before it is buffered and parsed.
+    let padding = "A".repeat(8 * 1024);
+    let cases = [
+        ("POST", "/accounts", json!({ "email": padding })),
+        ("DELETE", "/accounts", json!({ "auth_secret": padding })),
+        (
+            "POST",
+            "/registration-challenges",
+            json!({ "email": padding }),
+        ),
+        (
+            "POST",
+            "/registration-challenges/verify",
+            json!({ "token": padding }),
+        ),
+    ];
+    for (method, path, body) in cases {
+        let (status, _) = send(&app, method, path, None, Some(body)).await;
+        assert_eq!(
+            status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{method} {path} accepted an oversized body"
+        );
+    }
+
+    // A normal-size signup still fits comfortably under the limit.
+    let token = signup_login(&app, "small-body@example.com").await;
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
 async fn health_ok() {
     let app = server::app_in_memory();
     for route in ["/health", "/livez", "/readyz"] {
