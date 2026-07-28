@@ -1941,6 +1941,58 @@ async fn registration_does_not_reveal_whether_a_mailbox_is_already_registered() 
 }
 
 #[tokio::test]
+async fn challenge_mail_to_one_recipient_is_capped_per_day() {
+    let path = test_db_path("challenge-daily-cap");
+    // A near-zero per-minute window lets the burst buckets reset between
+    // requests, so only the standing daily allowance is being measured.
+    let app = server::app_with_db_mailbox_verification_and_auth_rate_limits(
+        &path,
+        "https://vault.example.com",
+        server::AuthRateLimits {
+            window: std::time::Duration::from_millis(1),
+            ..server::AuthRateLimits::default()
+        },
+    );
+
+    let target = "bombed@example.com";
+    for attempt in 1..=10u32 {
+        let (status, _) = send(
+            &app,
+            "POST",
+            "/v1/registration-challenges",
+            None,
+            Some(json!({ "email": target })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "attempt {attempt} refused");
+        tokio::time::sleep(std::time::Duration::from_millis(3)).await;
+    }
+
+    // The eleventh request in the same day is refused even though every
+    // burst bucket has long since refilled.
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/registration-challenges",
+        None,
+        Some(json!({ "email": target })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+
+    // The allowance is per recipient: another mailbox is unaffected.
+    let (status, _) = send(
+        &app,
+        "POST",
+        "/v1/registration-challenges",
+        None,
+        Some(json!({ "email": "other@example.com" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
 async fn login_does_not_reveal_an_unverified_account() {
     let path = test_db_path("unverified-login-enumeration");
     let known = "legacy-unverified@example.com";
