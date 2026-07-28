@@ -24,6 +24,26 @@ const MAX_VAULT_MANIFEST_BYTES = 8 * 1024 * 1024;
 const MAX_INBOX_PAGE = 100;
 const MAX_SEND_BLOB_BYTES = 256 * 1024;
 
+/**
+ * Per-endpoint success-body budgets.
+ *
+ * `readJsonBody` has always accepted a cap, but `req` never passed one — so
+ * every response, including replies whose real size is a few dozen bytes,
+ * inherited the 80 MiB ceiling and could be buffered into a JS string and
+ * `JSON.parse`d before any schema validator ran. A hostile server (or an
+ * MITM'd ingress on a deployment without HSTS) could crash the tab with a
+ * reply to `/config` — before the user is even authenticated. The semantic
+ * bounds enforced by the validators are all post-parse, so they are no help
+ * here.
+ *
+ * Every budget below is derived from what the endpoint can legitimately
+ * return, with generous headroom for JSON overhead.
+ */
+const SMALL_BODY_BYTES = 4 * 1024;
+const VAULT_BODY_BYTES =
+  MAX_VAULT_ITEMS * (MAX_VAULT_BLOB_BYTES + MAX_ITEM_ID_BYTES) + MAX_VAULT_MANIFEST_BYTES;
+const INBOX_BODY_BYTES = MAX_INBOX_PAGE * (MAX_SEND_BLOB_BYTES + 4 * 1024);
+
 export interface Blob {
   v: number;
   nonce: string;
@@ -472,7 +492,8 @@ async function req<T>(
   token?: string,
   body?: unknown,
   responseKind: "json" | "empty" = "json",
-  expectedStatus: number = responseKind === "json" ? 200 : 204
+  expectedStatus: number = responseKind === "json" ? 200 : 204,
+  maxBytes: number = SMALL_BODY_BYTES
 ): Promise<T> {
   const authorizationToken = token ? currentSessionToken(token) : undefined;
   const headers: Record<string, string> = {};
@@ -517,7 +538,7 @@ async function req<T>(
     if (!isJsonMediaType(res.headers.get("content-type"))) {
       throw new ApiError(res.status, "Server returned a non-JSON response.");
     }
-    return await readJsonBody<T>(res);
+    return await readJsonBody<T>(res, maxBytes);
   } catch (error) {
     if (controller.signal.aborted) {
       throw new ApiError(0, "Server request timed out. The result is unknown; refresh before retrying.");
@@ -600,7 +621,9 @@ export const api = {
   deleteAccount: (token: string, auth_secret: string) =>
     req<void>("DELETE", "/accounts", token, { auth_secret }, "empty"),
   getVault: (token: string) =>
-    req<unknown>("GET", "/vault", token).then(requireVaultResponse),
+    req<unknown>("GET", "/vault", token, undefined, "json", 200, VAULT_BODY_BYTES).then(
+      requireVaultResponse
+    ),
   mutateVault: (
     token: string,
     expectedRevision: number,
@@ -629,7 +652,9 @@ export const api = {
   sendBlob: (token: string, body: { recipient_id: string; message_id: string; blob: unknown; expires_at?: number | null }) =>
     req<void>("POST", "/send", token, body, "empty"),
   inbox: (token: string) =>
-    req<unknown>("GET", "/send/inbox", token).then(requireInboxResponse),
+    req<unknown>("GET", "/send/inbox", token, undefined, "json", 200, INBOX_BODY_BYTES).then(
+      requireInboxResponse
+    ),
   inboxDelete: (token: string, messageId: string) =>
     req<void>("DELETE", `/send/inbox/${encodeURIComponent(messageId)}`, token, undefined, "empty"),
 };

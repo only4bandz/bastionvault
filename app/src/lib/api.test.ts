@@ -220,6 +220,48 @@ describe("hostile server error handling", () => {
   });
 });
 
+describe("per-endpoint success body budgets", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function respondWithJson(body: string): void {
+    globalThis.fetch = vi.fn(
+      async () =>
+        new Response(body, { status: 200, headers: { "content-type": "application/json" } })
+    );
+  }
+
+  it("refuses an oversized reply on a small endpoint before parsing it", async () => {
+    // /config legitimately returns a few dozen bytes. Without a per-endpoint
+    // cap this inherited the 80 MiB ceiling and was buffered and parsed
+    // before any validator ran — reachable before the user authenticates.
+    const padding = "A".repeat(8 * 1024);
+    respondWithJson(JSON.stringify({ email_verification_required: false, padding }));
+
+    await expect(api.config()).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("still accepts a normal reply on the same endpoint", async () => {
+    respondWithJson(JSON.stringify({ email_verification_required: true }));
+    await expect(api.config()).resolves.toEqual({ email_verification_required: true });
+  });
+
+  it("keeps a budget large enough for a real vault", async () => {
+    // The vault endpoint opts into its own derived budget; a payload far
+    // larger than the small-endpoint cap must still be accepted.
+    const item = { v: 1, nonce: "A".repeat(32), ct: "B".repeat(64) };
+    const items = Object.fromEntries(
+      Array.from({ length: 200 }, (_, index) => [`item-${index}`, item])
+    );
+    respondWithJson(JSON.stringify({ items, manifest: null, revision: 3 }));
+
+    const vault = await api.getVault("token");
+    expect(Object.keys(vault.items)).toHaveLength(200);
+  });
+});
+
 describe("hostile successful response handling", () => {
   it("accepts only the endpoint's exact success status", async () => {
     const originalFetch = globalThis.fetch;
