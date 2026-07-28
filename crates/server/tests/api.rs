@@ -1724,6 +1724,44 @@ async fn deprecated_vault_mutations_share_the_vault_write_allowance() {
 }
 
 #[tokio::test]
+async fn anonymous_logout_probes_are_rate_limited_per_source() {
+    let app = server::app_in_memory();
+
+    // Logout accepts any shape-valid bearer and always answers 204, so an
+    // anonymous caller can spray random tokens; admission must cut them off.
+    let mut refused = None;
+    for attempt in 1..=61u32 {
+        let unknown = format!("{:064x}", attempt);
+        let request = Request::builder()
+            .method("DELETE")
+            .uri("/sessions")
+            .header("authorization", format!("Bearer {unknown}"))
+            .body(Body::empty())
+            .unwrap();
+        let status = app.clone().oneshot(request).await.unwrap().status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            refused = Some(attempt);
+            break;
+        }
+        assert_eq!(status, StatusCode::NO_CONTENT, "attempt {attempt}");
+    }
+    assert_eq!(refused, Some(61), "logout spraying was never refused");
+}
+
+#[tokio::test]
+async fn logout_still_revokes_the_live_session() {
+    let app = server::app_in_memory();
+    let token = signup_login(&app, "logout@example.com").await;
+
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = send(&app, "DELETE", "/sessions", Some(&token), None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = send(&app, "GET", "/vault", Some(&token), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn health_ok() {
     let app = server::app_in_memory();
     for route in ["/health", "/livez", "/readyz"] {
