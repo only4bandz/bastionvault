@@ -528,9 +528,19 @@ function senderName(o: Opened): string {
   return o.display || (o.sender?.id ? shortId(o.sender.id) : "Unknown sender");
 }
 function senderChip(o: Opened): JSX.Element {
+  if (o.forgedSender) return <span className="badge badge-danger">Forged sender</span>;
   if (o.keyChanged) return <span className="badge badge-danger">Key changed</span>;
   const st = o.sender?.state;
-  if (st === "verified") return <span className="badge badge-ok">Verified</span>;
+  // "Verified" is reserved for a contact whose safety number the user
+  // compared out of band. A signature that merely checks out against a
+  // server-supplied pin is a weaker claim and says so.
+  if (st === "verified") {
+    return o.signedOnly ? (
+      <span className="badge badge-warn">Signed · unverified</span>
+    ) : (
+      <span className="badge badge-ok">Verified</span>
+    );
+  }
   if (st === "anonymous") return <span className="badge">Anonymous</span>;
   return <span className="badge badge-warn">Unverified</span>;
 }
@@ -648,10 +658,20 @@ function Message({
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
-  const banner = data.keyChanged ? (
+  const banner = data.forgedSender ? (
+    <div className="trust trust-danger" role="alert">
+      This message named one of your contacts as its sender but carried no signature at all.
+      It was not sent by them — treat it as anonymous and untrusted.
+    </div>
+  ) : data.keyChanged ? (
     <div className="trust trust-danger" role="alert">This contact's key changed since you verified them. Don't trust this message — re-verify them.</div>
-  ) : data.sender?.state === "verified" ? (
+  ) : data.sender?.state === "verified" && !data.signedOnly ? (
     <div className="trust trust-ok">Verified — from {data.display || shortId(data.sender.id!)}</div>
+  ) : data.sender?.state === "verified" ? (
+    <div className="trust trust-warn">
+      Signed by {shortId(data.sender.id!)}, but you have not verified their safety number.
+      Verify them to confirm this is who you think it is.
+    </div>
   ) : data.sender?.state === "anonymous" ? (
     <div className="trust">Anonymous sender — Bastion can't tell you who sent this.</div>
   ) : (

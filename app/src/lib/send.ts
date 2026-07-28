@@ -325,6 +325,14 @@ export interface Opened {
   sender?: { state: string; id: string | null };
   display?: string | null;
   keyChanged?: boolean;
+  /** The message named a known contact but carried no signature at all. */
+  forgedSender?: boolean;
+  /**
+   * The signature checked out against the key pinned for this contact, but
+   * the user has not compared safety numbers out of band. Distinct from a
+   * fully verified contact: the pin itself came from the server.
+   */
+  signedOnly?: boolean;
   needsPass?: boolean;
   error?: string;
 }
@@ -335,10 +343,13 @@ export interface Opened {
  * A signature failure returns only key-change metadata.
  */
 export function openMessage(account: Account, contacts: Contact[], blob: unknown, passphrase?: string): Opened {
+  // Pin EVERY known contact, not only safety-number-verified ones: checking a
+  // signature is independent of having compared safety numbers, and a sender
+  // that was never pinned could claim any id without one (see
+  // CryptoError::UnsignedSenderClaim). Whether the pin is trustworthy is a
+  // separate question, answered by `signedOnly` below.
   const pinned = Object.fromEntries(
-    contacts
-      .filter((contact) => contact.verified)
-      .map((contact) => [contact.bastion_id, contact.public])
+    contacts.map((contact) => [contact.bastion_id, contact.public])
   );
   let opened: Opened;
   try {
@@ -353,7 +364,16 @@ export function openMessage(account: Account, contacts: Contact[], blob: unknown
     return passphrase ? { error: "Wrong passphrase or corrupted message." } : { needsPass: true };
   }
   const known = contacts.find((contact) => contact.bastion_id === opened.sender?.id);
-  return { ...opened, display: known?.display ?? null };
+  // A contact's name is only ever lent to a sender the user verified out of
+  // band. Resolving it for an unverified — that is, self-asserted — id let a
+  // stranger who knew the address wear that contact's name in the inbox, with
+  // the victim's own address book supplying the credibility.
+  const verifiedContact = known?.verified ? known : undefined;
+  return {
+    ...opened,
+    display: verifiedContact?.display ?? null,
+    signedOnly: opened.sender?.state === "verified" && !verifiedContact,
+  };
 }
 
 export const inboxList = (token: string): Promise<InboxItem[]> => api.inbox(token);

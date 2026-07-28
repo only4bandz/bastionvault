@@ -41,6 +41,58 @@ describe("Send pinned plaintext release", () => {
   });
 });
 
+describe("Send sender identity presentation", () => {
+  const unverified: Contact = { ...contact, bastion_id: "BOB", display: "Bob", verified: false };
+
+  function accountReturning(payload: Record<string, unknown>): {
+    account: Account;
+    pins: () => Record<string, unknown>;
+  } {
+    const sendOpen = vi.fn(() => JSON.stringify(payload));
+    return {
+      account: { send_open_with_pins: sendOpen } as unknown as Account,
+      pins: () => JSON.parse(sendOpen.mock.calls[0][2] as string),
+    };
+  }
+
+  it("pins every known contact, not only the verified ones", () => {
+    const { account, pins } = accountReturning({ sender: { state: "anonymous", id: null } });
+    openMessage(account, [contact, unverified], {});
+    expect(pins()).toEqual({ ALICE: contact.public, BOB: unverified.public });
+  });
+
+  it("never lends a contact's name to a self-asserted sender id", () => {
+    // The id matches a contact the user added but never verified: the name
+    // must not be borrowed, so the UI falls back to the raw address.
+    const { account } = accountReturning({
+      plaintext: "hi",
+      sender: { state: "unverified", id: "BOB" },
+    });
+    const opened = openMessage(account, [contact, unverified], {});
+    expect(opened.display).toBeNull();
+  });
+
+  it("separates a checked signature from an out-of-band verification", () => {
+    const { account } = accountReturning({
+      plaintext: "hi",
+      sender: { state: "verified", id: "BOB" },
+    });
+    const opened = openMessage(account, [contact, unverified], {});
+    // The signature checks out against the pin, but the pin came from the
+    // server — that is weaker than a compared safety number and says so.
+    expect(opened.signedOnly).toBe(true);
+    expect(opened.display).toBeNull();
+
+    const verifiedOpen = accountReturning({
+      plaintext: "hi",
+      sender: { state: "verified", id: "ALICE" },
+    });
+    const fully = openMessage(verifiedOpen.account, [contact, unverified], {});
+    expect(fully.signedOnly).toBe(false);
+    expect(fully.display).toBe("Alice");
+  });
+});
+
 describe("encrypted Send contact state", () => {
   const bastionId = "A".repeat(26);
   const valid = {
