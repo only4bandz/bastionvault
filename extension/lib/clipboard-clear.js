@@ -52,3 +52,26 @@ export function makeClipboardClearScheduler({ setTimer, clearTimer, clearClipboa
 export function shouldClear(scheduledToken, currentToken) {
   return scheduledToken === currentToken;
 }
+
+/**
+ * `true` only when the offscreen document acknowledged the command. Anything
+ * else — no reply, a rejected send, an `ok: false` — means no timer exists,
+ * and the caller must not claim the clipboard will be wiped.
+ */
+export function clipboardCommandAcknowledged(ack) {
+  return Boolean(ack && ack.ok === true);
+}
+
+/**
+ * The toast for a completed copy. The auto-clear is announced only when the
+ * worker confirmed the timer; otherwise the user is told plainly that they
+ * must clear it themselves, rather than being promised a wipe that will never
+ * happen.
+ */
+export function copyToastMessage(label, ack) {
+  if (!clipboardCommandAcknowledged(ack)) {
+    return `${label} copied · auto-clear unavailable, clear it manually`;
+  }
+  const seconds = Math.round((ack.clearMs ?? CLIPBOARD_CLEAR_MS) / 1000);
+  return `${label} copied · clears in ${seconds}s`;
+}

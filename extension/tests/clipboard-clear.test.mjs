@@ -79,3 +79,29 @@ test("shouldClear only fires for the newest token", () => {
   assert.equal(shouldClear(3, 3), true);
   assert.equal(shouldClear(2, 3), false);
 });
+
+test("only a real acknowledgement counts as a scheduled clear", async () => {
+  const { clipboardCommandAcknowledged } = await import("../lib/clipboard-clear.js");
+  assert.equal(clipboardCommandAcknowledged({ ok: true }), true);
+  // No reply (worker evicted / offscreen creation failed), a rejected send,
+  // or an explicit failure all mean no timer exists.
+  for (const ack of [null, undefined, {}, { ok: false }, { ok: "yes" }]) {
+    assert.equal(clipboardCommandAcknowledged(ack), false, `${JSON.stringify(ack)} accepted`);
+  }
+});
+
+test("the copy toast never promises a wipe that was not scheduled", async () => {
+  const { copyToastMessage } = await import("../lib/clipboard-clear.js");
+  assert.equal(
+    copyToastMessage("Password", { ok: true, clearMs: CLIPBOARD_CLEAR_MS }),
+    "Password copied · clears in 12s"
+  );
+  // Falls back to the shared default when the worker omits the delay.
+  assert.match(copyToastMessage("Password", { ok: true }), /clears in 12s$/);
+  for (const ack of [null, { ok: false }]) {
+    assert.equal(
+      copyToastMessage("Card Number", ack),
+      "Card Number copied · auto-clear unavailable, clear it manually"
+    );
+  }
+});

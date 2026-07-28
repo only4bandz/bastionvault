@@ -5,6 +5,7 @@
 import { domainOf, matchesSite } from "./lib/match.js";
 import { generatePassword } from "./lib/generator.js";
 import { initTheme } from "./lib/theme.js";
+import { copyToastMessage } from "./lib/clipboard-clear.js";
 
 initTheme(); // apply dark/light before first paint
 
@@ -27,15 +28,21 @@ function toast(text) {
 async function copyText(text, label) {
   try {
     await navigator.clipboard.writeText(text);
-    toast(`${label} copied · clears in 12s`);
-    // The wipe is owned by the background/offscreen document, NOT this popup:
-    // the popup closes on click-away (FILL even calls window.close()), so a
-    // timer here would never fire. We hand the schedule to the worker and send
-    // no plaintext — only the signal. See offscreen.js.
-    send({ type: "CLIP_CLEAR" }).catch(() => {});
   } catch {
     toast("Copy failed");
+    return;
   }
+  // The wipe is owned by the background/offscreen document, NOT this popup:
+  // the popup closes on click-away (FILL even calls window.close()), so a
+  // timer here would never fire. We hand the schedule to the worker and send
+  // no plaintext — only the signal. See offscreen.js.
+  //
+  // Announce the auto-clear only once the worker confirms the timer is armed.
+  // Toasting "clears in 12s" first and discarding every failure meant a
+  // secret could sit on the clipboard indefinitely while the user believed
+  // it had been wiped.
+  const ack = await send({ type: "CLIP_CLEAR" }).catch(() => null);
+  toast(copyToastMessage(label, ack));
 }
 
 const IC_CHECK =

@@ -31,7 +31,10 @@ import { IDLE_DETECTION_SECONDS, shouldLockOnIdleState } from "./lib/idle-lock.j
 import { assertUnlockKdfPolicy } from "./lib/kdf-policy.js";
 import { revealFieldValue } from "./lib/reveal-policy.js";
 import { redactItem } from "./lib/item-redaction.js";
-import { CLIPBOARD_CLEAR_MS } from "./lib/clipboard-clear.js";
+import {
+  CLIPBOARD_CLEAR_MS,
+  clipboardCommandAcknowledged,
+} from "./lib/clipboard-clear.js";
 import { validContentMessage } from "./lib/content-message-policy.js";
 import { matchesSite } from "./lib/match.js";
 import { makeStagedUsername, stagedUsernameFor } from "./lib/staged-username.js";
@@ -492,6 +495,10 @@ async function takeLastUser(host) {
 
 // ── Offscreen document: owns the clipboard-clear timer (see offscreen.js) ──
 let offscreenReady;
+// Failures here used to be swallowed at every step, so a popup that had
+// already promised "clears in 12s" could leave the secret on the clipboard
+// forever with nothing to show for it. Each step now propagates, and the
+// caller decides what to tell the user.
 async function ensureOffscreen() {
   if (await chrome.offscreen.hasDocument()) return;
   if (!offscreenReady) {
@@ -501,7 +508,12 @@ async function ensureOffscreen() {
         reasons: ["CLIPBOARD"],
         justification: "Clear copied secrets from the clipboard after a delay.",
       })
-      .catch(() => {})
+      .catch(async (error) => {
+        // A concurrent creation wins the race often enough that "it already
+        // exists" is a success, not a failure.
+        if (await chrome.offscreen.hasDocument()) return;
+        throw error;
+      })
       .finally(() => {
         offscreenReady = null;
       });
@@ -509,22 +521,28 @@ async function ensureOffscreen() {
   await offscreenReady;
 }
 
-async function scheduleClipboardClear(delayMs) {
+// The offscreen document acknowledges every command it accepts; treat a
+// missing or negative ack as failure rather than assuming a timer exists.
+async function commandOffscreenClipboard(message) {
   await ensureOffscreen();
-  chrome.runtime
-    .sendMessage({ target: "offscreen-clipboard", type: "CLIP_SCHEDULE_CLEAR", delayMs })
-    .catch(() => {});
+  const ack = await chrome.runtime.sendMessage({ target: "offscreen-clipboard", ...message });
+  if (!clipboardCommandAcknowledged(ack)) {
+    throw new Error("The clipboard timer could not be reached.");
+  }
+}
+
+async function scheduleClipboardClear(delayMs) {
+  await commandOffscreenClipboard({ type: "CLIP_SCHEDULE_CLEAR", delayMs });
 }
 
 async function clearClipboardNow() {
-  await ensureOffscreen();
-  chrome.runtime
-    .sendMessage({ target: "offscreen-clipboard", type: "CLIP_CLEAR_NOW" })
-    .catch(() => {});
+  await commandOffscreenClipboard({ type: "CLIP_CLEAR_NOW" });
 }
 
 async function lock() {
-  await clearClipboardNow(); // copied secrets must not outlive the session
+  // Copied secrets must not outlive the session — but locking must happen
+  // even if the clipboard cannot be reached, so this stays best-effort.
+  await clearClipboardNow().catch(() => {});
   await clearPending(); // don't leave a staged plaintext password around
   lastUser = null;
   const area = await trustedSessionArea();
@@ -1060,8 +1078,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // The popup copied a secret and wants it wiped after the delay. The
           // popup's own timer dies when it closes, so the offscreen document
           // owns it. No plaintext crosses here — just the schedule signal.
-          await scheduleClipboardClear(CLIPBOARD_CLEAR_MS);
-          sendResponse({ ok: true });
+          // If the timer could not be armed the popup must say so instead of
+          // promising a wipe that will never happen.
+          try {
+            await scheduleClipboardClear(CLIPBOARD_CLEAR_MS);
+            sendResponse({ ok: true, clearMs: CLIPBOARD_CLEAR_MS });
+          } catch {
+            sendResponse({ ok: false, error: "clipboard-timer-unavailable" });
+          }
           break;
         }
         case "ITEM": {
