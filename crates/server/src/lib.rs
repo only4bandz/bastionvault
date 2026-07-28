@@ -5218,7 +5218,7 @@ impl Db {
         message_id: &str,
         recipient_id: &str,
         blob: &str,
-        expires_at: Option<i64>,
+        expires_at: i64,
         max: i64,
     ) -> Result<InboxInsert, DbError> {
         let message_id = message_id.to_owned();
@@ -5327,6 +5327,14 @@ fn purge_expired_rows(conn: &mut Connection, recipient_id: &str, now: i64) -> ru
         "DELETE FROM send_inbox
              WHERE recipient_id=?1 AND expires_at IS NOT NULL AND expires_at < ?2",
         params![recipient_id, now],
+    )?;
+    // Rows stored before every message carried a deadline. They are bounded
+    // by the same maximum lifetime, counted from delivery, so no inbox keeps
+    // an immortal row.
+    tx.execute(
+        "DELETE FROM send_inbox
+             WHERE recipient_id=?1 AND expires_at IS NULL AND created_at < ?2",
+        params![recipient_id, now.saturating_sub(MAX_SEND_TTL_SECS)],
     )?;
     tx.commit()?;
     Ok(())
@@ -5562,6 +5570,14 @@ async fn send_post(
     }) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "invalid expiration"));
     }
+    // Every stored message gets a deadline. A NULL one was never purged, so a
+    // handful of senders could permanently occupy a stranger's inbox: once at
+    // MAX_INBOX every later sender is refused, the oldest-first page hides any
+    // genuine message behind the padding, and only manual deletion recovers.
+    // Omitting an expiry now means "the maximum", not "forever".
+    let expires_at = body
+        .expires_at
+        .unwrap_or_else(|| now.saturating_add(MAX_SEND_TTL_SECS));
     // A single sender may consume only part of a recipient's aggregate budget.
     // Check this first: once that pair is blocked it cannot keep burning the
     // victim's shared inbound allowance.
@@ -5596,7 +5612,7 @@ async fn send_post(
             &body.message_id,
             &body.recipient_id,
             &blob_str,
-            body.expires_at,
+            expires_at,
             MAX_INBOX,
         )
         .await
