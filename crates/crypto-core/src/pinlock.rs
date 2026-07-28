@@ -134,7 +134,14 @@ pub struct LockedOpened {
 
 fn derive_lock_key(phrase: &[u8], salt: &[u8; SALT_LEN], kdf: KdfParams) -> Result<SecretKey> {
     let ikm = kdf::derive_master_key(phrase, salt, kdf)?; // Argon2id (SecretKey, zeroized on drop)
-    Ok(SecretKey::from_bytes(hkdf32(ikm.as_bytes(), D_PIN)))
+
+    // Same pattern as send.rs: wipe the by-value HKDF output once it has been
+    // copied into the self-zeroizing SecretKey, so the lock key does not
+    // linger in dead stack memory.
+    let mut key_bytes = hkdf32(ikm.as_bytes(), D_PIN);
+    let key = SecretKey::from_bytes(key_bytes);
+    key_bytes.zeroize();
+    Ok(key)
 }
 
 fn lock_aad(
