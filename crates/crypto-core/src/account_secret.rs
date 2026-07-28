@@ -77,7 +77,8 @@ impl AccountSecret {
         let mut payload = Zeroizing::new(Vec::with_capacity(ACCOUNT_SECRET_LEN + CHECKSUM_LEN));
         payload.extend_from_slice(&self.0);
         payload.extend_from_slice(&checksum(&self.0));
-        let body = BASE32_NOPAD.encode(&payload);
+        // The base32 body IS the secret (minus formatting); wipe it on drop.
+        let body = Zeroizing::new(BASE32_NOPAD.encode(&payload));
         let mut out = String::with_capacity(body.len() + body.len() / 5 + 3);
         out.push_str(VERSION_TAG);
         for (i, ch) in body.chars().enumerate() {
@@ -96,11 +97,13 @@ impl AccountSecret {
         if input.len() > MAX_FORMATTED_INPUT_LEN {
             return Err(CryptoError::Malformed);
         }
-        let cleaned: String = input
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect::<String>()
-            .to_ascii_uppercase();
+        // Normalize into a single wiped-on-drop buffer: the typed key is the
+        // secret itself, so no unwiped copy of it may escape (`collect` +
+        // `to_ascii_uppercase` used to leave two).
+        let mut cleaned = Zeroizing::new(String::with_capacity(input.len()));
+        for c in input.chars().filter(|c| c.is_ascii_alphanumeric()) {
+            cleaned.push(c.to_ascii_uppercase());
+        }
         let body = cleaned.strip_prefix(VERSION_TAG).unwrap_or(&cleaned);
         let bytes = Zeroizing::new(
             BASE32_NOPAD
