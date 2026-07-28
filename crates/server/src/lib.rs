@@ -181,6 +181,13 @@ const VERIFICATION_RESEND_SECONDS: i64 = 2 * 60;
 const MAX_CHALLENGES_GLOBAL_PER_MIN: u32 = 30;
 const MAX_CHALLENGES_PER_SOURCE_PER_MIN: u32 = 10;
 const MAX_CHALLENGES_PER_EMAIL_PER_MIN: u32 = 2;
+/// Standing daily allowance of verification mail per recipient mailbox. The
+/// per-minute bucket only bounds bursts, so an attacker rotating source
+/// addresses could otherwise direct one email at an arbitrary third-party
+/// mailbox every resend interval indefinitely, spending this deployment's
+/// SMTP reputation. Ten per day covers every legitimate retry pattern.
+const MAX_CHALLENGES_PER_EMAIL_PER_DAY: u32 = 10;
+const CHALLENGE_EMAIL_DAY: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_VERIFICATIONS_GLOBAL_PER_MIN: u32 = 120;
 const MAX_VERIFICATIONS_PER_SOURCE_PER_MIN: u32 = 30;
 const MAX_VERIFICATIONS_PER_TOKEN_PER_MIN: u32 = 5;
@@ -417,6 +424,27 @@ pub fn app_with_db_and_mailbox_verification(db_path: &str, origin: &str) -> Rout
         MAX_CONCURRENT_AUTH,
         RuntimeOptions {
             verification_origin: Some(origin.to_string()),
+            ..RuntimeOptions::default()
+        },
+    )
+}
+
+/// Test-only topology combining mailbox proof with custom authentication
+/// rate limits, so standing allowances can be exercised without waiting out
+/// the per-minute buckets.
+#[doc(hidden)]
+pub fn app_with_db_mailbox_verification_and_auth_rate_limits(
+    db_path: &str,
+    origin: &str,
+    limits: AuthRateLimits,
+) -> Router {
+    build_with_rate_limits(
+        DEFAULT_TOKEN_TTL,
+        db_path,
+        MAX_CONCURRENT_AUTH,
+        RuntimeOptions {
+            verification_origin: Some(origin.to_string()),
+            auth_rate_limits: limits,
             ..RuntimeOptions::default()
         },
     )
@@ -3209,6 +3237,13 @@ async fn request_registration_challenge(
         &email,
         "challenge-email",
         MAX_CHALLENGES_PER_EMAIL_PER_MIN,
+    )?;
+    rate_limit_with_window(
+        &st,
+        &email,
+        "challenge-email-day",
+        MAX_CHALLENGES_PER_EMAIL_PER_DAY,
+        CHALLENGE_EMAIL_DAY,
     )?;
     let mail = new_registration_mail(&email, origin, now_secs());
     match st
