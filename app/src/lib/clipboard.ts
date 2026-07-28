@@ -3,6 +3,15 @@ export type ClipboardWriter = Pick<Clipboard, "writeText">;
 /** How long a copied secret is allowed to linger on the OS clipboard. */
 export const SECRET_CLEAR_MS = 30_000;
 
+/**
+ * The Secret Key gets a longer window than an item password: the user is
+ * pasting it into offline storage (a printout note, another manager), which
+ * takes longer than a login form. But it must still expire — it is the
+ * highest-value credential in the system and previously stayed on the OS
+ * clipboard forever.
+ */
+export const SECRET_KEY_CLEAR_MS = 120_000;
+
 // One shared timer + sequence: a newer copy (secret or not, through these
 // helpers) must never be clobbered by an older copy's pending clear.
 let clearTimer: ReturnType<typeof setTimeout> | undefined;

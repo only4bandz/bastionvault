@@ -50,7 +50,7 @@ describe("copyWithFeedback", () => {
 });
 
 import { afterEach, beforeEach } from "vitest";
-import { clearPendingSecretCopy, copySecretWithFeedback, SECRET_CLEAR_MS } from "./clipboard";
+import { clearPendingSecretCopy, copySecretWithFeedback, SECRET_CLEAR_MS, SECRET_KEY_CLEAR_MS } from "./clipboard";
 
 describe("copySecretWithFeedback", () => {
   beforeEach(() => {
@@ -156,5 +156,34 @@ describe("copySecretWithFeedback", () => {
     expect(toast).toHaveBeenCalledWith("Password was not copied");
     await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS * 2);
     expect(clipboard.writeText).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("SECRET_KEY_CLEAR_MS", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("honors the longer Secret Key window and still expires", async () => {
+    const writes: string[] = [];
+    const clipboard: ClipboardWriter = {
+      writeText: vi.fn(async (text: string) => {
+        writes.push(text);
+      }),
+    };
+    const toast = vi.fn();
+
+    await copySecretWithFeedback("A1-XXXXX", "Secret Key", toast, clipboard, SECRET_KEY_CLEAR_MS);
+    expect(toast).toHaveBeenCalledWith("Secret Key copied — clears in 120s");
+
+    // The default secret window passing must NOT wipe the longer copy…
+    await vi.advanceTimersByTimeAsync(SECRET_CLEAR_MS);
+    expect(writes).toEqual(["A1-XXXXX"]);
+    // …but the Secret Key deadline must.
+    await vi.advanceTimersByTimeAsync(SECRET_KEY_CLEAR_MS - SECRET_CLEAR_MS);
+    expect(writes).toEqual(["A1-XXXXX", ""]);
   });
 });
