@@ -95,6 +95,41 @@ describe("Send sender identity presentation", () => {
   });
 });
 
+describe("Send passphrase prompting", () => {
+  const protectedBlob = { pw: { salt: "AA", mem_kib: 19456, iterations: 2, parallelism: 1 } };
+
+  it("prompts only when the blob actually carries a passphrase block", () => {
+    const account = { send_open_with_pins: vi.fn() } as unknown as Account;
+    expect(openMessage(account, [contact], protectedBlob).needsPass).toBe(true);
+    // WASM is not even consulted: the answer is in the blob.
+    expect(account.send_open_with_pins).not.toHaveBeenCalled();
+  });
+
+  it("never turns an undecryptable message into a passphrase prompt", () => {
+    // A junk blob the server dropped into the inbox. Prompting here would
+    // coax the user into typing an out-of-band passphrase into it.
+    const account = {
+      send_open_with_pins: () => {
+        throw new Error("aead");
+      },
+    } as unknown as Account;
+    const opened = openMessage(account, [contact], { body: "garbage" });
+
+    expect(opened.needsPass).toBeUndefined();
+    expect(opened.error).toMatch(/tampered/i);
+  });
+
+  it("reports a wrong passphrase distinctly from an untrusted message", () => {
+    const account = {
+      send_open_with_pins: () => {
+        throw new Error("aead");
+      },
+    } as unknown as Account;
+    const opened = openMessage(account, [contact], protectedBlob, "wrong");
+    expect(opened.error).toMatch(/wrong passphrase/i);
+  });
+});
+
 describe("encrypted Send contact state", () => {
   const bastionId = "A".repeat(26);
   const valid = {
