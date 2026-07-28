@@ -42,11 +42,10 @@ import {
   type VaultRollbackAnchor,
 } from "./lib/vault-anchor";
 import { canonicalAccountId } from "./lib/account-id";
+import { createLockSchedule, LOCK_TICK_MS, type LockSchedule } from "./lib/auto-lock";
 
 type Phase = "welcome" | "verify" | "reveal" | "unlock" | "vault";
 
-const AUTO_LOCK_MS = 10 * 60 * 1000; // lock after 10 minutes of inactivity
-const HIDDEN_GRACE_MS = 30 * 1000; // lock 30s after the tab is actually hidden
 const SESSION_ROTATION_MS = 10 * 60 * 1000;
 
 /** Vault items under this prefix hold Bastion Send state (identity, contacts),
@@ -260,31 +259,36 @@ export default function App(): JSX.Element {
   // hidden for a grace period. We deliberately do NOT lock on window `blur`
   // (it fires for the address bar, extensions, autofill, screenshots…), which
   // would kick the user out constantly.
+  // `lock` changes identity on every session rotation. The schedule is read
+  // through a ref so this effect can depend on `phase` alone: a re-mount must
+  // never hand the user a fresh 10 minutes.
+  const lockRef = useRef(lock);
+  useEffect(() => {
+    lockRef.current = lock;
+  }, [lock]);
+
   useEffect(() => {
     if (phase !== "vault") return;
-    let idle = window.setTimeout(lock, AUTO_LOCK_MS);
-    let hideTimer: number | undefined;
-    const reset = () => {
-      window.clearTimeout(idle);
-      idle = window.setTimeout(lock, AUTO_LOCK_MS);
-    };
-    const onVis = () => {
-      if (document.visibilityState === "hidden") {
-        hideTimer = window.setTimeout(lock, HIDDEN_GRACE_MS);
-      } else {
-        window.clearTimeout(hideTimer);
-      }
-    };
+    const schedule: LockSchedule = createLockSchedule(Date.now());
+    if (document.visibilityState === "hidden") {
+      // Entering the vault (or re-mounting) while already hidden must still
+      // start the grace countdown; the old code only armed it on transition.
+      schedule.visibility(true, Date.now());
+    }
+    const reset = () => schedule.activity(Date.now());
+    const onVis = () => schedule.visibility(document.visibilityState === "hidden", Date.now());
+    const tick = window.setInterval(() => {
+      if (schedule.expired(Date.now())) lockRef.current();
+    }, LOCK_TICK_MS);
     const acts = ["mousemove", "keydown", "click", "scroll", "touchstart"];
     acts.forEach((e) => window.addEventListener(e, reset, { passive: true }));
     document.addEventListener("visibilitychange", onVis);
     return () => {
-      window.clearTimeout(idle);
-      window.clearTimeout(hideTimer);
+      window.clearInterval(tick);
       acts.forEach((e) => window.removeEventListener(e, reset));
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [phase, lock]);
+  }, [phase]);
 
   // While a vault mutation is awaiting server confirmation, closing the tab
   // could silently drop the write (or leave an ambiguous half-committed CAS
