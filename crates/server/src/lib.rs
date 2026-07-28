@@ -2799,10 +2799,16 @@ impl Db {
     /// Delete every server-owned record for an account in one transaction.
     /// Messages already delivered to other recipients cannot be attributed to
     /// or recalled by the zero-knowledge server.
+    ///
+    /// `Immediate` (like every other mutation here): a deferred transaction
+    /// only takes the write lock at its first write, so under a concurrent
+    /// read-only connection (backup / ops-status) the mid-transaction lock
+    /// upgrade can fail with SQLITE_BUSY after statements already ran.
+    /// Failing up-front honors `busy_timeout` and keeps deletion all-or-nothing.
     async fn delete_account(&self, email: &str) -> Result<bool, DbError> {
         let email = email.to_owned();
         self.call_mutation(move |conn| {
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute(
                 "DELETE FROM send_inbox WHERE recipient_id IN (
                    SELECT bastion_id FROM send_directory WHERE email=?1
@@ -2833,7 +2839,7 @@ impl Db {
         self.call_mutation(move |conn| {
             let expected_revision = persisted_revision(expected_revision)?;
             let next_revision = persisted_revision(next_revision)?;
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let updated = tx.execute(
                 "UPDATE accounts SET vault_revision=?1 WHERE email=?2 AND vault_revision=?3",
                 params![next_revision, email, expected_revision],
@@ -5193,7 +5199,7 @@ impl Db {
 /// Deletes every message of `recipient_id` whose deadline has passed, refusing
 /// to act on rows whose stored timestamps are not self-consistent.
 fn purge_expired_rows(conn: &mut Connection, recipient_id: &str, now: i64) -> rusqlite::Result<()> {
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     {
         let mut stmt = tx.prepare(
             "SELECT created_at, expires_at FROM send_inbox
