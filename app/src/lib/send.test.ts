@@ -48,10 +48,12 @@ describe("Send sender identity presentation", () => {
     account: Account;
     pins: () => Record<string, unknown>;
   } {
-    const sendOpen = vi.fn(() => JSON.stringify(payload));
+    const sendOpen = vi.fn(
+      (_blob: string, _passphrase: string | undefined, _pins: string) => JSON.stringify(payload)
+    );
     return {
       account: { send_open_with_pins: sendOpen } as unknown as Account,
-      pins: () => JSON.parse(sendOpen.mock.calls[0][2] as string),
+      pins: () => JSON.parse(sendOpen.mock.calls[0][2]) as Record<string, unknown>,
     };
   }
 
