@@ -3117,8 +3117,8 @@ struct DeleteAccountRequest {
 }
 
 #[derive(Serialize)]
-struct LoginResponse {
-    token: String,
+struct LoginResponse<'a> {
+    token: &'a str,
 }
 
 /// Rotation carries no request fields: the replacement token is minted by the
@@ -3639,7 +3639,7 @@ async fn create_session(
     State(st): State<AppState>,
     Extension(source): Extension<ClientSource>,
     Json(mut req): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     req.email = canonical_account_id(&req.email)?;
     if !is_exact_b64(req.auth_secret.expose_b64(), AUTH_SECRET_BYTES) {
         return Err(ApiError(StatusCode::UNAUTHORIZED, "invalid credentials"));
@@ -3746,7 +3746,7 @@ async fn create_session(
             used: AtomicBool::new(false),
         },
     );
-    Ok(Json(LoginResponse { token }))
+    login_response(&token)
 }
 
 /// Authenticate before Axum extracts the larger transaction body. This keeps
@@ -4434,7 +4434,7 @@ async fn rotate_session(
     State(st): State<AppState>,
     headers: HeaderMap,
     Json(_): Json<RotateSessionRequest>,
-) -> Result<Json<LoginResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let predecessor_hash = session_token_hash(bearer_token(&headers)?);
     let email = require_auth(&st, &headers).await?;
     rate_limit(&st, &email, "session-control", 30)?;
@@ -4519,7 +4519,7 @@ fn install_rotated_session(
     predecessor_hash: [u8; 32],
     family: SessionFamily,
     now: Instant,
-) -> Result<Json<LoginResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     let overflow = || {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4580,7 +4580,7 @@ fn install_rotated_session(
             expires_at: grace_expires_at,
         },
     );
-    Ok(Json(LoginResponse { token }))
+    login_response(&token)
 }
 
 /// Revokes the current session family (logout), including a live successor if
@@ -4813,10 +4813,28 @@ fn verify_secret(secret: &str, phc: &str) -> bool {
 }
 
 /// Random 256-bit session token, hex-encoded.
-fn new_token() -> String {
+/// The raw bearer credential is wiped when the caller is done with it —
+/// including any collision-loop discard, which drops (and therefore
+/// zeroizes) automatically on reassignment.
+fn new_token() -> Zeroizing<String> {
     let mut bytes = Zeroizing::new([0u8; SESSION_TOKEN_BYTES]);
     OsRng.fill_bytes(bytes.as_mut());
-    data_encoding::HEXLOWER.encode(bytes.as_ref())
+    Zeroizing::new(data_encoding::HEXLOWER.encode(bytes.as_ref()))
+}
+
+/// Serializes the login/rotation body inside the handler so the only copy of
+/// the raw token that survives it is the response body itself (the bytes that
+/// go on the wire). `Json(LoginResponse { token })` kept an extra unwiped
+/// heap `String` alive past the handler.
+fn login_response(token: &str) -> Result<Response, ApiError> {
+    let body = serde_json::to_vec(&LoginResponse { token })
+        .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "serialize error"))?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response())
 }
 
 fn new_session_family_id() -> [u8; 16] {
