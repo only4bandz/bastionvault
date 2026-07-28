@@ -1195,8 +1195,12 @@ struct AppState {
     auth_rate_limits: AuthRateLimits,
     transport: Option<TransportPolicy>,
     verification_origin: Option<String>,
-    /// Per-deployment secret keying deterministic prelogin decoys.
-    prelogin_decoy_seed: [u8; 32],
+    /// Per-purpose subkeys derived from the persisted deployment seed. The
+    /// seed itself is never used directly: the decoy PRF publishes its raw
+    /// output to anonymous callers (an open keyed-PRF oracle), so it must not
+    /// share a key with the ETag MAC served to authenticated ones.
+    prelogin_decoy_key: [u8; 32],
+    vault_etag_key: [u8; 32],
     /// KDF parameters a decoy claims: this deployment's most common.
     prelogin_decoy_kdf: KdfParams,
 }
@@ -1289,7 +1293,10 @@ impl AppState {
             session_absolute_ttl,
             session_rotation_grace,
         } = options;
-        let (db, accounts, prelogin_decoy_seed) = Db::open(db_path);
+        let (db, accounts, seed) = Db::open(db_path);
+        let seed = Zeroizing::new(seed);
+        let prelogin_decoy_key = seed_subkey(&seed, b"bastion:v1:prelogin-decoy-key");
+        let vault_etag_key = seed_subkey(&seed, b"bastion:v1:vault-etag-key");
         let prelogin_decoy_kdf = modal_kdf(&accounts);
         let state = Self {
             inner: Arc::new(RwLock::new(Inner {
@@ -1312,7 +1319,8 @@ impl AppState {
             auth_rate_limits,
             transport,
             verification_origin,
-            prelogin_decoy_seed,
+            prelogin_decoy_key,
+            vault_etag_key,
             prelogin_decoy_kdf,
         };
         if let Some(config) = smtp {
@@ -2416,12 +2424,12 @@ impl Db {
             "INSERT OR IGNORE INTO server_meta(key,value) VALUES('prelogin_decoy_seed',?1)",
             [fresh.as_slice()],
         )?;
-        let stored: Vec<u8> = conn.query_row(
+        let stored = Zeroizing::new(conn.query_row(
             "SELECT value FROM server_meta WHERE key='prelogin_decoy_seed'",
             [],
-            |row| row.get(0),
-        )?;
-        stored.try_into().map_err(|_| rusqlite::Error::InvalidQuery)
+            |row| row.get::<_, Vec<u8>>(0),
+        )?);
+        <[u8; 32]>::try_from(stored.as_slice()).map_err(|_| rusqlite::Error::InvalidQuery)
     }
 
     fn open_connection(path: &str) -> (Connection, Option<File>) {
@@ -3563,7 +3571,7 @@ async fn prelogin(
             wrapped_vault_key: acc.wrapped_vault_key.clone(),
         })),
         None => Ok(Json(prelogin_decoy(
-            &st.prelogin_decoy_seed,
+            &st.prelogin_decoy_key,
             st.prelogin_decoy_kdf,
             &email,
         ))),
@@ -3771,9 +3779,25 @@ async fn authenticate_vault_transaction(
 /// deployment seed keeps validators stable across process restarts. The tag is
 /// weak because equivalent `HashMap` content may serialize in a different key
 /// order after restart; it intentionally asserts semantic, not byte identity.
-fn vault_etag(seed: &[u8; 32], email: &str, revision: u64) -> String {
+/// Domain-separated subkey of the persisted deployment seed.
+///
+/// One long-lived secret must not key two unrelated constructions. The
+/// prelogin decoy publishes its raw PRF output to unauthenticated callers, so
+/// it is effectively an open oracle on its key; the vault ETag MAC is served
+/// only to authenticated ones. Deriving both from the seed means a weakness
+/// or leak on one surface cannot be carried to the other.
+fn seed_subkey(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(seed).expect("SHA-256 HMAC accepts every key length");
+    mac.update(label);
+    let mut key = [0u8; 32];
+    key.copy_from_slice(mac.finalize().into_bytes().as_ref());
+    key
+}
+
+fn vault_etag(key: &[u8; 32], email: &str, revision: u64) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(key).expect("SHA-256 HMAC accepts every key length");
     mac.update(b"bastion:v1:vault-etag\0");
     mac.update(
         &u64::try_from(email.len())
@@ -3841,7 +3865,7 @@ async fn get_vault(State(st): State<AppState>, headers: HeaderMap) -> Result<Res
         .accounts
         .get(&email)
         .ok_or(ApiError(StatusCode::UNAUTHORIZED, "invalid token"))?;
-    let etag = vault_etag(&st.prelogin_decoy_seed, &email, acc.vault_revision);
+    let etag = vault_etag(&st.vault_etag_key, &email, acc.vault_revision);
     let etag_header = HeaderValue::from_str(&etag)
         .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "etag error"))?;
     if if_none_match_matches(&headers, &etag)? {
@@ -6105,6 +6129,24 @@ mod tests {
             HeaderValue::from_static("192.0.2.44, 198.51.100.8"),
         );
         assert_eq!(canonical_client_ip(&chained), None);
+    }
+
+    #[test]
+    fn seed_subkeys_are_domain_separated_and_deterministic() {
+        let seed = [7u8; 32];
+        let decoy = seed_subkey(&seed, b"bastion:v1:prelogin-decoy-key");
+        let etag = seed_subkey(&seed, b"bastion:v1:vault-etag-key");
+
+        // Stable across restarts (decoys and validators must not move)…
+        assert_eq!(decoy, seed_subkey(&seed, b"bastion:v1:prelogin-decoy-key"));
+        // …independent of each other, and of the seed itself.
+        assert_ne!(decoy, etag);
+        assert_ne!(decoy, seed);
+        assert_ne!(etag, seed);
+        assert_ne!(
+            decoy,
+            seed_subkey(&[8u8; 32], b"bastion:v1:prelogin-decoy-key")
+        );
     }
 
     #[test]
