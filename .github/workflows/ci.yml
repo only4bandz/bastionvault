@@ -88,9 +88,11 @@ jobs:
           xargs -0 -n1 node --check
       - name: Install extension image tooling
         run: |
-          if ! command -v convert >/dev/null; then
+          # ImageMagick rasterizes icon.svg through rsvg-convert, which the
+          # runner image does not ship alongside convert.
+          if ! command -v convert >/dev/null || ! command -v rsvg-convert >/dev/null; then
             sudo apt-get update
-            sudo apt-get install --no-install-recommends --yes imagemagick
+            sudo apt-get install --no-install-recommends --yes imagemagick librsvg2-bin
           fi
       - name: Build the extension
         run: bash extension/build.sh
