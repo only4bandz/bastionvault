@@ -12,14 +12,18 @@ client-side. One shared, test-covered crypto core (Rust → WASM) powers **two s
 
 ## About this project
 
-I built Bastion for myself: I wanted a password manager whose security model I
-could read, test, and fully understand, from the key derivation up to the
-browser extension. It started as a personal project and I have decided to open
-source it so that anyone can read it, learn from it, run it, or build on it.
+I built Bastion mainly for my own use: I wanted a password manager whose
+security model I could read, test, and fully understand, from the key
+derivation up to the browser extension. Rather than keep it to myself, I am
+giving it away for free to anyone who might find it interesting or useful:
+read it, learn from it, run it, fork it, or build on it.
 
-It is my first public project. It is shared as-is under the MIT license, with
-no warranty, and it has not been independently audited (see below). Feedback,
-issues, and pull requests are welcome.
+> **Project status:** Bastion is no longer under active development. What is
+> here works and is tested, but the remaining roadmap items are not planned,
+> and issues or pull requests may not get a timely answer. It is shared as-is
+> under the MIT license, with no warranty, and it has not been independently
+> audited (see below). Review it yourself before trusting it with real secrets.
+> You are very welcome to fork it and take it further.
 
 > **Audit status:** the repository has extensive deterministic, integration,
 > and WebAssembly tests plus internal security review artifacts. It has not yet
@@ -267,6 +271,9 @@ cargo run -p server          # listens on http://127.0.0.1:7777
 
 ## Roadmap
 
+This table records where the project stopped. Unchecked items are ideas, not
+commitments.
+
 | # | Step | Status |
 |---|-------|------|
 | 1 | Crypto core (Argon2id, KDF policy, AEAD, key wrapping) | ✅ Done |
@@ -278,7 +285,7 @@ cargo run -p server          # listens on http://127.0.0.1:7777
 | 7 | Web app (vault, generator, health, import, card/BIN detection) | ✅ Done |
 | 8 | Chrome extension (autofill, save-on-signup, keep-unlock) | ✅ Done |
 | 9 | **Bastion Send** — E2E notes (crypto, server, both UIs) | ✅ Done |
-| 10 | Bastion Send polish (QR address, unread counts) | 🚧 In progress |
+| 10 | Bastion Send polish (QR address, unread counts) | 🚧 Partial, not planned |
 | 11 | Encrypted folders · restorable trash · k-anonymous password breach scan | ✅ Done |
 | 12 | Email masking relay/provider integration | ⬜ Architecture decision required |
 | 13 | TOTP 2FA · FIDO2 / WebAuthn keys | ⬜ |
@@ -315,10 +322,10 @@ Toolchain: Rust 1.91 with the `wasm32-unknown-unknown` target, `wasm-pack`
 
 ## Contributing
 
-Issues and pull requests are welcome. Before opening a pull request, run
-`bash scripts/verify-all.sh` and make sure every gate passes. For anything that
-changes the cryptography, the trust model, or the server API, please open an
-issue first so the design can be discussed.
+The project is not actively maintained, so the best way to build on it is to
+fork it. Issues and pull requests are still open, but a response is not
+guaranteed. If you do send a pull request, run `bash scripts/verify-all.sh`
+first and make sure every gate passes.
 
 Please do not report vulnerabilities in public issues. Follow
 [`SECURITY.md`](SECURITY.md) instead.
