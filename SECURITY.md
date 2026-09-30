@@ -2,9 +2,10 @@
 
 ## Supported versions
 
-Bastion is pre-1.0 software. Security fixes are applied to the latest commit on
-`main`; older commits, development branches, and self-built historical releases
-are not supported.
+Bastion is pre-1.0 software and is no longer under active development. Any
+security fix lands on the latest commit of `main` only, on a best-effort basis
+with no guaranteed response time; older commits and self-built historical
+releases are not supported.
 
 The server is currently a development/reference backend and is not approved
 for Internet-facing production use. See the production-readiness warning in
