@@ -26,21 +26,21 @@ fn browser_kdf_policy_rejects_unbounded_work_before_derivation() {
     assert!(default_lock_kdf().validate_for_unlock().is_ok());
 
     assert!(register_with(
-        "pw",
+        "pw".to_string(),
         KdfParams::MAX_MEM_KIB + 1,
         KdfParams::MIN_ITERATIONS,
         KdfParams::MIN_PARALLELISM,
     )
     .is_err());
     assert!(register_with(
-        "pw",
+        "pw".to_string(),
         KdfParams::MIN_MEM_KIB,
         KdfParams::MAX_ITERATIONS + 1,
         KdfParams::MIN_PARALLELISM,
     )
     .is_err());
     assert!(register_with(
-        "pw",
+        "pw".to_string(),
         KdfParams::MIN_MEM_KIB,
         KdfParams::MIN_ITERATIONS,
         KdfParams::MAX_PARALLELISM + 1,
@@ -50,16 +50,16 @@ fn browser_kdf_policy_rejects_unbounded_work_before_derivation() {
 
 #[wasm_bindgen_test]
 fn pinned_send_open_never_returns_plaintext_after_verification_failure() {
-    let mut recipient = register_with("recipient", MEM_KIB, ITERS, PAR).unwrap();
+    let mut recipient = register_with("recipient".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     recipient.create_send_identity().unwrap();
     let recipient_public = recipient.send_identity_public().unwrap();
 
-    let mut sender = register_with("sender", MEM_KIB, ITERS, PAR).unwrap();
+    let mut sender = register_with("sender".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     sender.create_send_identity().unwrap();
     let sender_public = sender.send_identity_public().unwrap();
     let blob = sender
         .send_seal(
-            "classified",
+            "classified".to_string(),
             "RECIPIENT",
             &recipient_public,
             None,
@@ -98,7 +98,7 @@ fn reveal_sk(reveal_json: &str) -> String {
 fn entropy_and_roundtrip_in_wasm() {
     // register_with generates a salt, a vault key, and a Secret Key via the
     // CSPRNG: running without panicking proves that getrandom/js works.
-    let mut account = register_with("master pw", MEM_KIB, ITERS, PAR).unwrap();
+    let mut account = register_with("master pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     let reg = account.registration_json();
     let sk = reveal_sk(&account.reveal_secret("alice@example.com").unwrap());
     assert!(sk.starts_with("A1-"));
@@ -106,24 +106,24 @@ fn entropy_and_roundtrip_in_wasm() {
     let blob = account.encrypt_item("hunter2", "login-1").unwrap();
 
     // Unlock within the same wasm context.
-    let reopened = unlock("master pw", &sk, &reg).unwrap();
+    let reopened = unlock("master pw".to_string(), sk.clone(), &reg).unwrap();
     let plain = reopened.decrypt_item(&blob, "login-1").unwrap();
     assert_eq!(plain, "hunter2");
 }
 
 #[wasm_bindgen_test]
 fn wrong_secret_key_fails_in_wasm() {
-    let account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let account = register_with("pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     let reg = account.registration_json();
     // Another valid but different Secret Key must not unlock.
-    let mut other_acct = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let mut other_acct = register_with("pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     let other = reveal_sk(&other_acct.reveal_secret("bob@example.com").unwrap());
-    assert!(unlock("pw", &other, &reg).is_err());
+    assert!(unlock("pw".to_string(), other.clone(), &reg).is_err());
 }
 
 #[wasm_bindgen_test]
 fn lock_zeroizes_vault_so_decryption_fails() {
-    let mut account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let mut account = register_with("pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     let blob = account.encrypt_item("hunter2", "login-1").unwrap();
     assert!(!account.is_locked());
     assert!(!account.registration_json().is_empty());
@@ -143,25 +143,25 @@ fn lock_zeroizes_vault_so_decryption_fails() {
 
 #[wasm_bindgen_test]
 fn session_rehydrate_and_private_identity_import_roundtrip() {
-    let mut account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let mut account = register_with("pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     let item = account.encrypt_item("hunter2", "login-1").unwrap();
     let identity_blob = account.create_send_identity().unwrap();
     let public = account.send_identity_public().unwrap();
     let session = account.export_session().unwrap();
 
-    let mut restored = rehydrate(&session).unwrap();
+    let mut restored = rehydrate(session.clone()).unwrap();
     assert_eq!(restored.decrypt_item(&item, "login-1").unwrap(), "hunter2");
     restored.load_send_identity(&identity_blob).unwrap();
     assert_eq!(restored.send_identity_public().unwrap(), public);
 
     let mut malformed: serde_json::Value = serde_json::from_str(&session).unwrap();
     malformed["vault_key"] = serde_json::Value::String(B64.encode([0u8; 31]));
-    assert!(rehydrate(&serde_json::to_string(&malformed).unwrap()).is_err());
+    assert!(rehydrate(serde_json::to_string(&malformed).unwrap()).is_err());
 }
 
 #[wasm_bindgen_test]
 fn reveal_secret_is_one_shot() {
-    let mut account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let mut account = register_with("pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     // First reveal succeeds and returns both fields.
     let first = account.reveal_secret("alice@example.com").unwrap();
     assert!(reveal_sk(&first).starts_with("A1-"));
@@ -171,18 +171,18 @@ fn reveal_secret_is_one_shot() {
 
 #[wasm_bindgen_test]
 fn unlocked_account_retains_no_secret() {
-    let mut account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let mut account = register_with("pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     let reg = account.registration_json();
     let sk = reveal_sk(&account.reveal_secret("alice@example.com").unwrap());
 
     // An Account obtained from unlock never holds the Secret Key.
-    let mut reopened = unlock("pw", &sk, &reg).unwrap();
+    let mut reopened = unlock("pw".to_string(), sk.clone(), &reg).unwrap();
     assert!(reopened.reveal_secret("alice@example.com").is_err());
 }
 
 #[wasm_bindgen_test]
 fn manifest_bindings_roundtrip_and_rollback_in_wasm() {
-    let account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let account = register_with("pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     let a = account.encrypt_item("a", "a").unwrap();
     let b = account.encrypt_item("b", "b").unwrap();
     let items = format!("{{\"b\":{b},\"a\":{a}}}");
@@ -221,7 +221,7 @@ fn manifest_bindings_roundtrip_and_rollback_in_wasm() {
 
 #[wasm_bindgen_test]
 fn create_send_identity_refuses_to_overwrite() {
-    let mut account = register_with("pw", MEM_KIB, ITERS, PAR).unwrap();
+    let mut account = register_with("pw".to_string(), MEM_KIB, ITERS, PAR).unwrap();
     account.create_send_identity().unwrap();
     let first_public = account.send_identity_public().unwrap();
 
