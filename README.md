@@ -9,6 +9,10 @@ client-side. One shared, test-covered crypto core (Rust → WASM) powers **two s
 [![ci](https://github.com/only4bandz/bastionvault/actions/workflows/ci.yml/badge.svg)](https://github.com/only4bandz/bastionvault/actions/workflows/ci.yml)
 [![security-audit](https://github.com/only4bandz/bastionvault/actions/workflows/security-audit.yml/badge.svg)](https://github.com/only4bandz/bastionvault/actions/workflows/security-audit.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.91](https://img.shields.io/badge/rust-1.91-dea584?logo=rust&logoColor=white)](Cargo.toml)
+[![WebAssembly](https://img.shields.io/badge/target-wasm32-654ff0?logo=webassembly&logoColor=white)](crates/crypto-wasm)
+[![Zero-knowledge](https://img.shields.io/badge/security-zero--knowledge-0a7d4f)](#security-model)
+[![Status: not actively maintained](https://img.shields.io/badge/status-not_actively_maintained-lightgrey)](#about-this-project)
 
 ## About this project
 
@@ -34,6 +38,28 @@ read it, learn from it, run it, fork it, or build on it.
 
 ## Security model
 
+```mermaid
+flowchart TB
+    classDef user fill:#1f2937,stroke:#93c5fd,color:#f9fafb
+    classDef key fill:#111827,stroke:#fbbf24,color:#fde68a
+    classDef server fill:#3f1d1d,stroke:#f87171,color:#fecaca
+    classDef data fill:#052e16,stroke:#4ade80,color:#bbf7d0
+
+    MP["Master password"]:::user
+    SK["Secret Key, 128-bit, held by the user"]:::user
+    MP -- "Argon2id (salt, 64 MiB, 3 passes)" --> MK["Master key"]:::key
+    SK -- "HKDF-Extract salt" --> MK
+    MK -- HKDF --> WK["Wrap key"]:::key
+    MK -- HKDF --> AS["Auth secret"]:::key
+    WK -- wraps --> VK["Vault key, random 256-bit"]:::key
+    VK -- "XChaCha20-Poly1305" --> ITEMS["Encrypted items + integrity manifest"]:::data
+    AS -- "proves identity, decrypts nothing" --> SRV[("Server: opaque blobs + Argon2id hash of the auth secret")]:::server
+    ITEMS --> SRV
+```
+
+<details>
+<summary>Same diagram as plain text</summary>
+
 ```
 master password ──Argon2id(salt, 64MiB)──► master key
                                               │
@@ -47,6 +73,8 @@ master password ──Argon2id(salt, 64MiB)──► master key
                           ▼
         vault key (random 256-bit) ──encrypts──► all items
 ```
+
+</details>
 
 - **Argon2id** (64 MiB, 3 passes) protects against offline brute-force.
 - Browser WASM rejects attacker-supplied Argon2 parameters above 128 MiB,
@@ -105,6 +133,32 @@ non-enumerable **Bastion address** (128-bit, base32). Available in both the
   rate-limited before any server-side Argon2 work begins.
 
 Design + threat model: [`docs/bastion-send-design.md`](docs/bastion-send-design.md).
+
+## Engineering highlights
+
+What this project set out to prove, and what it taught me:
+
+- **One crypto core, two surfaces.** `crypto-core` is pure Rust with
+  `unsafe_code = "forbid"`, compiled to `wasm32-unknown-unknown` and consumed
+  unchanged by the React app and the MV3 extension. Round-trip, known-answer,
+  and in-WebAssembly tests pin the primitives so a dependency upgrade cannot
+  silently change an output and orphan existing vaults.
+- **Design for a malicious server.** Per-item AEAD is not enough: the encrypted
+  integrity manifest, the monotonic sequence, compare-and-swap vault
+  transactions, and non-secret rollback checkpoints on the client turn
+  deletion, injection, and replay by the server into detectable failures.
+- **Secrets have a lifecycle in the browser.** Vault keys live in WASM memory
+  and are zeroized on lock; the extension's service worker is the only context
+  that decrypts; clipboard, reveal, print, back/forward cache, and spell-check
+  paths are each closed explicitly, and CI guards forbid browser-side secret
+  storage.
+- **A small server can still be strict.** Axum plus SQLite in WAL mode with
+  `synchronous=FULL`, one dedicated storage thread behind a bounded queue,
+  owner-only `0600` database files, an exclusive instance lock, fail-closed
+  production configuration, and rate limits applied before any Argon2id work.
+- **Supply chain as part of the threat model.** Every GitHub Action is pinned
+  to a commit, the pin guard tests itself, CI tokens are read-only, and
+  RustSec and npm advisories are checked weekly.
 
 ## Structure
 
