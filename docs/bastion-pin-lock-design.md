@@ -26,18 +26,17 @@ stored anywhere**.
   it (new phrase); **the locked copies are destroyed**.
 - A confirmation dialog with the §2 warning is shown at creation.
 
-**Confirmation copy (FR):**
-> **⚠️ Phrase de verrouillage — à lire avant de continuer**
-> Les messages reçus de ce contact seront re-chiffrés sous cette phrase.
-> • La phrase n'est **stockée nulle part**. Si tu l'oublies, **tu ne pourras
->   plus lire** ces copies verrouillées — elles seront perdues.
-> • Une phrase **courte peut être cassée** par quelqu'un qui vole ta copie
->   verrouillée. Utilise **au moins 8 caractères**, idéalement une phrase. Pour
->   une vraie confidentialité, demande à l'expéditeur d'ajouter un **passphrase
->   d'envoi** (plus fort).
-> • La phrase **ne peut pas être changée** : pour en changer, supprime puis
->   recrée le contact (les copies verrouillées actuelles seront détruites).
-> [ Annuler ]  [ J'ai compris — activer ]
+**Confirmation copy:**
+> **⚠️ Lock phrase: read this before continuing**
+> Messages received from this contact will be re-encrypted under this phrase.
+> • The phrase is **not stored anywhere**. If you forget it, **you will no
+>   longer be able to read** these locked copies. They will be lost.
+> • A **short phrase can be cracked** by someone who steals your locked copy.
+>   Use **at least 8 characters**, ideally a full phrase. For real
+>   confidentiality, ask the sender to add a **send passphrase** (stronger).
+> • The phrase **cannot be changed**: to change it, delete and re-create the
+>   contact (the current locked copies will be destroyed).
+> [ Cancel ]  [ I understand, enable ]
 
 ## 2. Threat model — the precise guarantee (honest)
 

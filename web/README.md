@@ -7,16 +7,16 @@ client-side; the "Server" panel only shows opaque blobs.
 ## Run
 
 ```bash
-# 1. Pré-requis (une fois)
+# 1. Prerequisites (once)
 rustup target add wasm32-unknown-unknown
 curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-# 2. Compiler le module WASM (génère web/pkg/, non versionné)
+# 2. Build the WASM module (generates web/pkg/, which is gitignored)
 ./web/build.sh
 
-# 3. Servir (les modules ES imposent http://, pas file://)
+# 3. Serve it (ES modules require http://, not file://)
 cd web && python3 -m http.server 8080
-# → ouvrir http://localhost:8080
+# then open http://localhost:8080
 ```
 
 ## What the demo shows
@@ -28,7 +28,8 @@ cd web && python3 -m http.server 8080
 3. **Unlock** on "another device": you need both the master password **AND** the
    Secret Key. Without both, the vault is unreadable.
 
-The same `crypto-core` will power the full web app and the Chrome extension.
+The same `crypto-core` powers the full web app ([`app/`](../app)) and the
+Chrome extension ([`extension/`](../extension)).
 
 ## Browser isolation
 

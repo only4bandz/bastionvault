@@ -6,6 +6,25 @@ client-side. One shared, test-covered crypto core (Rust → WASM) powers **two s
 **web app** (React + TypeScript) and a **Chrome extension** (MV3) — plus
 **Bastion Send**, end-to-end encrypted notes between users.
 
+[![ci](https://github.com/only4bandz/bastionvault/actions/workflows/ci.yml/badge.svg)](https://github.com/only4bandz/bastionvault/actions/workflows/ci.yml)
+[![security-audit](https://github.com/only4bandz/bastionvault/actions/workflows/security-audit.yml/badge.svg)](https://github.com/only4bandz/bastionvault/actions/workflows/security-audit.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+## About this project
+
+I built Bastion mainly for my own use: I wanted a password manager whose
+security model I could read, test, and fully understand, from the key
+derivation up to the browser extension. Rather than keep it to myself, I am
+giving it away for free to anyone who might find it interesting or useful:
+read it, learn from it, run it, fork it, or build on it.
+
+> **Project status:** Bastion is no longer under active development. What is
+> here works and is tested, but the remaining roadmap items are not planned,
+> and issues or pull requests may not get a timely answer. It is shared as-is
+> under the MIT license, with no warranty, and it has not been independently
+> audited (see below). Review it yourself before trusting it with real secrets.
+> You are very welcome to fork it and take it further.
+
 > **Audit status:** the repository has extensive deterministic, integration,
 > and WebAssembly tests plus internal security review artifacts. It has not yet
 > undergone an independent third-party security audit. The frozen
@@ -96,7 +115,8 @@ crates/server/        Zero-knowledge Axum API + SQLite persistence (accounts, va
 app/                  Web app — React + TypeScript (Vite). Unlock, vault, generator, health, Send.
 extension/            Chrome extension (MV3) — background worker owns the vault key; CSP-safe popup.
 web/                  Original standalone WASM demo (encrypt/decrypt in the browser).
-docs/                 Design docs (Bastion Send spec + UI implementation plan).
+docs/                 Design docs, ADRs, and the production, mail, and audit runbooks.
+scripts/              Validation gates, CI guards, and release/audit tooling.
 ```
 
 ### Server — endpoints
@@ -251,6 +271,9 @@ cargo run -p server          # listens on http://127.0.0.1:7777
 
 ## Roadmap
 
+This table records where the project stopped. Unchecked items are ideas, not
+commitments.
+
 | # | Step | Status |
 |---|-------|------|
 | 1 | Crypto core (Argon2id, KDF policy, AEAD, key wrapping) | ✅ Done |
@@ -262,7 +285,7 @@ cargo run -p server          # listens on http://127.0.0.1:7777
 | 7 | Web app (vault, generator, health, import, card/BIN detection) | ✅ Done |
 | 8 | Chrome extension (autofill, save-on-signup, keep-unlock) | ✅ Done |
 | 9 | **Bastion Send** — E2E notes (crypto, server, both UIs) | ✅ Done |
-| 10 | Bastion Send polish (QR address, unread counts) | 🚧 In progress |
+| 10 | Bastion Send polish (QR address, unread counts) | 🚧 Partial, not planned |
 | 11 | Encrypted folders · restorable trash · k-anonymous password breach scan | ✅ Done |
 | 12 | Email masking relay/provider integration | ⬜ Architecture decision required |
 | 13 | TOTP 2FA · FIDO2 / WebAuthn keys | ⬜ |
@@ -282,7 +305,13 @@ cd app && bash build-wasm.sh && npm install && npm run dev
 # Chrome extension (MV3)
 cd extension && ./build.sh                   # build the WASM module
 # then load `extension/` unpacked at chrome://extensions
+
+# every gate CI runs, in one command
+bash scripts/verify-all.sh
 ```
+
+Toolchain: Rust 1.91 with the `wasm32-unknown-unknown` target, `wasm-pack`
+0.13.1, and Node.js 22.
 
 > ⚠️ The server is **not production-ready** until the documented TLS ingress,
 > real-provider mailbox, off-host backup, alert-delivery, capacity, and
@@ -290,3 +319,19 @@ cd extension && ./build.sh                   # build the WASM module
 > stateful controls remain process-local; the exclusive
 > instance lock and isolated SQLite owner reject horizontal replicas rather
 > than making them safe.
+
+## Contributing
+
+The project is not actively maintained, so the best way to build on it is to
+fork it. Issues and pull requests are still open, but a response is not
+guaranteed. If you do send a pull request, run `bash scripts/verify-all.sh`
+first and make sure every gate passes.
+
+Please do not report vulnerabilities in public issues. Follow
+[`SECURITY.md`](SECURITY.md) instead.
+
+## License
+
+Bastion is released under the [MIT License](LICENSE). Bundled third-party
+fonts and data keep their own licenses, listed in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
